@@ -22,5 +22,3 @@ __pycache__/
 *~
 
 # External dependencies
-src/ROS-TCP-Endpoint/
-MG400_Mock/
