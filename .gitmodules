@@ -1,0 +1,7 @@
+[submodule "src/ROS-TCP-Endpoint"]
+	path = src/ROS-TCP-Endpoint
+	url = https://github.com/Unity-Technologies/ROS-TCP-Endpoint.git
+	branch = main-ros2
+[submodule "MG400_Mock"]
+	path = MG400_Mock
+	url = https://github.com/HarvestX/MG400_Mock.git
