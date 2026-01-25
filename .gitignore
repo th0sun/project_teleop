@@ -1,0 +1,26 @@
+# ROS2 build system
+/build
+/install
+/log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Colcon
+.colcon_install_layout
+
+# Temporary
+*.swp
+*~
+
+# External dependencies
+src/ROS-TCP-Endpoint/
+MG400_Mock/

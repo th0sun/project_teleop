@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+🎮 Motion Planner
+วางแผนการเคลื่อนที่และคำนวณความเร็ว
+
+ใช้งาน:
+    planner = MotionPlanner()
+    command = planner.plan_motion(target_joints, current_joints)
+"""
+
+import numpy as np
+from mg400_controller.common.config.robot_config import CONTROL_MODE, SPATIAL_THRESHOLD
+from mg400_controller.common.config.motion_config import *
+
+class MotionPlanner:
+    def __init__(self, logger):
+        self.logger = logger
+        self.last_command = None
+    
+    def should_skip_motion(self, q_target, q_current):
+        """
+        ตรวจสอบว่าควรข้ามคำสั่งนี้หรือไม่
+        (เพราะเคลื่อนที่น้อยเกินไป)
+        """
+        if self.last_command is None:
+            return False
+        
+        diff = np.abs(q_target - self.last_command)
+        if np.max(diff) < SPATIAL_THRESHOLD:
+            return True
+        
+        return False
+    
+    def calculate_speed(self, q_target, q_current):
+        """
+        คำนวณความเร็วที่เหมาะสมตามระยะทาง
+        
+        Returns:
+            speed_percent (0-100)
+        """
+        distance = np.linalg.norm(q_target - q_current)
+        
+        if distance > SPEED_FAR_THRESHOLD:
+            return SPEED_FAR
+        elif distance > SPEED_MEDIUM_THRESHOLD:
+            return SPEED_MEDIUM
+        else:
+            return SPEED_NEAR
+    
+    def format_command(self, q_rad, speed_percent):
+        """
+        สร้างคำสั่งตามรูปแบบที่กำหนด
+        
+        Returns:
+            command string
+        """
+        q_deg = np.degrees(q_rad)
+        
+        if CONTROL_MODE == "jointmovj":
+            return (f"JointMovJ({q_deg[0]:.4f},{q_deg[1]:.4f},"
+                   f"{q_deg[2]:.4f},{q_deg[3]:.4f},"
+                   f"SpeedJ={speed_percent},AccJ={ACC_VALUE},CP={CP_VALUE})")
+        
+        elif CONTROL_MODE == "movj":
+            return (f"MovJ({q_deg[0]:.4f},{q_deg[1]:.4f},"
+                   f"{q_deg[2]:.4f},{q_deg[3]:.4f},"
+                   f"SpeedJ={speed_percent},AccJ={ACC_VALUE},CP={CP_VALUE})")
+        
+        elif CONTROL_MODE == "movl":
+            return (f"MovL({q_deg[0]:.4f},{q_deg[1]:.4f},"
+                   f"{q_deg[2]:.4f},{q_deg[3]:.4f},"
+                   f"SpeedJ={speed_percent},AccJ={ACC_VALUE},CP={CP_VALUE})")
+        
+        return ""
+    
+    def plan_motion(self, q_target, q_current):
+        """
+        วางแผนการเคลื่อนที่
+        
+        Returns:
+            (command_string, speed_percent, distance) หรือ (None, None, None) ถ้าควรข้าม
+        """
+        # ข้ามถ้าเคลื่อนที่น้อยเกินไป
+        if self.should_skip_motion(q_target, q_current):
+            return None, None, None
+        
+        # คำนวณความเร็ว
+        distance = np.linalg.norm(q_target - q_current)
+        speed = self.calculate_speed(q_target, q_current)
+        
+        # สร้างคำสั่ง
+        command = self.format_command(q_target, speed)
+        
+        # บันทึกคำสั่งล่าสุด
+        self.last_command = q_target.copy()
+        
+        return command, speed, distance
