@@ -16,19 +16,34 @@ MAX_SPEED_DEG = 300.0  # Maximum joint speed (degrees/sec)
 ACC_VALUE = 100        # Acceleration value (0-100)
 CP_VALUE = 80          # Continuous Path value (smoothness: 0-100)
 
-# 📊 Queue Management
-QUEUE_LIMIT = 5        # Maximum commands in queue
-QUEUE_LEAK_INTERVAL = 0.03  # Leak rate (seconds) - ลดคิวทุก 30ms
-
 # 🎮 Adaptive Speed Thresholds
 # กำหนดความเร็วตามระยะห่างจากเป้าหมาย
-SPEED_FAR_THRESHOLD = 0.1      # > 0.1 rad → 100% speed
-SPEED_MEDIUM_THRESHOLD = 0.05  # > 0.05 rad → 90% speed
-# < 0.05 rad → 70% speed (ใกล้เป้าหมาย ช้าลง)
+SPEED_FAR_THRESHOLD = 0.1      # > 0.1 rad → use SPEED_FAR
+SPEED_MEDIUM_THRESHOLD = 0.05  # > 0.05 rad → use SPEED_MEDIUM
+# < 0.05 rad → use SPEED_NEAR (ใกล้เป้าหมาย ช้าลง)
 
 SPEED_FAR = 100      # %
-SPEED_MEDIUM = 90    # %
-SPEED_NEAR = 70      # %
+SPEED_MEDIUM = 100   # %
+SPEED_NEAR = 100     # %
+
+#  Real-Time Control Parameters (Proximity + Velocity-Based Stuck Detection)
+# ปรับค่านี้เพื่อควบคุมความไวและความเร็วในการตอบสนอง
+PROXIMITY_THRESHOLD = 0.01       # rad (~0.6°) - ส่งคำสั่งเมื่อหุ่นอยู่ใกล้ target เดิม
+STUCK_VELOCITY_THRESHOLD = 0.005 # rad/s - ความเร็วต่ำกว่านี้ถือว่า "นิ่ง"
+STUCK_TIME_THRESHOLD = 0.15      # seconds - ต้องนิ่งนานเท่านี้ถึงจะ trigger stuck recovery
+TARGET_CHANGE_THRESHOLD = 0.02   # rad (~1.1°) - Target ต้องเปลี่ยนอย่างน้อยเท่านี้
+
+# 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
+MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection
+                                 # Analysis: 69% @ 0.003, 95%+ @ 0.002
+
+# 🎯 Validation Thresholds (Strict Arrival Criteria)
+# Data analysis showed false positives with loose criteria
+# Old: 100% pass rate with errors up to 3° → New: strict filtering
+VALID_FINAL_ERROR = 0.005        # rad (~0.3°) - Max total error for valid arrival
+VALID_MAX_JOINT_ERROR = 0.008    # rad (~0.5°) - Max single joint error
+VALID_VELOCITY = 0.003           # rad/s - Max velocity (must be nearly stopped)
+VALID_PER_JOINT_LIMIT = 0.01     # rad (~0.6°) - All joints must be within this
 
 # 📡 ROS Topics
 UNITY_TOPIC = "/unity/joint_cmd"  # รับคำสั่งจาก Unity/VR

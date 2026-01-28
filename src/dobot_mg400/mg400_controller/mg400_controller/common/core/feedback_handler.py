@@ -94,6 +94,11 @@ class FeedbackHandler:
         self.last_valid_joints = q_rad
         self.current_position = q_rad
         
+        # --- Parse Robot Mode ---
+        # Offset 24 is Robot Mode (uint64)
+        OFFSET_ROBOT_MODE = 24
+        self.robot_mode = struct.unpack_from('<Q', data, OFFSET_ROBOT_MODE)[0]
+        
         # --- คำนวณ Passive Joints ---
         all_joints = self.kinematics.calculate_passive_joints(q_rad)
         
@@ -104,6 +109,10 @@ class FeedbackHandler:
         msg.position = all_joints['positions']
         
         self.publisher.publish(msg)
+    
+    def get_robot_mode(self):
+        """Thread-safe access to robot mode"""
+        return getattr(self, 'robot_mode', 0)
     
     def stop(self):
         """หยุด thread"""
