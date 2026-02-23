@@ -97,7 +97,7 @@ class TeleopNode(Node):
         
         # Teleop Controller (The Brain)
         self.controller = TeleopController(self.validator, self.planner, self.get_logger())
-        self.predictor = TargetPredictor(dt=0.02, prediction_horizon_sec=0.08, logger=self.get_logger())
+        self.predictor = TargetPredictor(default_dt=0.02, prediction_horizon_sec=0.08, logger=self.get_logger())
         
         self.latest_target = np.zeros(4)
         self.current_cmd_target = np.zeros(4)
