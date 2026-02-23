@@ -52,3 +52,9 @@ RVIZ_TOPIC  = "/joint_states"     # ส่งสถานะไปแสดง�
 DEBUG_TOPIC = "/teleop/debug"     # Debug messages
 SAFETY_TOPIC = "/mg400/safety_status" # Safety status reporting
 HAPTIC_TOPIC = "/mg400/haptic_feedback" # Collision-based haptic feedback for VR
+SUCTION_TOPIC = "/vr/suction_cmd" # สั่งเปิด/ปิดหัวดูดจาก Unity (std_msgs/Bool)
+
+# 🛠️ Hardware Configuration
+SUCTION_DO_PORT = 9  # หมายเลขพอร์ต Digital Output ที่ต่อกับหัวดูด (ปรับแก้ได้ทีหลัง)
+SMART_SUCTION_ENABLED = True        # True = รอหุ่นวิ่งถึงเป้าหมายก่อนถึงสั่งดูด, False = สั่งดูดทันทีที่กดปุ่มใน VR
+SUCTION_ACTIVATION_THRESHOLD = 0.05 # rad (~2.8°) - ระยะห่างที่ยอมให้หัวดูดทำงาน (ใช้เมื่อ SMART_SUCTION_ENABLED = True)

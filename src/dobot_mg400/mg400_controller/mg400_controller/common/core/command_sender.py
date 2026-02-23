@@ -18,6 +18,7 @@ class CommandSender:
         self.connection = robot_connection
         self.feedback = feedback_handler
         self.logger = logger
+        self.sent_command_count = 0  # <--- NEW: Track total commands sent to robot
     
     def send(self, command):
         """
@@ -27,11 +28,44 @@ class CommandSender:
         success = self.connection.send_motion_cmd(command)
         
         if success:
-            # Log (throttle ทุก 0.3 วินาที)
-            # self.logger.info(f"📤 Sent: {command.strip()}", throttle_duration_sec=0.3)
+            self.sent_command_count += 1  # <--- NEW: Increment on success
             return True
         else:
             self.logger.error("❌ Failed to send motion command")
+            return False
+
+    def get_current_queue_depth(self):
+        """
+        คำนวณหาจำนวนคำสั่งที่ค้างอยู่ในคิวของหุ่นยนต์
+        Queue Depth = จำนวนที่สั่งไปทั้งหมด - ID ล่าสุดที่หุ่นทำเสร็จ
+        """
+        completed_id = self.feedback.get_command_id()
+        depth = self.sent_command_count - completed_id
+        
+        # ป้องกันค่าติดลบกรณีดึง feedback มาก่อนหรือรีสตาร์ทหุ่น
+        if depth < 0 or depth > 100:  
+            # หากความต่างมากผิดปกติ (เช่น reboot) ให้รีเซ็ตค่า sent ให้ตางกับ completed_id
+            self.sent_command_count = completed_id
+            return 0
+            
+        return depth
+
+    def set_digital_output(self, port: int, status: bool) -> bool:
+        """
+        สั่งเปิด/ปิด Digital Output ทันที (DOInstant)
+        เหมาะสำหรับสั่ง Gripper หรือ Suction Cup แบบ Real-time
+        """
+        status_val = 1 if status else 0
+        command = f"DOInstant({port}, {status_val})"
+        
+        # ส่งคำสั่งลงไปที่หุ่น
+        success = self.connection.send_motion_cmd(command)
+        if success:
+            state_str = "ON" if status else "OFF"
+            self.logger.info(f"🔌 DO Port {port} set to {state_str}")
+            return True
+        else:
+            self.logger.error(f"❌ Failed to set DO Port {port}")
             return False
 
     def send_command_with_sync(self, command, timeout=5.0):

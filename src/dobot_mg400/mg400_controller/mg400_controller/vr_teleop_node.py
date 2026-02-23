@@ -13,7 +13,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String, Float64MultiArray
+from std_msgs.msg import String, Float64MultiArray, Bool
 import threading
 import numpy as np
 import time
@@ -25,7 +25,7 @@ from mg400_controller.common.config.robot_config import (
     JOINT_LIMITS,
     ELBOW_ANGLE_LIMIT
 )
-from mg400_controller.common.config.motion_config import UNITY_TOPIC, RVIZ_TOPIC, DEBUG_TOPIC, SAFETY_TOPIC, HAPTIC_TOPIC
+from mg400_controller.common.config.motion_config import UNITY_TOPIC, RVIZ_TOPIC, DEBUG_TOPIC, SAFETY_TOPIC, HAPTIC_TOPIC, SUCTION_TOPIC, SUCTION_DO_PORT, SUCTION_ACTIVATION_THRESHOLD, SMART_SUCTION_ENABLED
 import mg400_controller.common.config.motion_config as motion_config
 
 # Import core modules
@@ -45,6 +45,7 @@ from mg400_controller.common.trajectory.trajectory_recorder import TrajectoryRec
 from mg400_controller.common.utils.teleop_logger import TeleopLogger
 from mg400_controller.common.logic.safety_monitor import SafetyMonitor
 from mg400_controller.common.logic.teleop_controller import TeleopController
+from mg400_controller.common.logic.target_predictor import TargetPredictor
 from mg400_controller.common.utils.latency_analyzer import LatencyAnalyzer
 
 # =========================
@@ -96,6 +97,7 @@ class TeleopNode(Node):
         
         # Teleop Controller (The Brain)
         self.controller = TeleopController(self.validator, self.planner, self.get_logger())
+        self.predictor = TargetPredictor(dt=0.02, prediction_horizon_sec=0.08, logger=self.get_logger())
         
         self.latest_target = np.zeros(4)
         self.current_cmd_target = np.zeros(4)
@@ -104,6 +106,10 @@ class TeleopNode(Node):
         # Import MotionConfig for thresholds and Analyzer
         self.latency_analyzer = LatencyAnalyzer(motion_config)
         
+        # --- Clock Synchronization State ---
+        self.clock_offset = 0.0
+        self.min_time_diff = float('inf')
+        self.is_time_calibrated = False
         
         # State Tracking
         self.target_recv_time = 0.0  # T2
@@ -131,6 +137,15 @@ class TeleopNode(Node):
         # Tool Vector Publishers (XYZ Reading)
         self.pub_tool_actual = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_actual", 10)
         self.pub_tool_target = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_target", 10)
+        
+        # Suction Cup Control (Smart Trigger)
+        self.suction_state = False
+        self.suction_pending = False
+        self.suction_requested_state = False
+        self.suction_target_q = None
+        self.sub_suction = self.create_subscription(
+            Bool, SUCTION_TOPIC, self._suction_callback, 10
+        )
         
         # 3. Connect to Robot
         if not self.connection.connect():
@@ -208,15 +223,58 @@ class TeleopNode(Node):
         if was_clamped:
             self.get_logger().warn("⚠️ Joint command exceeded limits - clamped to safe range", once=True)
         
-        # 2. Extract Unity timestamp (T1) - ✅ ใช้ ROS clock
+        # 2. Extract Unity timestamp (T1) and ROS timestamp (T2)
         unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        now_ros_sec = self.get_clock().now().nanoseconds * 1e-9
         
-        # 3. Update Latest Target (Do NOT send here - control_loop will decide when to send)
-        self.latest_target = q_safe
-        # ✅ ใช้ ROS clock แทน time.time()
-        now_ros_time = self.get_clock().now()
-        self.target_recv_time = now_ros_time.nanoseconds * 1e-9  # T2: ROS receive time
-        self.unity_send_time = unity_send_time_sec  # T1: Unity send time
+        # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION ---
+        # Find the absolute minimum difference (fastest packet over network)
+        # This isolated Network Delay from Absolute Clock Offset (e.g. 92 years diff)
+        time_diff = now_ros_sec - unity_send_time_sec
+        if time_diff < self.min_time_diff:
+            self.min_time_diff = time_diff
+            # We assume the absolute fastest ping achievable over LAN/Localhost is 1ms
+            self.clock_offset = self.min_time_diff - 0.001
+            
+            if not self.is_time_calibrated:
+                self.get_logger().info(f"⏰ Initial Clock Sync! Unity is {self.clock_offset:.3f}s off from ROS")
+                self.is_time_calibrated = True
+
+        # Correct Unity time to match Ubuntu time perfectly
+        corrected_unity_time = unity_send_time_sec + self.clock_offset
+        
+        # 3. Kalman Filter Prediction
+        # Overcome physical robot inertia by predicting targets +80ms into the future
+        # Use calibrated send time to ensure accurate dt calculation even over Tailscale
+        predicted_q = self.predictor.update_and_predict(q_safe, corrected_unity_time)
+        
+        # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
+        self.latest_target = predicted_q
+        self.target_recv_time = now_ros_sec          # T2: ROS receive time
+        self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
+
+    def _suction_callback(self, msg):
+        """รับคำสั่งเปิด/ปิดหัวดูด/Gripper จาก Unity (Trigger Button)"""
+        requested_state = msg.data
+        
+        # ตรวจสอบว่าสถานะที่ขอมาต่างกับสถานะปัจจุบัน หรือต่างกับคำสั่งที่รอดำเนินการอยู่หรือไม่
+        if requested_state != self.suction_state and requested_state != self.suction_requested_state:
+            self.suction_requested_state = requested_state
+            
+            if SMART_SUCTION_ENABLED and self.latest_target is not None:
+                self.suction_target_q = self.latest_target.copy()
+                self.suction_pending = True
+                self.get_logger().info(f"🔘 Smart Suction queued: {'ON' if requested_state else 'OFF'} (Waiting for robot to reach target)")
+            else:
+                # สั่งทันที (Immediate Mode) หรือ Fallback กรณีไม่ได้เปิด Smart Suction
+                if self.connection.connected:
+                    success = self.sender.set_digital_output(SUCTION_DO_PORT, requested_state)
+                    if success:
+                        self.suction_state = requested_state
+                        if not SMART_SUCTION_ENABLED:
+                            self.get_logger().info(f"🔘 Immediate Suction Activated: {'ON' if requested_state else 'OFF'}")
+                else:
+                    self.get_logger().warn("⚠️ Cannot toggle suction; Robot disconnected.")
     
     def _control_loop(self):
         """
@@ -242,6 +300,23 @@ class TeleopNode(Node):
             # === UPDATE VELOCITY ===
             # Delegate velocity tracking to controller
             self.controller.update_robot_state(q_current, now)
+            
+            # === SMART SUCTION TRIGGER ===
+            if self.suction_pending and self.suction_target_q is not None:
+                dist = np.max(np.abs(q_current - self.suction_target_q))
+                
+                # ถ้าระยะห่างน้อยกว่า Threshold ที่ตั้งไว้ (ถึงเป้าหมายแล้ว)
+                # หรือถ้าหุ่นยนต์หยุดนิ่งสนิทแล้ว (Stuck/Reached) ก็ให้ยิงคำสั่งได้เลยเหมือนกันป้องกันการค้าง
+                if dist < SUCTION_ACTIVATION_THRESHOLD or self.controller.stuck_start_time > 0:
+                    if self.connection.connected:
+                        success = self.sender.set_digital_output(SUCTION_DO_PORT, self.suction_requested_state)
+                        if success:
+                            self.get_logger().info(
+                                f"🎯 Smart Suction Activated: {'ON' if self.suction_requested_state else 'OFF'} "
+                                f"(Error: {dist:.4f} rad" + (" - Triggered by Stillness" if dist >= SUCTION_ACTIVATION_THRESHOLD else "") + ")"
+                            )
+                            self.suction_state = self.suction_requested_state
+                            self.suction_pending = False
             
             # === PUBLISH TOOL VECTORS (XYZ) ===
             tool_act = self.feedback.get_tool_vector()
@@ -292,7 +367,14 @@ class TeleopNode(Node):
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION
             # ---------------------------------------------------------
-            should_send, send_reason = self.controller.should_send_command(self.latest_target, q_current)
+            # Read real-time queue depth from sender (which reads from feedback)
+            current_queue_depth = self.sender.get_current_queue_depth()
+            
+            should_send, send_reason = self.controller.should_send_command(
+                self.latest_target, 
+                q_current, 
+                current_queue_depth
+            )
             
             if should_send:
                 # 1. Format Command

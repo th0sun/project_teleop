@@ -88,7 +88,7 @@ class TeleopController:
             
         return False
 
-    def should_send_command(self, latest_target, q_current):
+    def should_send_command(self, latest_target, q_current, current_queue_depth):
         """
         The Core Decision Logic: Should we send a command?
         
@@ -119,16 +119,16 @@ class TeleopController:
                 self.last_sent_target = latest_target
                 self.last_sent_time = now
                 self.stuck_start_time = 0 
-                return True, f"Stream_Time{now - self.last_sent_time:.3f}s"
+                return True, f"Stream_Time{now - self.last_sent_time:.3f}s_Q{current_queue_depth}"
         
-        # 2. Strategy A: Proximity-Based (Smooth Real-time)
-        # Send new command when robot is getting close to the previous target
-        if dist_to_last < PROXIMITY_THRESHOLD:
-            if change_in_target > SPATIAL_THRESHOLD:
+        # 2. Strategy A: Dynamic Queue Buffer (Smooth Real-time)
+        # Send new command when queue is nearly empty to maintain Continuous Path (CP)
+        if change_in_target > SPATIAL_THRESHOLD:
+            if current_queue_depth < 2:
                 self.last_sent_target = latest_target
                 self.last_sent_time = now
                 self.stuck_start_time = 0 # Reset stuck timer
-                return True, f"Proximity_Dist{dist_to_last:.3f}"
+                return True, f"Buffer_Refill_Q{current_queue_depth}"
         
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!
