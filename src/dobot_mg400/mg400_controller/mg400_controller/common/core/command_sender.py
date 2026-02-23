@@ -10,41 +10,91 @@
     sender.send_motion(command_string, speed_percent, distance)
 """
 
+import time
+import re
+
 class CommandSender:
-    def __init__(self, robot_connection, queue_manager, logger):
+    def __init__(self, robot_connection, feedback_handler, logger):
         self.connection = robot_connection
-        self.queue = queue_manager
+        self.feedback = feedback_handler
         self.logger = logger
     
-    def send_motion(self, command, speed_percent, distance):
+    def send(self, command):
         """
-        ส่งคำสั่งการเคลื่อนที่
-        
-        Args:
-            command: คำสั่งที่จะส่ง (string)
-            speed_percent: ความเร็ว (%)
-            distance: ระยะทาง (radians)
-        
-        Returns:
-            True ถ้าส่งสำเร็จ, False ถ้าล้มเหลว
+        ส่งคำสั่งการเคลื่อนที่ (Non-blocking)
         """
-        # ตรวจสอบคิว
-        if not self.queue.can_add_command():
-            return False
-        
         # ส่งคำสั่ง
         success = self.connection.send_motion_cmd(command)
         
         if success:
-            self.queue.add_command()
-            
             # Log (throttle ทุก 0.3 วินาที)
-            self.logger.info(
-                f"📤 Sent | Queue: {self.queue.get_depth()} | "
-                f"Speed: {speed_percent}% | Dist: {distance:.4f}",
-                throttle_duration_sec=0.3
-            )
+            # self.logger.info(f"📤 Sent: {command.strip()}", throttle_duration_sec=0.3)
             return True
         else:
             self.logger.error("❌ Failed to send motion command")
             return False
+
+    def send_command_with_sync(self, command, timeout=5.0):
+        """
+        ส่งคำสั่งและรอจนกว่าหุ่นยนต์จะเริ่มทำและทำเสร็จ (Blocking with Sync)
+        
+        Returns:
+            bool: True ถ้าทำสำเร็จตามเวลา
+        """
+        # 1. ส่งคำสั่งและรับ response string (เช่น "0, {123},")
+        response = self.connection.send_and_wait(command)
+        if not response:
+            self.logger.warn("❌ No response from robot")
+            return False
+            
+        # 2. แกะ Command ID จาก response
+        cmd_id = self._parse_command_id(response)
+        if cmd_id == -1:
+            self.logger.warn(f"❌ Could not parse ID from: {response}")
+            return False
+            
+        # 3. รอให้หุ่นรับรู้ ID นี้ (Wait for Execution Start)
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            current_id = self.feedback.get_command_id()
+            if current_id == cmd_id:
+                break
+            time.sleep(0.01)
+        else:
+            self.logger.warn(f"⚠️ Timeout waiting for start ID: {cmd_id}")
+            return False
+            
+        # 4. รอให้หุ่นทำเสร็จ (Wait for Completion)
+        # เงื่อนไข: ID ยังเท่าเดิม และ Robot Mode กลับมาเป็น Idle (5)
+        while time.time() - start_time < timeout:
+            current_id = self.feedback.get_command_id()
+            robot_mode = self.feedback.get_robot_mode()
+            
+            # ถ้า ID เปลี่ยนไปแล้ว แสดงว่ามีคำสั่งใหม่มาแทรก -> ถือว่าจบคำสั่งนี้
+            if current_id != cmd_id:
+                return True
+                
+            # ถ้า ID เท่าเดิม และ Mode = 5 (Idle) -> เสร็จแล้ว
+            if robot_mode == 5:
+                return True
+                
+            # ถ้า Mode = 9 (Error) -> จบเห่
+            if robot_mode == 9:
+                self.logger.error("❌ Robot Error during motion")
+                return False
+                
+            time.sleep(0.01)
+            
+        self.logger.warn(f"⚠️ Timeout waiting for completion: {cmd_id}")
+        return False
+
+    def _parse_command_id(self, response):
+        """แกะ ID จาก response string format 'error_id, {command_id},'"""
+        try:
+            # หาตัวเลขในปีกกา {}
+            match = re.search(r'\{(\d+)\}', response)
+            if match:
+                return int(match.group(1))
+            return -1
+        except Exception:
+            return -1

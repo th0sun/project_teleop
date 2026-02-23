@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'vr_teleop_node = mg400_controller.vr_teleop_node:main',
+            'monitor_gui = mg400_controller.monitor_gui:main',
         ],
     },
 )

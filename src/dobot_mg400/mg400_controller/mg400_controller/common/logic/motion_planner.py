@@ -11,11 +11,12 @@
 """
 
 import numpy as np
-from mg400_controller.common.config.robot_config import CONTROL_MODE, SPATIAL_THRESHOLD
+from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import *
 
 class MotionPlanner:
-    def __init__(self, logger):
+    def __init__(self, control_mode, logger):
+        self.control_mode = control_mode
         self.logger = logger
         self.last_command = None
     
@@ -58,17 +59,17 @@ class MotionPlanner:
         """
         q_deg = np.degrees(q_rad)
         
-        if CONTROL_MODE == "jointmovj":
+        if self.control_mode == "jointmovj":
             return (f"JointMovJ({q_deg[0]:.4f},{q_deg[1]:.4f},"
                    f"{q_deg[2]:.4f},{q_deg[3]:.4f},"
                    f"SpeedJ={speed_percent},AccJ={ACC_VALUE},CP={CP_VALUE})")
         
-        elif CONTROL_MODE == "movj":
+        elif self.control_mode == "movj":
             return (f"MovJ({q_deg[0]:.4f},{q_deg[1]:.4f},"
                    f"{q_deg[2]:.4f},{q_deg[3]:.4f},"
                    f"SpeedJ={speed_percent},AccJ={ACC_VALUE},CP={CP_VALUE})")
         
-        elif CONTROL_MODE == "movl":
+        elif self.control_mode == "movl":
             return (f"MovL({q_deg[0]:.4f},{q_deg[1]:.4f},"
                    f"{q_deg[2]:.4f},{q_deg[3]:.4f},"
                    f"SpeedJ={speed_percent},AccJ={ACC_VALUE},CP={CP_VALUE})")
