@@ -10,9 +10,11 @@
 - ปรับ Port สำหรับโปรโตคอลต่างๆ
 """
 
+import os
+
 # 🤖 Robot Network Settings
-ROBOT_IP = "172.10.0.2"  # For MG400_Mock (Simulation)
-# ROBOT_IP = "192.168.1.6"    # Real Robot IP
+# Read from Environment Variable (Set by start_teleop.sh), fallback to Real Robot IP if not set
+ROBOT_IP = os.environ.get("ROBOT_IP", "192.168.1.6")
 
 # 🔌 Communication Ports
 DASHBOARD_PORT = 29999  # Dashboard commands (Enable, Disable, etc.)
