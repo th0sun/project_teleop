@@ -167,6 +167,7 @@ class TeleopNode(Node):
         # Tool Vector Publishers (XYZ Reading)
         self.pub_tool_actual = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_actual", 10)
         self.pub_tool_target = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_target", 10)
+        self.pub_flange_actual = self.create_publisher(Float64MultiArray, "/robot/flange_actual", 10)
         
         # 📊 Graph Data Publishers (for monitor_gui.py visualization)
         self.pub_predicted_target = self.create_publisher(JointState, "/teleop/predicted_target", 10)
@@ -491,6 +492,12 @@ class TeleopNode(Node):
             msg_tgt = Float64MultiArray()
             msg_tgt.data = tool_tgt.tolist()
             self.pub_tool_target.publish(msg_tgt)
+            
+            # Flange actual = FK of actual joints (no tool offset)
+            flange = self.feedback.get_flange_actual()
+            msg_flange = Float64MultiArray()
+            msg_flange.data = flange.tolist()
+            self.pub_flange_actual.publish(msg_flange)
             
             # === PUBLISH DO STATUS (Bitmask) ===
             do_status = self.feedback.get_do_status()

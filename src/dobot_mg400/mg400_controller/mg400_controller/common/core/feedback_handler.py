@@ -145,6 +145,12 @@ class FeedbackHandler:
             msg.position = all_joints['positions']
             self.publisher.publish(msg)
             
+            # 8. Flange XYZ — FK of actual joints (no tool offset)
+            # Used by GUI to show tool offset = TCP_actual - flange_actual
+            self.flange_actual = self.kinematics.forward_kinematics(
+                [j1, j2, j3, j4]  # already in degrees from feedback packet
+            )
+            
         except Exception as e:
             self.logger.error(f"Packet processing error: {e}")
     
@@ -159,6 +165,10 @@ class FeedbackHandler:
     def get_tool_vector(self):
         """ดึงค่า Tool Vector ล่าสุด (Actual) [x, y, z, rx, ry, rz]"""
         return getattr(self, 'tool_vector_actual', np.zeros(6))
+
+    def get_flange_actual(self):
+        """ดึงค่า Flange XYZ (FK ของ joint จริง ไม่รวม tool offset) [x, y, z, rx, 0, 0]"""
+        return getattr(self, 'flange_actual', np.zeros(6))
 
     def get_target_tool_vector(self):
         """ดึงค่า Tool Vector เป้าหมาย (Target) [x, y, z, rx, ry, rz]"""

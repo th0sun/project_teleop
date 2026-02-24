@@ -198,6 +198,7 @@ class JointMonitorNode(Node):
         self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_unity_xyz   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of Unity input
+        self.latest_flange_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of actual joints
         self.latest_do_status = 0
         self.latest_robot_mode = 0
         self.latest_error_status = 0
@@ -212,6 +213,7 @@ class JointMonitorNode(Node):
         self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
         self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
         self.sub_unity_xyz = self.create_subscription(Float64MultiArray, "/teleop/unity_xyz", self.listener_callback_unity_xyz, 10)
+        self.sub_flange_actual = self.create_subscription(Float64MultiArray, "/robot/flange_actual", self.listener_callback_flange_actual, 10)
         self.sub_do_status = self.create_subscription(Int64, DO_STATUS_TOPIC, self.listener_callback_do_status, 10)
         self.sub_robot_mode = self.create_subscription(Int32, ROBOT_MODE_TOPIC, self.listener_callback_robot_mode, 10)
         self.sub_error_status = self.create_subscription(Int32, ERROR_STATUS_TOPIC, self.listener_callback_error_status, 10)
@@ -253,6 +255,9 @@ class JointMonitorNode(Node):
 
     def listener_callback_unity_xyz(self, msg):
         if len(msg.data) >= 6: self.latest_unity_xyz = list(msg.data)
+
+    def listener_callback_flange_actual(self, msg):
+        if len(msg.data) >= 6: self.latest_flange_actual = list(msg.data)
         
     def listener_callback_do_status(self, msg):
         self.latest_do_status = int(msg.data)
@@ -347,34 +352,43 @@ class MonitorGUI:
 
         header_xyz = ttk.Frame(main_frame)
         header_xyz.pack(fill=tk.X, pady=2)
-        ttk.Label(header_xyz, text="Axis", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Unity FK (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Actual (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Diff (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="Axis",          font=FONT_LABEL, width=6).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="Unity FK (mm)", font=FONT_LABEL, foreground="darkorange",   width=13).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="Flange (mm)",   font=FONT_LABEL, foreground="royalblue",    width=13).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="TCP (mm)",       font=FONT_LABEL, foreground="green4",       width=13).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="ToolΔ (mm)",    font=FONT_LABEL, foreground="gray40",       width=12).pack(side=tk.LEFT)
 
-        self.vars_xyz_tgt = []
-        self.vars_xyz_act = []
-        self.vars_xyz_diff = []
-        self.lbls_xyz_diff = []
+        self.vars_xyz_tgt    = []
+        self.vars_xyz_flange = []
+        self.vars_xyz_act    = []
+        self.vars_xyz_tool   = []
+        self.vars_xyz_diff   = []  # keep for session logger compat
+        self.lbls_xyz_diff   = []
 
         for i, name in enumerate(["X", "Y", "Z"]):
             frame = ttk.Frame(main_frame)
             frame.pack(fill=tk.X, pady=2)
-            ttk.Label(frame, text=name, font=FONT_LABEL, width=12).pack(side=tk.LEFT)
-            
-            v_tgt = tk.StringVar(value="0.00")
-            ttk.Label(frame, textvariable=v_tgt, font=FONT_VALUE, foreground="darkgreen", width=12).pack(side=tk.LEFT)
+            ttk.Label(frame, text=name, font=FONT_LABEL, width=7).pack(side=tk.LEFT)
+
+            v_tgt = tk.StringVar(value="0.0")
+            ttk.Label(frame, textvariable=v_tgt, font=FONT_VALUE, foreground="darkorange", width=12).pack(side=tk.LEFT)
             self.vars_xyz_tgt.append(v_tgt)
-            
-            v_act = tk.StringVar(value="0.00")
-            ttk.Label(frame, textvariable=v_act, font=FONT_VALUE, foreground="blue", width=12).pack(side=tk.LEFT)
+
+            v_flange = tk.StringVar(value="0.0")
+            ttk.Label(frame, textvariable=v_flange, font=FONT_VALUE, foreground="royalblue", width=12).pack(side=tk.LEFT)
+            self.vars_xyz_flange.append(v_flange)
+
+            v_act = tk.StringVar(value="0.0")
+            ttk.Label(frame, textvariable=v_act, font=FONT_VALUE, foreground="green4", width=12).pack(side=tk.LEFT)
             self.vars_xyz_act.append(v_act)
-            
-            v_diff = tk.StringVar(value="0.00")
-            lbl_diff = ttk.Label(frame, textvariable=v_diff, font=FONT_VALUE, foreground="black", width=12)
-            lbl_diff.pack(side=tk.LEFT)
-            self.vars_xyz_diff.append(v_diff)
-            self.lbls_xyz_diff.append(lbl_diff)
+
+            v_tool = tk.StringVar(value="0.0")
+            lbl_tool = ttk.Label(frame, textvariable=v_tool, font=FONT_VALUE, foreground="gray40", width=11)
+            lbl_tool.pack(side=tk.LEFT)
+            self.vars_xyz_tool.append(v_tool)
+            # compat aliases
+            self.vars_xyz_diff.append(v_tool)
+            self.lbls_xyz_diff.append(lbl_tool)
 
         ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
 
@@ -664,21 +678,16 @@ class MonitorGUI:
                 self.btns_light[name].config(bg=bg_color, fg=fg_color, text=name)
 
         # --- Update Cartesian Data ---
-        # Use Unity FK XYZ if available, fall back to firmware target
-        xyz_tgt = self.node.latest_unity_xyz[:3] if any(v != 0 for v in self.node.latest_unity_xyz) \
-                  else self.node.latest_tool_target[:3]
-        xyz_act = self.node.latest_tool_actual[:3]
+        xyz_unity  = self.node.latest_unity_xyz[:3]       # FK of Unity input joints (orange)
+        xyz_flange = self.node.latest_flange_actual[:3]    # FK of actual joints, no tool (blue)
+        xyz_tcp    = self.node.latest_tool_actual[:3]       # firmware TCP with tool offset (green)
         for i in range(3):
-            self.vars_xyz_tgt[i].set(f"{xyz_tgt[i]:.1f}")
-            self.vars_xyz_act[i].set(f"{xyz_act[i]:.1f}")
-            diff = xyz_act[i] - xyz_tgt[i]
-            self.vars_xyz_diff[i].set(f"{diff:+.1f}")
-            if abs(diff) > 10.0:
-                self.lbls_xyz_diff[i].configure(foreground="red")
-            elif abs(diff) > 2.0:
-                self.lbls_xyz_diff[i].configure(foreground="orange")
-            else:
-                self.lbls_xyz_diff[i].configure(foreground="green")
+            self.vars_xyz_tgt[i].set(f"{xyz_unity[i]:.1f}")
+            self.vars_xyz_flange[i].set(f"{xyz_flange[i]:.1f}")
+            self.vars_xyz_act[i].set(f"{xyz_tcp[i]:.1f}")
+            # Tool offset = TCP - Flange (live, no preconfig needed)
+            tool_delta = xyz_tcp[i] - xyz_flange[i]
+            self.vars_xyz_tool[i].set(f"{tool_delta:+.1f}")
 
         # --- Execution Monitor ---
         status = self.monitor.update(total_diff)
