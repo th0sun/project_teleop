@@ -171,6 +171,7 @@ class TeleopNode(Node):
         # 📊 Graph Data Publishers (for monitor_gui.py visualization)
         self.pub_predicted_target = self.create_publisher(JointState, "/teleop/predicted_target", 10)
         self.pub_sent_command = self.create_publisher(JointState, "/teleop/sent_command", 10)
+        self.pub_unity_xyz = self.create_publisher(Float64MultiArray, "/teleop/unity_xyz", 10)
         
         # Suction Cup Control (Smart Trigger)
         self.suction_state = False
@@ -364,6 +365,15 @@ class TeleopNode(Node):
             pred_msg.header.stamp = self.get_clock().now().to_msg()
             pred_msg.position = predicted_q.tolist()
             self.pub_predicted_target.publish(pred_msg)
+            
+            # 📊 Publish Unity Input XYZ (FK of raw Unity joint angles, degrees)
+            try:
+                unity_xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_safe))
+                xyz_msg = Float64MultiArray()
+                xyz_msg.data = unity_xyz.tolist()
+                self.pub_unity_xyz.publish(xyz_msg)
+            except Exception:
+                pass
             
             # --- Log to CSV (Async) ---
             self.log_queue.put(('CSV', [

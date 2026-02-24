@@ -197,6 +197,7 @@ class JointMonitorNode(Node):
         self.latest_sent_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        self.latest_unity_xyz   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of Unity input
         self.latest_do_status = 0
         self.latest_robot_mode = 0
         self.latest_error_status = 0
@@ -210,6 +211,7 @@ class JointMonitorNode(Node):
         self.sub_sent = self.create_subscription(JointState, SENT_CMD_TOPIC, self.listener_callback_sent, 10)
         self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
         self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
+        self.sub_unity_xyz = self.create_subscription(Float64MultiArray, "/teleop/unity_xyz", self.listener_callback_unity_xyz, 10)
         self.sub_do_status = self.create_subscription(Int64, DO_STATUS_TOPIC, self.listener_callback_do_status, 10)
         self.sub_robot_mode = self.create_subscription(Int32, ROBOT_MODE_TOPIC, self.listener_callback_robot_mode, 10)
         self.sub_error_status = self.create_subscription(Int32, ERROR_STATUS_TOPIC, self.listener_callback_error_status, 10)
@@ -248,6 +250,9 @@ class JointMonitorNode(Node):
             
     def listener_callback_tool_target(self, msg):
         if len(msg.data) >= 6: self.latest_tool_target = list(msg.data)
+
+    def listener_callback_unity_xyz(self, msg):
+        if len(msg.data) >= 6: self.latest_unity_xyz = list(msg.data)
         
     def listener_callback_do_status(self, msg):
         self.latest_do_status = int(msg.data)
@@ -343,7 +348,7 @@ class MonitorGUI:
         header_xyz = ttk.Frame(main_frame)
         header_xyz.pack(fill=tk.X, pady=2)
         ttk.Label(header_xyz, text="Axis", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Target (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="Unity FK (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
         ttk.Label(header_xyz, text="Actual (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
         ttk.Label(header_xyz, text="Diff (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
 
@@ -659,7 +664,9 @@ class MonitorGUI:
                 self.btns_light[name].config(bg=bg_color, fg=fg_color, text=name)
 
         # --- Update Cartesian Data ---
-        xyz_tgt = self.node.latest_tool_target[:3]
+        # Use Unity FK XYZ if available, fall back to firmware target
+        xyz_tgt = self.node.latest_unity_xyz[:3] if any(v != 0 for v in self.node.latest_unity_xyz) \
+                  else self.node.latest_tool_target[:3]
         xyz_act = self.node.latest_tool_actual[:3]
         for i in range(3):
             self.vars_xyz_tgt[i].set(f"{xyz_tgt[i]:.1f}")

@@ -86,3 +86,43 @@ class KinematicsCalculator:
             return False
         
         return True
+
+    def forward_kinematics(self, joints_deg):
+        """
+        คำนวณ Forward Kinematics ของ MG400
+        
+        Args:
+            joints_deg: [j1, j2, j3, j4] in DEGREES (same as Unity input)
+        
+        Returns:
+            np.array [x, y, z, rx, ry, rz] in mm
+            None if outside workspace
+        """
+        # MG400 Link Constants (mm) - ported from MG400_Mock/kinematics_mg400.py
+        LINK1 = np.array([43.0,  0.0,   0.0])
+        LINK2 = np.array([0.0,   0.0, 175.0])
+        LINK3 = np.array([175.0, 0.0,   0.0])
+        LINK4 = np.array([66.0,  0.0, -57.0])
+
+        j1, j2, j3, j4 = float(joints_deg[0]), float(joints_deg[1]), \
+                          float(joints_deg[2]), float(joints_deg[3])
+
+        def rot_y(vec, angle_deg):
+            a = np.deg2rad(angle_deg)
+            R = np.array([[np.cos(a), 0, np.sin(a)],
+                          [0,         1, 0          ],
+                          [-np.sin(a),0, np.cos(a)  ]])
+            return R @ vec
+
+        def rot_z(vec, angle_deg):
+            a = np.deg2rad(angle_deg)
+            R = np.array([[np.cos(a), -np.sin(a), 0],
+                          [np.sin(a),  np.cos(a), 0],
+                          [0,          0,         1]])
+            return R @ vec
+
+        pos = LINK1 + rot_y(LINK2, j2) + rot_y(LINK3, j3) + LINK4
+        px, py, pz = rot_z(pos, j1)
+        rx = j1 + j4   # yaw of end-effector
+
+        return np.array([px, py, pz, rx, 0.0, 0.0])
