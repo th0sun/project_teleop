@@ -54,102 +54,97 @@ class FeedbackHandler:
         
         while not self.stop_event.is_set():
             try:
-                # รับข้อมูล
-                chunk = self.connection.fb_sock.recv(4096)
-                if not chunk:
-                    self.logger.warn("Connection closed by robot")
-                    break
+                # 🔄 Flush buffer to get LATEST packet (As seen in dobot_api.py)
+                # This prevents processing stale data when the loop falls behind
+                self.connection.fb_sock.setblocking(False)
+                latest_packet = None
+                while True:
+                    try:
+                        chunk = self.connection.fb_sock.recv(4096)
+                        if not chunk: break
+                        buffer += chunk
+                    except (BlockingIOError, socket.error):
+                        break
                 
-                buffer += chunk
-                
-                # ประมวลผล packet ที่สมบูรณ์
+                # Process only the LATEST complete packet from the buffer
                 while len(buffer) >= PACKET_SIZE:
-                    data = buffer[:PACKET_SIZE]
+                    latest_packet = buffer[:PACKET_SIZE]
                     buffer = buffer[PACKET_SIZE:]
-                    
-                    self._process_packet(data)
-            
-            except BlockingIOError:
-                time.sleep(0.005)
+                
+                if latest_packet:
+                    self._process_packet(latest_packet)
+                
+                # Small sleep to yield
+                time.sleep(0.001)
+                
             except Exception as e:
                 self.logger.error(f"Feedback error: {e}")
-                time.sleep(1.0)
+                time.sleep(0.5)
     
     def _process_packet(self, data):
-        """ประมวลผล binary packet Using Manual Offsets (Robust Method)"""
+        """ประมวลผล binary packet ตามโครงสร้าง MyType ใน dobot_api.py"""
         try:
-            # 1. Parse Joint Angles (Proven Offset 432)
+            # 0. Packet Verification (Offset 48: TestValue)
+            # Expecting 0x0123456789ABCDEF (Little Endian constant from Dobot)
+            TEST_VALUE_OFFSET = 48
+            test_val = struct.unpack_from('<Q', data, TEST_VALUE_OFFSET)[0]
+            if test_val != 0x0123456789ABCDEF:
+                # If test value fails, we are likely misaligned or using wrong protocol
+                # self.logger.debug(f"Invalid TestValue: {hex(test_val)}")
+                return
+
+            # 1. Parse Joint Angles (Offset 432)
             OFFSET_JOINT_ACTUAL = 432
-            # อ่านค่า 6 joints (MG400 ใช้แค่ 4 ตัวแรก)
             q_all = struct.unpack_from('<6d', data, OFFSET_JOINT_ACTUAL)
             j1, j2, j3, j4 = q_all[0:4]
-            
-            # แปลงเป็น radians
             q_rad = np.radians([j1, j2, j3, j4])
             
             # --- Sanity Check ---
             if not self.kinematics.validate_sanity(self.last_valid_joints, q_rad):
-                # self.logger.warn(f"⚠️ Sanity Check Failed: Jump detected")
                 return
             
             self.last_valid_joints = q_rad
             self.current_position = q_rad
             
-            # 2. Parse Robot Mode (Proven Offset 24)
+            # 2. Parse Robot Mode (Offset 24)
             OFFSET_ROBOT_MODE = 24
             self.robot_mode = struct.unpack_from('<Q', data, OFFSET_ROBOT_MODE)[0]
             
-            # 3. Parse V4 Extra Data (Manual Offsets)
-            try:
-                # Motor Temperatures (Offset 864)
-                OFFSET_TEMPS = 864
-                self.motor_temperatures = struct.unpack_from('<6d', data, OFFSET_TEMPS)
-                
-                # Collision State (Offset 1039)
-                OFFSET_COLLISION = 1039
-                self.collision_state = data[OFFSET_COLLISION]
-                
-                # Error Status (Offset 1030)
-                OFFSET_ERROR = 1030
-                self.error_status = data[OFFSET_ERROR]
-                
-                # Command ID (Offset 1112)
-                OFFSET_CMD_ID = 1112
-                self.command_id = struct.unpack_from('<Q', data, OFFSET_CMD_ID)[0]
-                
-                # Digital Input/Output Status (Offset 8/16, 64-bit mask for V4)
-                OFFSET_DI_STATUS = 8
-                OFFSET_DO_STATUS = 16
-                self.di_status = struct.unpack_from('<Q', data, OFFSET_DI_STATUS)[0]
-                self.do_status = struct.unpack_from('<Q', data, OFFSET_DO_STATUS)[0]
-                
-            except Exception as e:
-                self.logger.warn(f"Extra data parse error: {e}")
+            # 3. Parse Digital I/O (Offset 8/16)
+            OFFSET_DI_STATUS = 8
+            OFFSET_DO_STATUS = 16
+            self.di_status = struct.unpack_from('<Q', data, OFFSET_DI_STATUS)[0]
+            self.do_status = struct.unpack_from('<Q', data, OFFSET_DO_STATUS)[0]
             
-            # 4. Parse Tool Vector Actual (Offset 624) & Target (Offset 768)
-            try:
-                OFFSET_TOOL_ACTUAL = 624
-                # Parse [x, y, z, rx, ry, rz]
-                tool_actual = struct.unpack_from('<6d', data, OFFSET_TOOL_ACTUAL)
-                self.tool_vector_actual = np.array(tool_actual)
+            # 4. Parse Error/Collision status
+            OFFSET_ERROR = 1029
+            OFFSET_COLLISION = 1038
+            self.error_status = data[OFFSET_ERROR]
+            self.collision_state = data[OFFSET_COLLISION]
 
-                OFFSET_TOOL_TARGET = 768
-                tool_target = struct.unpack_from('<6d', data, OFFSET_TOOL_TARGET)
-                self.tool_vector_target = np.array(tool_target)
-
-            except Exception as e:
-                self.logger.warn(f"Tool Vector parse error: {e}")
+            # 5. Parse Command ID (Offset 1112)
+            OFFSET_CMD_ID = 1112
+            self.command_id = struct.unpack_from('<Q', data, OFFSET_CMD_ID)[0]
             
-            # 5. คำนวณ Passive Joints & Publish
+            # 6. Parse Tool Vector Actual (Offset 624) & Target (Offset 768)
+            OFFSET_TOOL_ACTUAL = 624
+            tool_actual = struct.unpack_from('<6d', data, OFFSET_TOOL_ACTUAL)
+            self.tool_vector_actual = np.array(tool_actual)
+
+            OFFSET_TOOL_TARGET = 768
+            tool_target = struct.unpack_from('<6d', data, OFFSET_TOOL_TARGET)
+            self.tool_vector_target = np.array(tool_target)
+            
+            # 7. Joint State Calculation & Publishing
             all_joints = self.kinematics.calculate_passive_joints(q_rad)
-            
-            # --- Publish JointState ---
             msg = JointState()
             msg.header.stamp = self.clock.now().to_msg()
             msg.name = all_joints['names']
             msg.position = all_joints['positions']
-            
             self.publisher.publish(msg)
+            
+        except Exception as e:
+            self.logger.error(f"Packet processing error: {e}")
             
         except Exception as e:
             self.logger.error(f"Packet processing error: {e}")

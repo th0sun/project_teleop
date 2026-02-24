@@ -316,7 +316,15 @@ class MonitorGUI:
         
         self.var_latency = tk.StringVar(value="Waiting for data...")
         self.lbl_latency = ttk.Label(status_frame, textvariable=self.var_latency, font=FONT_LATENCY)
-        self.lbl_latency.pack(anchor=tk.W)
+        self.lbl_latency.pack(side=tk.LEFT)
+
+        self.var_mode = tk.StringVar(value="MODE: -")
+        self.lbl_mode = tk.Label(status_frame, textvariable=self.var_mode, font=("Arial", 10), bg="#f0f0f0")
+        self.lbl_mode.pack(side=tk.RIGHT, padx=10)
+        
+        self.var_error = tk.StringVar(value="ERR: 00")
+        self.lbl_error = tk.Label(status_frame, textvariable=self.var_error, font=("Arial", 10, "bold"), bg="#f0f0f0", fg="red")
+        self.lbl_error.pack(side=tk.RIGHT, padx=5)
         
         self.var_do_hex = tk.StringVar(value="DO: 0x0000")
         self.lbl_do_hex = ttk.Label(status_frame, textvariable=self.var_do_hex, font=FONT_LATENCY, foreground="gray")
@@ -329,25 +337,23 @@ class MonitorGUI:
         self.suction_state = not self.suction_state
         self.node.request_suction(self.suction_state)
         
-        # 🔒 Lockout sync for 1.5s to wait for hardware to respond
-        self.lockout[VACUUM_DO_PORT] = time.time() + 1.5
+        # 🔒 Lockout sync for 3.0s (Dashboard commands on V4 are slow to reflect in feedback)
+        self.lockout[VACUUM_DO_PORT] = time.time() + 3.0
         
         if self.suction_state:
-            self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
+            self.btn_suction.config(text="VACUUM (WAIT)", bg="orange", fg="white")
         else:
-            self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg="black")
+            self.btn_suction.config(text="OFF (WAIT)", bg="orange", fg="black")
 
     def toggle_light(self, name, port, color):
         self.light_states[name] = not self.light_states[name]
         status = self.light_states[name]
         self.node.request_light(port, status)
         
-        # 🔒 Lockout sync for 1.5s to wait for hardware to respond
-        self.lockout[port] = time.time() + 1.5
+        # 🔒 Lockout sync for 3.0s
+        self.lockout[port] = time.time() + 3.0
         
-        bg_color = color if status else COLOR_OFF
-        fg_color = "white" if status else "black"
-        self.btns_light[name].config(bg=bg_color, fg=fg_color)
+        self.btns_light[name].config(bg="orange", text=f"{name}...")
 
     def toggle_logging(self):
         self.is_logging = not self.is_logging
@@ -393,6 +399,18 @@ class MonitorGUI:
             else:
                 self.lbls_diff[i].configure(foreground="green")
 
+        # --- Update System Info (Mode/Error) ---
+        err_info = self.node.feedback.get_error_status()
+        mode = err_info['robot_mode']
+        error = err_info['error_status']
+        
+        mode_names = {
+            1: "INIT", 4: "DISABLED", 5: "ENABLE", 6: "DRAG", 7: "RUN", 9: "ERROR", 11: "COLLISION"
+        }
+        self.var_mode.set(f"MODE: {mode_names.get(mode, str(mode))}")
+        self.var_error.set(f"ERR: {error:02X}")
+        self.lbl_error.configure(fg="red" if error != 0 or mode == 9 else "gray")
+        
         # --- Update Button States (DO Status Sync) ---
         do_status = self.node.latest_do_status
         
