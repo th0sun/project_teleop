@@ -22,6 +22,7 @@ class RobotConnection:
         self.cmd_sock = None
         self.fb_sock = None
         self.connected = False
+        self.dash_lock = threading.Lock() # Lock for Dashboard Port (29999) to avoid thread collision
     
     def connect(self):
         """เชื่อมต่อกับหุ่นยนต์ทั้ง 3 channels"""
@@ -54,15 +55,16 @@ class RobotConnection:
         """เปิดใช้งานหุ่นยนต์"""
         if not self.connected:
             return False
-        try:
-            self.dashboard.send(b"ClearError()\n")
-            time.sleep(0.1)
-            self.dashboard.send(b"EnableRobot()\n")
-            self.logger.info("🟢 Robot Enabled")
-            return True
-        except Exception as e:
-            self.logger.error(f"Enable failed: {e}")
-            return False
+        with self.dash_lock:
+            try:
+                self.dashboard.send(b"ClearError()\n")
+                time.sleep(0.1)
+                self.dashboard.send(b"EnableRobot()\n")
+                self.logger.info("🟢 Robot Enabled")
+                return True
+            except Exception as e:
+                self.logger.error(f"Enable failed: {e}")
+                return False
     
     
     def _reconnect_dashboard(self):
@@ -89,27 +91,28 @@ class RobotConnection:
             if not self._reconnect_dashboard():
                 return False
         
-        try:
-            cmd_bytes = command.encode() if isinstance(command, str) else command
-            if not cmd_bytes.endswith(b'\n'):
-                cmd_bytes += b'\n'
-            self.dashboard.send(cmd_bytes)
-            return True
-        except socket.timeout:
-            self.logger.warn(f"Timeout (Dashboard): {command}")
-            return False
-        except (OSError, socket.error) as e:
-            self.logger.warn(f"Dashboard socket error: {e}. Reconnecting...")
-            if self._reconnect_dashboard():
-                try:
-                    self.dashboard.send(cmd_bytes)
-                    return True
-                except Exception as retry_e:
-                    self.logger.error(f"Retry failed: {retry_e}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Dashboard command failed: {e}")
-            return False
+        with self.dash_lock:
+            try:
+                cmd_bytes = command.encode() if isinstance(command, str) else command
+                if not cmd_bytes.endswith(b'\n'):
+                    cmd_bytes += b'\n'
+                self.dashboard.send(cmd_bytes)
+                return True
+            except socket.timeout:
+                self.logger.warn(f"Timeout (Dashboard): {command}")
+                return False
+            except (OSError, socket.error) as e:
+                self.logger.warn(f"Dashboard socket error: {e}. Reconnecting...")
+                if self._reconnect_dashboard():
+                    try:
+                        self.dashboard.send(cmd_bytes)
+                        return True
+                    except Exception as retry_e:
+                        self.logger.error(f"Retry failed: {retry_e}")
+                return False
+            except Exception as e:
+                self.logger.error(f"Dashboard command failed: {e}")
+                return False
     
     def send_and_wait(self, command, timeout=2.0):
         """
@@ -125,41 +128,42 @@ class RobotConnection:
         if not self.connected:
              if not self._reconnect_dashboard():
                 return None
-        try:
-            # ส่งคำสั่ง
-            cmd_bytes = command.encode() if isinstance(command, str) else command
-            if not cmd_bytes.endswith(b'\n'):
-                cmd_bytes += b'\n'
-            self.dashboard.send(cmd_bytes)
-            
-            # รอรับ response
-            self.dashboard.settimeout(timeout)
-            response = self.dashboard.recv(4096).decode('utf-8').strip()
-            return response
-            
-        except socket.timeout:
-            self.logger.warn(f"Timeout waiting for response to: {command}")
-            return None
-            
-        except (OSError, socket.error) as e:
-            self.logger.warn(f"Dashboard socket error in send_and_wait: {e}. Reconnecting...")
-            if self._reconnect_dashboard():
-                try:
-                    self.dashboard.send(cmd_bytes)
-                    self.dashboard.settimeout(timeout)
-                    response = self.dashboard.recv(4096).decode('utf-8').strip()
-                    return response
-                except Exception as retry_e:
-                    self.logger.error(f"Retry failed: {retry_e}")
-                    return None
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"send_and_wait failed: {e}")
-            return None
-        finally:
-            # Reset timeout
-            self.dashboard.settimeout(SOCKET_TIMEOUT)
+        with self.dash_lock:
+            try:
+                # ส่งคำสั่ง
+                cmd_bytes = command.encode() if isinstance(command, str) else command
+                if not cmd_bytes.endswith(b'\n'):
+                    cmd_bytes += b'\n'
+                self.dashboard.send(cmd_bytes)
+                
+                # รอรับ response
+                self.dashboard.settimeout(timeout)
+                response = self.dashboard.recv(4096).decode('utf-8').strip()
+                return response
+                
+            except socket.timeout:
+                self.logger.warn(f"Timeout waiting for response to: {command}")
+                return None
+                
+            except (OSError, socket.error) as e:
+                self.logger.warn(f"Dashboard socket error in send_and_wait: {e}. Reconnecting...")
+                if self._reconnect_dashboard():
+                    try:
+                        self.dashboard.send(cmd_bytes)
+                        self.dashboard.settimeout(timeout)
+                        response = self.dashboard.recv(4096).decode('utf-8').strip()
+                        return response
+                    except Exception as retry_e:
+                        self.logger.error(f"Retry failed: {retry_e}")
+                        return None
+                return None
+                
+            except Exception as e:
+                self.logger.error(f"send_and_wait failed: {e}")
+                return None
+            finally:
+                # Reset timeout
+                self.dashboard.settimeout(SOCKET_TIMEOUT)
     
     def send_motion_cmd(self, command):
         """ส่งคำสั่งการเคลื่อนที่"""

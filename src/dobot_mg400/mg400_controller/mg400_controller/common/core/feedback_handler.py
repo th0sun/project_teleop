@@ -117,8 +117,10 @@ class FeedbackHandler:
                 OFFSET_CMD_ID = 1112
                 self.command_id = struct.unpack_from('<Q', data, OFFSET_CMD_ID)[0]
                 
-                # Digital Output Status (Offset 1312, 64-bit mask for V4)
-                OFFSET_DO_STATUS = 1312
+                # Digital Input/Output Status (Offset 8/16, 64-bit mask for V4)
+                OFFSET_DI_STATUS = 8
+                OFFSET_DO_STATUS = 16
+                self.di_status = struct.unpack_from('<Q', data, OFFSET_DI_STATUS)[0]
                 self.do_status = struct.unpack_from('<Q', data, OFFSET_DO_STATUS)[0]
                 
             except Exception as e:

@@ -329,8 +329,8 @@ class MonitorGUI:
         self.suction_state = not self.suction_state
         self.node.request_suction(self.suction_state)
         
-        # Lockout sync for this port (16) for 0.8 seconds
-        self.lockout[VACUUM_DO_PORT] = time.time() + 0.8
+        # 🔒 Lockout sync for 1.5s to wait for hardware to respond
+        self.lockout[VACUUM_DO_PORT] = time.time() + 1.5
         
         if self.suction_state:
             self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
@@ -342,8 +342,8 @@ class MonitorGUI:
         status = self.light_states[name]
         self.node.request_light(port, status)
         
-        # Lockout sync for this port for 0.8 seconds
-        self.lockout[port] = time.time() + 0.8
+        # 🔒 Lockout sync for 1.5s to wait for hardware to respond
+        self.lockout[port] = time.time() + 1.5
         
         bg_color = color if status else COLOR_OFF
         fg_color = "white" if status else "black"
