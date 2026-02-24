@@ -111,6 +111,21 @@ class TeleopNode(Node):
         self.min_time_diff = float('inf')
         self.is_time_calibrated = False
         
+        # --- Analytics Logging ---
+        import csv
+        import datetime
+        self.csv_filename = f"teleop_analytics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        self.csv_file = open(self.csv_filename, mode='w', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow([
+            'Timestamp_ROS', 'Timestamp_Unity', 
+            'Raw_J1', 'Raw_J2', 'Raw_J3', 'Raw_J4',
+            'Pred_J1', 'Pred_J2', 'Pred_J3', 'Pred_J4'
+        ])
+        self.get_logger().info(f"📊 Logging analytics to: {self.csv_filename}")
+        self.min_time_diff = float('inf')
+        self.is_time_calibrated = False
+        
         # State Tracking
         self.target_recv_time = 0.0  # T2
         self.unity_send_time = 0.0   # T1
@@ -248,6 +263,16 @@ class TeleopNode(Node):
         # Use calibrated send time to ensure accurate dt calculation even over Tailscale
         predicted_q = self.predictor.update_and_predict(q_safe, corrected_unity_time)
         
+        # --- Log to CSV ---
+        try:
+            self.csv_writer.writerow([
+                now_ros_sec, corrected_unity_time,
+                q_safe[0], q_safe[1], q_safe[2], q_safe[3],
+                predicted_q[0], predicted_q[1], predicted_q[2], predicted_q[3]
+            ])
+        except Exception as e:
+            pass # Ignore write errors to not block the control loop
+            
         # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
         self.latest_target = predicted_q
         self.target_recv_time = now_ros_sec          # T2: ROS receive time
