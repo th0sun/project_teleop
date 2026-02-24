@@ -17,6 +17,9 @@ from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray, Int64
 import threading
 import numpy as np
 import time
+import datetime
+import csv
+import queue
 
 # Import configuration
 from mg400_controller.common.config.robot_config import (
@@ -51,6 +54,7 @@ from mg400_controller.common.logic.safety_monitor import SafetyMonitor
 from mg400_controller.common.logic.teleop_controller import TeleopController
 from mg400_controller.common.logic.target_predictor import TargetPredictor
 from mg400_controller.common.utils.latency_analyzer import LatencyAnalyzer
+from mg400_controller.common.utils.clock_calibrator import ClockCalibrator
 
 # =========================
 # === MODE SELECTION =====
@@ -110,14 +114,16 @@ class TeleopNode(Node):
         # Import MotionConfig for thresholds and Analyzer
         self.latency_analyzer = LatencyAnalyzer(motion_config)
         
-        # --- Clock Synchronization State ---
-        self.clock_offset = 0.0
-        self.min_time_diff = float('inf')
-        self.is_time_calibrated = False
+        # --- Clock Synchronization (Triple-Lock) ---
+        self.clock_calibrator = ClockCalibrator(window_size=50) # Now estimates drift automatically
         
-        # --- Analytics Logging ---
-        import csv
-        import datetime
+        # Level 3: RTT Heartbeat (ROS-side ping)
+        self.pub_heartbeat = self.create_publisher(Int64, "/teleop/ros_ping", 10)
+        self.sub_pong = self.create_subscription(String, "/teleop/unity_pong", self._unity_pong_callback, 10)
+        self.create_timer(1.0, self._publish_heartbeat) # 1Hz Ping
+        
+        # --- Analytics Logging (Async) ---
+        self.log_queue = queue.Queue()
         self.csv_filename = f"teleop_analytics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         self.csv_file = open(self.csv_filename, mode='w', newline='')
         self.csv_writer = csv.writer(self.csv_file)
@@ -126,7 +132,12 @@ class TeleopNode(Node):
             'Raw_J1', 'Raw_J2', 'Raw_J3', 'Raw_J4',
             'Pred_J1', 'Pred_J2', 'Pred_J3', 'Pred_J4'
         ])
-        self.get_logger().info(f"📊 Logging analytics to: {self.csv_filename}")
+        
+        # Start Log Worker Thread
+        self.log_worker = threading.Thread(target=self._log_worker_loop, daemon=True)
+        self.log_worker.start()
+        
+        self.get_logger().info(f"📊 Logging analytics to: {self.csv_filename} (Async Thread Started)")
         
         # State Tracking
         self.target_recv_time = 0.0  # T2
@@ -156,6 +167,10 @@ class TeleopNode(Node):
         # Tool Vector Publishers (XYZ Reading)
         self.pub_tool_actual = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_actual", 10)
         self.pub_tool_target = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_target", 10)
+        
+        # 📊 Graph Data Publishers (for monitor_gui.py visualization)
+        self.pub_predicted_target = self.create_publisher(JointState, "/teleop/predicted_target", 10)
+        self.pub_sent_command = self.create_publisher(JointState, "/teleop/sent_command", 10)
         
         # Suction Cup Control (Smart Trigger)
         self.suction_state = False
@@ -242,6 +257,67 @@ class TeleopNode(Node):
         self.get_logger().info(f"🎯 Target Change Threshold: {motion_config.TARGET_CHANGE_THRESHOLD:.3f} rad ({np.degrees(motion_config.TARGET_CHANGE_THRESHOLD):.1f} deg)")
         self.get_logger().info(f"⏱️  Stuck Time Threshold: {motion_config.STUCK_TIME_THRESHOLD:.1f} s")
         self.get_logger().info(f"🚫 No Timeout - Pure Real-Time Control")
+
+    def _log_worker_loop(self):
+        """Background thread to handle disk I/O and non-critical logging"""
+        import queue
+        while not self.stop_event.is_set() or not self.log_queue.empty():
+            try:
+                # Get log item from queue (blocking with timeout)
+                try:
+                    log_data = self.log_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                if log_data[0] == 'CSV':
+                    self.csv_writer.writerow(log_data[1])
+                    # Flush occasionally
+                    if self.log_queue.qsize() == 0:
+                        self.csv_file.flush()
+                elif log_data[0] == 'TELEOP_LATENCY':
+                    self.teleop_logger.log_latency_breakdown(*log_data[1])
+                elif log_data[0] == 'TELEOP_PERF':
+                    self.teleop_logger.log_performance_metrics(*log_data[1])
+                
+                self.log_queue.task_done()
+            except Exception as e:
+                # We don't use logger here as it might be dead or recursively called
+                print(f"Error in Log Worker: {e}")
+    
+    def _publish_heartbeat(self):
+        """Level 3: Send Ping to Unity to measure RTT"""
+        msg = Int64()
+        msg.data = int(self.get_clock().now().nanoseconds)
+        self.pub_heartbeat.publish(msg)
+
+    def _unity_pong_callback(self, msg):
+        """
+        Level 3: Receive Pong from Unity
+        msg.data format: "ros_ping_ns,unity_timestamp_sec"
+        """
+        try:
+            parts = msg.data.split(',')
+            if len(parts) < 2: return
+            
+            ros_ping_ns = int(parts[0])
+            unity_ts = float(parts[1])
+            now_ns = self.get_clock().now().nanoseconds
+            
+            # Calculate RTT
+            rtt_sec = (now_ns - ros_ping_ns) * 1e-9
+            
+            # Level 3 Estimation: Unity_Time = ROS_Time + Offset
+            # So Offset = Unity_Time - (ROS_Time_at_Unity)
+            # ROS_Time_at_Unity approx = ros_ping_ns + RTT/2
+            ros_at_unity = (ros_ping_ns * 1e-9) + (rtt_sec / 2.0)
+            true_offset = unity_ts - ros_at_unity
+            
+            # We can use this to 'nudged' the calibrator or just log it
+            # For now, ClockCalibrator's min-window is more robust against jitter
+            pass 
+        except Exception:
+            pass
+
     
     def _unity_callback(self, msg):
         """รับคำสั่งจาก Unity/VR - Store latest target only"""
@@ -260,37 +336,41 @@ class TeleopNode(Node):
             unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             now_ros_sec = self.get_clock().now().nanoseconds * 1e-9
             
-            # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION ---
-            # Find the absolute minimum difference (fastest packet over network)
-            # This isolated Network Delay from Absolute Clock Offset (e.g. 92 years diff)
-            time_diff = now_ros_sec - unity_send_time_sec
-            if time_diff < self.min_time_diff:
-                self.min_time_diff = time_diff
-                # We assume the absolute fastest ping achievable over LAN/Localhost is 1ms
-                self.clock_offset = self.min_time_diff - 0.001
-                
-                if not self.is_time_calibrated:
-                    self.get_logger().info(f"⏰ Initial Clock Sync! Unity is {self.clock_offset:.3f}s off from ROS")
-                    self.is_time_calibrated = True
-
-            # Correct Unity time to match Ubuntu time perfectly
-            corrected_unity_time = unity_send_time_sec + self.clock_offset
+            # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION (Triple-Lock) ---
+            # Level 2 & 3: Filtered Min-Window + Drift Compensation
+            corrected_unity_time = self.clock_calibrator.calibrate(unity_send_time_sec, now_ros_sec)
             
-            # 3. Kalman Filter Prediction
+            # 3. Kalman Filter Prediction (with Anti-Overshoot)
             # Overcome physical robot inertia by predicting targets +80ms into the future
             # Use calibrated send time to ensure accurate dt calculation even over Tailscale
             q_actual = self.feedback.get_current_position()
+            
+            # --- Anti-Overshoot: Dynamic Prediction Damping ---
+            dist_to_target = np.linalg.norm(q_safe - q_actual)
+            velocity_mag = self.controller.robot_velocity
+            
+            # Reduce horizon if close to target or moving slowly
+            # Base = 80ms, drops to 10ms when dist < 0.1 rad
+            base_horizon = 0.08
+            dist_scale = np.clip(dist_to_target / 0.1, 0.1, 1.0)
+            vel_scale = np.clip(velocity_mag / 0.05, 0.0, 1.0)
+            dynamic_horizon = base_horizon * dist_scale * vel_scale
+            
+            self.predictor.prediction_horizon_sec = dynamic_horizon
             predicted_q = self.predictor.update_and_predict(q_safe, corrected_unity_time, q_actual=q_actual)
             
-            # --- Log to CSV ---
-            try:
-                self.csv_writer.writerow([
-                    now_ros_sec, corrected_unity_time,
-                    q_safe[0], q_safe[1], q_safe[2], q_safe[3],
-                    predicted_q[0], predicted_q[1], predicted_q[2], predicted_q[3]
-                ])
-            except Exception:
-                pass # Ignore write errors to not block the control loop
+            # 📊 Publish Predicted Target for GUI graph
+            pred_msg = JointState()
+            pred_msg.header.stamp = self.get_clock().now().to_msg()
+            pred_msg.position = predicted_q.tolist()
+            self.pub_predicted_target.publish(pred_msg)
+            
+            # --- Log to CSV (Async) ---
+            self.log_queue.put(('CSV', [
+                now_ros_sec, corrected_unity_time,
+                q_safe[0], q_safe[1], q_safe[2], q_safe[3],
+                predicted_q[0], predicted_q[1], predicted_q[2], predicted_q[3]
+            ]))
                 
             # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
             self.latest_target = predicted_q
@@ -447,14 +527,15 @@ class TeleopNode(Node):
                         self.get_logger().info(report)
                         
                         # CSV Log
-                        self.teleop_logger.log_latency_breakdown(
-                            now, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
-                            metrics['network_ms'], metrics['decision_ms'], metrics['command_ms'],
-                            metrics['response_ms'], metrics['motion_time_ms'], metrics['execution_ms'],
-                            metrics['e2e_ms'],
-                            metrics['target'], metrics['final_q'],
-                            metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
-                        )
+                    # CSV Log (Async)
+                    self.log_queue.put(('TELEOP_LATENCY', [
+                        now, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
+                        metrics['network_ms'], metrics['decision_ms'], metrics['command_ms'],
+                        metrics['response_ms'], metrics['motion_time_ms'], metrics['execution_ms'],
+                        metrics['e2e_ms'],
+                        metrics['target'], metrics['final_q'],
+                        metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
+                    ]))
             
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION
@@ -500,22 +581,32 @@ class TeleopNode(Node):
                     )
                     self.get_logger().info(msg)
                     
+                    # 📊 Publish Sent Command for GUI graph
+                    sent_msg = JointState()
+                    sent_msg.header.stamp = self.get_clock().now().to_msg()
+                    sent_msg.position = q_safe.tolist()
+                    self.pub_sent_command.publish(sent_msg)
+                    
                     # Update State in Controller
                     self.controller.last_sent_target = q_safe
                     self.controller.last_sent_time = t3_cmd_send
                     
-                    self.teleop_logger.log_performance_metrics(
+                    self.log_queue.put(('TELEOP_PERF', [
                         now, self.unity_send_time, self.target_recv_time, t3_cmd_send,
                         0.0, 0.0, # Network delay calculated in analyzer report
                         q_current, self.latest_target,
                         dist_to_last, send_reason,
                         time_since_last, velocity_mag, self.controller.robot_velocity
-                    )
+                    ]))
     
     def shutdown(self):
         """ปิดทุกอย่างอย่างเรียบร้อย"""
         self.get_logger().info("Shutting down...")
         self.stop_event.set()
+        
+        # Wait for log queue to drain
+        if hasattr(self, 'log_worker'):
+            self.log_worker.join(timeout=1.0)
         
         self.feedback.stop()
         self.interactive.stop()
