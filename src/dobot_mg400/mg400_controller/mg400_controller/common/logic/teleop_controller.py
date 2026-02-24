@@ -21,7 +21,7 @@ import math
 from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import (
     PROXIMITY_THRESHOLD, STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
-    TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, MIN_UPDATE_INTERVAL
+    TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC
 )
 
 class TeleopController:
@@ -88,7 +88,7 @@ class TeleopController:
             
         return False
 
-    def should_send_command(self, latest_target, q_current, current_queue_depth):
+    def should_send_command(self, latest_target, q_current):
         """
         The Core Decision Logic: Should we send a command?
         
@@ -111,24 +111,20 @@ class TeleopController:
         dist_to_last = np.max(np.abs(q_current - self.last_sent_target))
         change_in_target = np.max(np.abs(latest_target - self.last_sent_target))
         
-        # 1.5 Strategy A0: Continuous Update (Time-Based Catch-up)
-        # Prevents "Lag" by forcing an update if we haven't sent one in a while (0.2s).
-        # This fixes the "Slower than before" feeling by not waiting forever for arrival.
-        if (now - self.last_sent_time) > MIN_UPDATE_INTERVAL:
+        # ========================================================
+        # 🚀 STRATEGY A: VELOCITY-BASED DYNAMIC PROXIMITY
+        # ========================================================
+        # ดูจุดที่หุ่นกำลังพุ่งไป ถ้าความเร็วสูงมาก ระยะส่งต่อก็จะกว้าง(ไกล)ตาม
+        
+        # นี่คือเส้นสีแดงที่ถ้าหุ่นวิ่งข้ามเมื่อไหร่ เราจะสโลว์ดาวน์เป้าใหม่ทันที
+        trigger_distance = DYNAMIC_PROXIMITY_BASE_RAD + (velocity_mag * DYNAMIC_PROXIMITY_LOOKAHEAD_SEC)
+        
+        if dist_to_last < trigger_distance:
             if change_in_target > SPATIAL_THRESHOLD:
                 self.last_sent_target = latest_target
                 self.last_sent_time = now
-                self.stuck_start_time = 0 
-                return True, f"Stream_Time{now - self.last_sent_time:.3f}s_Q{current_queue_depth}"
-        
-        # 2. Strategy A: Dynamic Queue Buffer (Smooth Real-time)
-        # Send new command when queue is nearly empty to maintain Continuous Path (CP)
-        if change_in_target > SPATIAL_THRESHOLD:
-            if current_queue_depth < 2:
-                self.last_sent_target = latest_target
-                self.last_sent_time = now
                 self.stuck_start_time = 0 # Reset stuck timer
-                return True, f"Buffer_Refill_Q{current_queue_depth}"
+                return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
         
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!

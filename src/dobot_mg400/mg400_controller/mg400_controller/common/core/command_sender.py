@@ -18,7 +18,6 @@ class CommandSender:
         self.connection = robot_connection
         self.feedback = feedback_handler
         self.logger = logger
-        self.sent_command_count = 0  # <--- NEW: Track total commands sent to robot
     
     def send(self, command):
         """
@@ -28,27 +27,10 @@ class CommandSender:
         success = self.connection.send_motion_cmd(command)
         
         if success:
-            self.sent_command_count += 1  # <--- NEW: Increment on success
             return True
         else:
             self.logger.error("❌ Failed to send motion command")
             return False
-
-    def get_current_queue_depth(self):
-        """
-        คำนวณหาจำนวนคำสั่งที่ค้างอยู่ในคิวของหุ่นยนต์
-        Queue Depth = จำนวนที่สั่งไปทั้งหมด - ID ล่าสุดที่หุ่นทำเสร็จ
-        """
-        completed_id = self.feedback.get_command_id()
-        depth = self.sent_command_count - completed_id
-        
-        # ป้องกันค่าติดลบกรณีดึง feedback มาก่อนหรือรีสตาร์ทหุ่น
-        if depth < 0 or depth > 100:  
-            # หากความต่างมากผิดปกติ (เช่น reboot) ให้รีเซ็ตค่า sent ให้ตางกับ completed_id
-            self.sent_command_count = completed_id
-            return 0
-            
-        return depth
 
     def set_digital_output(self, port: int, status: bool) -> bool:
         """

@@ -392,13 +392,10 @@ class TeleopNode(Node):
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION
             # ---------------------------------------------------------
-            # Read real-time queue depth from sender (which reads from feedback)
-            current_queue_depth = self.sender.get_current_queue_depth()
             
             should_send, send_reason = self.controller.should_send_command(
                 self.latest_target, 
-                q_current, 
-                current_queue_depth
+                q_current
             )
             
             if should_send:
