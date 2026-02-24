@@ -66,3 +66,4 @@ YELLOW_LIGHT_DO_PORT = 4 # Yellow Light
 RED_LIGHT_DO_PORT = 5    # Red Light
 SMART_SUCTION_ENABLED = True        # True = รอหุ่นวิ่งถึงเป้าหมายก่อนถึงสั่งดูด, False = สั่งดูดทันทีที่กดปุ่มใน VR
 SUCTION_ACTIVATION_THRESHOLD = 0.05 # rad (~2.8°) - ระยะห่างที่ยอมให้หัวดูดทำงาน (ใช้เมื่อ SMART_SUCTION_ENABLED = True)
+BLOW_DURATION = 0.4                 # วินาที: ระยะเวลาที่เป่าลม (Pressure) หลังจากสั่งหยุดดูด ก่อนจะปิดทั้ง 2 พอร์ต (Safety Release)

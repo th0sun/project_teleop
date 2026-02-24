@@ -314,6 +314,10 @@ class MonitorGUI:
         self.var_latency = tk.StringVar(value="Waiting for data...")
         self.lbl_latency = ttk.Label(status_frame, textvariable=self.var_latency, font=FONT_LATENCY)
         self.lbl_latency.pack(anchor=tk.W)
+        
+        self.var_do_hex = tk.StringVar(value="DO: 0x0000")
+        self.lbl_do_hex = ttk.Label(status_frame, textvariable=self.var_do_hex, font=FONT_LATENCY, foreground="gray")
+        self.lbl_do_hex.pack(anchor=tk.W)
 
         # Start Update Loop
         self.update_gui()
@@ -462,6 +466,9 @@ class MonitorGUI:
         else:
             status_text = f"Cmd Age: {time_since_target*1000:.0f}ms | Feed Age: {time_since_actual*1000:.0f}ms"
             self.var_latency.set(status_text)
+            
+        # Update DO Hex for debugging
+        self.var_do_hex.set(f"DO Status (Hardware): 0x{self.node.latest_do_status:04X} | Bits: {bin(self.node.latest_do_status)}")
             
         # --- Logging Data ---
         if self.is_logging:

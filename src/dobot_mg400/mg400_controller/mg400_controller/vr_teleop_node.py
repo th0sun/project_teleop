@@ -160,6 +160,7 @@ class TeleopNode(Node):
         self.suction_pending = False
         self.suction_requested_state = False
         self.suction_target_q = None
+        self.last_do_status = 0 # For debugging changes
         self.sub_suction = self.create_subscription(
             Bool, SUCTION_TOPIC, self._suction_callback, 10
         )
@@ -305,22 +306,42 @@ class TeleopNode(Node):
         if requested_state != self.suction_state and requested_state != self.suction_requested_state:
             self.suction_requested_state = requested_state
             
-            if SMART_SUCTION_ENABLED and self.latest_target is not None:
+            if motion_config.SMART_SUCTION_ENABLED and self.latest_target is not None:
                 self.suction_target_q = self.latest_target.copy()
                 self.suction_pending = True
                 self.get_logger().info(f"🔘 Smart Suction queued: {'ON' if requested_state else 'OFF'} (Waiting for robot to reach target)")
             else:
-                # สั่งทันที (Immediate Mode) หรือ Fallback กรณีไม่ได้เปิด Smart Suction
-                if self.connection.connected:
-                    success_vac = self.sender.set_digital_output(VACUUM_DO_PORT, requested_state)
-                    success_blow = self.sender.set_digital_output(BLOW_DO_PORT, not requested_state)
-                    success = success_vac and success_blow
-                    if success:
-                        self.suction_state = requested_state
-                        if not SMART_SUCTION_ENABLED:
-                            self.get_logger().info(f"🔘 Immediate Suction Activated: {'ON' if requested_state else 'OFF'}")
-                else:
-                    self.get_logger().warn("⚠️ Cannot toggle suction; Robot disconnected.")
+                # สั่งทันที (Immediate Mode)
+                self._handle_suction_cmd(requested_state)
+
+    def _handle_suction_cmd(self, state):
+        """จัดการการเปิด/ปิดหัวดูดแบบมีลำดับ (Sequence Control)"""
+        if not self.connection.connected:
+            self.get_logger().warn("⚠️ Cannot toggle suction; Robot disconnected.")
+            return
+
+        if state:
+            # 🟢 เปิดการดูด (Suck)
+            self.sender.set_digital_output(motion_config.VACUUM_DO_PORT, True)
+            self.sender.set_digital_output(motion_config.BLOW_DO_PORT, False)
+            self.suction_state = True
+            self.get_logger().info("吸 [SUCK] Vacuum ON, Blow OFF")
+        else:
+            # 🔴 เริ่มขั้นตอนการปล่อยลูก (Release Sequence: Vacuum OFF -> Blow ON -> Auto-Off)
+            self.sender.set_digital_output(motion_config.VACUUM_DO_PORT, False)
+            self.sender.set_digital_output(motion_config.BLOW_DO_PORT, True)
+            self.get_logger().info(f"💨 [RELEASE] Vacuum OFF, Blow ON (for {motion_config.BLOW_DURATION}s)")
+            
+            # ตั้งเวลาปิดพอร์ตเป่าลมอัตโนมัติ (Safety Timer)
+            def turn_off_blow():
+                try:
+                    self.sender.set_digital_output(motion_config.BLOW_DO_PORT, False)
+                    self.get_logger().info("🛑 [IDLE] Blow OFF, All suction ports closed")
+                    self.suction_state = False
+                except Exception as e:
+                    self.get_logger().error(f"Error in turn_off_blow timer: {e}")
+            
+            threading.Timer(motion_config.BLOW_DURATION, turn_off_blow).start()
     
     def _light_callback(self, msg):
         """Callback for external light control (e.g. from GUI)"""
@@ -364,17 +385,8 @@ class TeleopNode(Node):
                 # ถ้าระยะห่างน้อยกว่า Threshold ที่ตั้งไว้ (ถึงเป้าหมายแล้ว)
                 # หรือถ้าหุ่นยนต์หยุดนิ่งสนิทแล้ว (Stuck/Reached) ก็ให้ยิงคำสั่งได้เลยเหมือนกันป้องกันการค้าง
                 if dist < SUCTION_ACTIVATION_THRESHOLD or self.controller.stuck_start_time > 0:
-                    if self.connection.connected:
-                        success_vac = self.sender.set_digital_output(VACUUM_DO_PORT, self.suction_requested_state)
-                        success_blow = self.sender.set_digital_output(BLOW_DO_PORT, not self.suction_requested_state)
-                        success = success_vac and success_blow
-                        if success:
-                            self.get_logger().info(
-                                f"🎯 Smart Suction Activated: {'ON' if self.suction_requested_state else 'OFF'} "
-                                f"(Error: {dist:.4f} rad" + (" - Triggered by Stillness" if dist >= SUCTION_ACTIVATION_THRESHOLD else "") + ")"
-                            )
-                            self.suction_state = self.suction_requested_state
-                            self.suction_pending = False
+                    self._handle_suction_cmd(self.suction_requested_state)
+                    self.suction_pending = False
             
             # === PUBLISH TOOL VECTORS (XYZ) ===
             tool_act = self.feedback.get_tool_vector()
@@ -389,9 +401,14 @@ class TeleopNode(Node):
             self.pub_tool_target.publish(msg_tgt)
             
             # === PUBLISH DO STATUS (Bitmask) ===
+            do_status = self.feedback.get_do_status()
             do_msg = Int64()
-            do_msg.data = int(self.feedback.get_do_status())
+            do_msg.data = int(do_status)
             self.pub_do_status.publish(do_msg)
+            
+            if do_status != self.last_do_status:
+                self.get_logger().info(f"📣 DO STATUS CHANGED: {bin(do_status)} (Hex: {hex(do_status)})")
+                self.last_do_status = do_status
             
             # === MOTION TRACKING (Latency Analyzer) ===
             # T4: Motion Start
