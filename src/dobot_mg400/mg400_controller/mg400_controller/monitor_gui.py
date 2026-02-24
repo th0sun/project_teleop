@@ -26,9 +26,9 @@ from mg400_controller.common.config.motion_config import (
     UNITY_TOPIC, SUCTION_TOPIC, LIGHT_TOPIC, 
     VACUUM_DO_PORT, BLOW_DO_PORT, 
     GREEN_LIGHT_DO_PORT, YELLOW_LIGHT_DO_PORT, RED_LIGHT_DO_PORT,
-    DO_STATUS_TOPIC
+    DO_STATUS_TOPIC, ROBOT_MODE_TOPIC, ERROR_STATUS_TOPIC
 )
-from std_msgs.msg import Bool, Int32MultiArray, Int64
+from std_msgs.msg import Bool, Int32MultiArray, Int64, Int32
 
 # Configuration
 ACTUAL_TOPIC_NAME = "/joint_states"
@@ -104,6 +104,8 @@ class JointMonitorNode(Node):
         self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_do_status = 0
+        self.latest_robot_mode = 0
+        self.latest_error_status = 0
         self.last_target_time = 0.0
         self.last_actual_time = 0.0
 
@@ -113,6 +115,8 @@ class JointMonitorNode(Node):
         self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
         self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
         self.sub_do_status = self.create_subscription(Int64, DO_STATUS_TOPIC, self.listener_callback_do_status, 10)
+        self.sub_robot_mode = self.create_subscription(Int32, ROBOT_MODE_TOPIC, self.listener_callback_robot_mode, 10)
+        self.sub_error_status = self.create_subscription(Int32, ERROR_STATUS_TOPIC, self.listener_callback_error_status, 10)
 
     def request_suction(self, state):
         """Publish suction request via ROS"""
@@ -145,6 +149,12 @@ class JointMonitorNode(Node):
         
     def listener_callback_do_status(self, msg):
         self.latest_do_status = int(msg.data)
+        
+    def listener_callback_robot_mode(self, msg):
+        self.latest_robot_mode = int(msg.data)
+        
+    def listener_callback_error_status(self, msg):
+        self.latest_error_status = int(msg.data)
 
 class MonitorGUI:
     def __init__(self, root, node):
@@ -400,9 +410,8 @@ class MonitorGUI:
                 self.lbls_diff[i].configure(foreground="green")
 
         # --- Update System Info (Mode/Error) ---
-        err_info = self.node.feedback.get_error_status()
-        mode = err_info['robot_mode']
-        error = err_info['error_status']
+        mode = self.node.latest_robot_mode
+        error = self.node.latest_error_status
         
         mode_names = {
             1: "INIT", 4: "DISABLED", 5: "ENABLE", 6: "DRAG", 7: "RUN", 9: "ERROR", 11: "COLLISION"

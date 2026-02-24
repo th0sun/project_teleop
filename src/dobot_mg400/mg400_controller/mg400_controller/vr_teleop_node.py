@@ -13,7 +13,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray, Int64
+from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray, Int64, Int32
 import threading
 import numpy as np
 import time
@@ -150,6 +150,8 @@ class TeleopNode(Node):
         self.pub_debug = self.create_publisher(String, DEBUG_TOPIC, 10)
         self.pub_safety = self.create_publisher(String, SAFETY_TOPIC, 10)
         self.pub_do_status = self.create_publisher(Int64, motion_config.DO_STATUS_TOPIC, 10)
+        self.pub_robot_mode = self.create_publisher(Int32, motion_config.ROBOT_MODE_TOPIC, 10)
+        self.pub_error_status = self.create_publisher(Int32, motion_config.ERROR_STATUS_TOPIC, 10)
         
         # Tool Vector Publishers (XYZ Reading)
         self.pub_tool_actual = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_actual", 10)
@@ -409,6 +411,16 @@ class TeleopNode(Node):
             if do_status != self.last_do_status:
                 self.get_logger().info(f"📣 DO STATUS CHANGED: {bin(do_status)} (Hex: {hex(do_status)})")
                 self.last_do_status = do_status
+            
+            # === PUBLISH ROBOT MODE & ERROR ===
+            mode_msg = Int32()
+            mode_msg.data = int(self.feedback.get_robot_mode())
+            self.pub_robot_mode.publish(mode_msg)
+            
+            err_info = self.feedback.get_error_status()
+            err_msg = Int32()
+            err_msg.data = int(err_info['error_status'])
+            self.pub_error_status.publish(err_msg)
             
             # === MOTION TRACKING (Latency Analyzer) ===
             # T4: Motion Start
