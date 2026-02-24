@@ -99,10 +99,10 @@ class TargetPredictor:
         velocities = self.x[:, 1, 0]
         max_vel = np.max(np.abs(velocities))
         
-        # Deadband: If highest joint velocity is < 1.0 deg/sec
+        # Deadband: If highest joint velocity is < 0.2 deg/sec
         # We classify this as "The hand has stopped".
         # Force the output to the exact physical hand position to prevent drift.
-        if max_vel < math.radians(1.0):
+        if max_vel < math.radians(0.2):
             return raw_target_q
             
         # --- 4. PREDICT FUTURE HORIZON ---
@@ -124,11 +124,11 @@ class TargetPredictor:
             tracking_error = np.max(np.abs(raw_target_q - q_actual))
             
             # Scaling Logic:
-            # 0.05 rad (~3 deg) -> Start dampening
-            # 0.01 rad (~0.5 deg) -> Minimum prediction
-            if tracking_error < 0.05:
-                # Calculate scale from 0.0 (error=0.01) to 1.0 (error=0.05)
-                scale = np.clip((tracking_error - 0.01) / (0.05 - 0.01), 0.0, 1.0)
+            # 0.03 rad (~1.7 deg) -> Start dampening
+            # 0.005 rad (~0.3 deg) -> Minimum prediction
+            if tracking_error < 0.03:
+                # Calculate scale from 0.0 (error=0.005) to 1.0 (error=0.03)
+                scale = np.clip((tracking_error - 0.005) / (0.03 - 0.005), 0.0, 1.0)
                 final_horizon = self.horizon * scale
         
         # If moving, project the physical state forward by `final_horizon` seconds
