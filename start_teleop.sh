@@ -32,7 +32,8 @@ else
 fi
 
 # 3. Commands
-_src="source install/setup.bash"
+WS="$HOME/project_teleop_ws"
+_src="cd $WS && source install/setup.bash"
 _ip="export ROBOT_IP=$ROBOT_IP"
 
 # note: exec bash ทำให้ pane ค้างไว้หลัง node หยุด, กด ↑ Enter รันใหม่ได้
