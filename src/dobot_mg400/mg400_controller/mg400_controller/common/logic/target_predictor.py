@@ -44,9 +44,10 @@ class TargetPredictor:
         self.I = np.eye(2)
         self.is_initialized = False
 
-    def update_and_predict(self, raw_target_q, timestamp_sec):
+    def update_and_predict(self, raw_target_q, timestamp_sec, q_actual=None):
         """
         Takes the raw [4,] joint target from Unity and the package timestamp.
+        Optionally takes q_actual from robot to scale the prediction horizon.
         Returns the [4,] predicted future joint target.
         """
         # 0. Initialize on first frame
@@ -105,7 +106,32 @@ class TargetPredictor:
             return raw_target_q
             
         # --- 4. PREDICT FUTURE HORIZON ---
-        # If moving, project the physical state forward by `horizon` seconds
-        future_q = self.x[:, 0, 0] + (velocities * self.horizon)
+        # Anti-overshoot for large point-to-point jumps (e.g., Teach & Repeat)
+        # If the target is very far away from the current state (a sudden jump), 
+        # do not predict into the future because that causes the command to overshoot.
+        position_error = np.max(np.abs(raw_target_q - self.x[:, 0, 0]))
+        if position_error > 0.3: # ~17 degrees
+            return raw_target_q
+            
+        # --- 🌊 DAMPENED DYNAMIC HORIZON ---
+        # Scale the horizon based on how far the robot is from the target.
+        # If the robot is close (low tracking error), reduce prediction to gain precision.
+        # If the robot is far (high tracking error), use full prediction to gain speed.
+        final_horizon = self.horizon
+        
+        if q_actual is not None:
+            # Tracking Error = Distance between current hand position and robot actual position
+            tracking_error = np.max(np.abs(raw_target_q - q_actual))
+            
+            # Scaling Logic:
+            # 0.05 rad (~3 deg) -> Start dampening
+            # 0.01 rad (~0.5 deg) -> Minimum prediction
+            if tracking_error < 0.05:
+                # Calculate scale from 0.0 (error=0.01) to 1.0 (error=0.05)
+                scale = np.clip((tracking_error - 0.01) / (0.05 - 0.01), 0.0, 1.0)
+                final_horizon = self.horizon * scale
+        
+        # If moving, project the physical state forward by `final_horizon` seconds
+        future_q = self.x[:, 0, 0] + (velocities * final_horizon)
         
         return future_q

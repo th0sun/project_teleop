@@ -136,8 +136,8 @@ class TeleopController:
             error_to_last_target = np.max(np.abs(q_current - self.last_sent_target))
             
             if self.check_stuck_condition(velocity_mag, error_to_last_target, now):
-                # Only trigger if user REALLY moved their hand (prevent jitter loops)
-                if change_in_target > TARGET_CHANGE_THRESHOLD:
+                # Only trigger if user REALLY moved their hand OR if the robot is far from the current target
+                if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > PROXIMITY_THRESHOLD:
                     self.logger.warn(f"⚠️ Stuck Detected (Vel: {velocity_mag:.4f}) - Retriggering")
                     self.last_sent_target = latest_target
                     self.last_sent_time = now

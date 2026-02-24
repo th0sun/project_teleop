@@ -25,7 +25,7 @@ from mg400_controller.common.config.robot_config import (
     JOINT_LIMITS,
     ELBOW_ANGLE_LIMIT
 )
-from mg400_controller.common.config.motion_config import UNITY_TOPIC, RVIZ_TOPIC, DEBUG_TOPIC, SAFETY_TOPIC, HAPTIC_TOPIC, SUCTION_TOPIC, SUCTION_DO_PORT, SUCTION_ACTIVATION_THRESHOLD, SMART_SUCTION_ENABLED
+from mg400_controller.common.config.motion_config import UNITY_TOPIC, RVIZ_TOPIC, DEBUG_TOPIC, SAFETY_TOPIC, HAPTIC_TOPIC, SUCTION_TOPIC, VACUUM_DO_PORT, BLOW_DO_PORT, SUCTION_ACTIVATION_THRESHOLD, SMART_SUCTION_ENABLED
 import mg400_controller.common.config.motion_config as motion_config
 
 # Import core modules
@@ -261,7 +261,8 @@ class TeleopNode(Node):
         # 3. Kalman Filter Prediction
         # Overcome physical robot inertia by predicting targets +80ms into the future
         # Use calibrated send time to ensure accurate dt calculation even over Tailscale
-        predicted_q = self.predictor.update_and_predict(q_safe, corrected_unity_time)
+        q_actual = self.feedback.get_current_position()
+        predicted_q = self.predictor.update_and_predict(q_safe, corrected_unity_time, q_actual=q_actual)
         
         # --- Log to CSV ---
         try:
@@ -293,7 +294,9 @@ class TeleopNode(Node):
             else:
                 # สั่งทันที (Immediate Mode) หรือ Fallback กรณีไม่ได้เปิด Smart Suction
                 if self.connection.connected:
-                    success = self.sender.set_digital_output(SUCTION_DO_PORT, requested_state)
+                    success_vac = self.sender.set_digital_output(VACUUM_DO_PORT, requested_state)
+                    success_blow = self.sender.set_digital_output(BLOW_DO_PORT, not requested_state)
+                    success = success_vac and success_blow
                     if success:
                         self.suction_state = requested_state
                         if not SMART_SUCTION_ENABLED:
@@ -334,7 +337,9 @@ class TeleopNode(Node):
                 # หรือถ้าหุ่นยนต์หยุดนิ่งสนิทแล้ว (Stuck/Reached) ก็ให้ยิงคำสั่งได้เลยเหมือนกันป้องกันการค้าง
                 if dist < SUCTION_ACTIVATION_THRESHOLD or self.controller.stuck_start_time > 0:
                     if self.connection.connected:
-                        success = self.sender.set_digital_output(SUCTION_DO_PORT, self.suction_requested_state)
+                        success_vac = self.sender.set_digital_output(VACUUM_DO_PORT, self.suction_requested_state)
+                        success_blow = self.sender.set_digital_output(BLOW_DO_PORT, not self.suction_requested_state)
+                        success = success_vac and success_blow
                         if success:
                             self.get_logger().info(
                                 f"🎯 Smart Suction Activated: {'ON' if self.suction_requested_state else 'OFF'} "

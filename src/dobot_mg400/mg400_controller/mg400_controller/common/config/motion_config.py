@@ -57,6 +57,10 @@ HAPTIC_TOPIC = "/mg400/haptic_feedback" # Collision-based haptic feedback for VR
 SUCTION_TOPIC = "/vr/suction_cmd" # สั่งเปิด/ปิดหัวดูดจาก Unity (std_msgs/Bool)
 
 # 🛠️ Hardware Configuration
-SUCTION_DO_PORT = 9  # หมายเลขพอร์ต Digital Output ที่ต่อกับหัวดูด (ปรับแก้ได้ทีหลัง)
+VACUUM_DO_PORT = 16  # หมายเลขพอร์ต Digital Output สำหรับดูด (Vacuum/Suction)
+BLOW_DO_PORT = 15    # หมายเลขพอร์ต Digital Output สำหรับเป่าลม (Pressure/Blow)
+GREEN_LIGHT_DO_PORT = 3  # Green Light
+YELLOW_LIGHT_DO_PORT = 4 # Yellow Light
+RED_LIGHT_DO_PORT = 5    # Red Light
 SMART_SUCTION_ENABLED = True        # True = รอหุ่นวิ่งถึงเป้าหมายก่อนถึงสั่งดูด, False = สั่งดูดทันทีที่กดปุ่มใน VR
 SUCTION_ACTIVATION_THRESHOLD = 0.05 # rad (~2.8°) - ระยะห่างที่ยอมให้หัวดูดทำงาน (ใช้เมื่อ SMART_SUCTION_ENABLED = True)

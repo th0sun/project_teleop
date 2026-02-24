@@ -38,7 +38,7 @@ class CommandSender:
         เหมาะสำหรับสั่ง Gripper หรือ Suction Cup แบบ Real-time
         """
         status_val = 1 if status else 0
-        command = f"DOInstant({port}, {status_val})"
+        command = f"DOExecute({port}, {status_val})"
         
         # ส่งคำสั่งลงไปที่หุ่น
         success = self.connection.send_motion_cmd(command)

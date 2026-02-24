@@ -22,13 +22,24 @@ import csv
 import datetime
 
 # Import Configuration
-from mg400_controller.common.config.motion_config import UNITY_TOPIC
+from mg400_controller.common.config.motion_config import (
+    UNITY_TOPIC, VACUUM_DO_PORT, BLOW_DO_PORT, 
+    GREEN_LIGHT_DO_PORT, YELLOW_LIGHT_DO_PORT, RED_LIGHT_DO_PORT
+)
+from mg400_controller.common.core.robot_connection import RobotConnection
 
 # Configuration
 ACTUAL_TOPIC_NAME = "/joint_states"
 TARGET_TOPIC_NAME = UNITY_TOPIC
 TOOL_ACTUAL_TOPIC = "/mg400/tool_vector_actual"
 TOOL_TARGET_TOPIC = "/mg400/tool_vector_target"
+
+# Colors for Lights
+COLOR_OFF = "#d0d0d0"
+COLOR_GREEN = "#2ecc71"
+COLOR_YELLOW = "#f1c40f"
+COLOR_RED = "#e74c3c"
+COLOR_VACUUM = "#3498db"
 
 # Fonts
 FONT_HEADER = ("Helvetica", 14, "bold")
@@ -81,72 +92,65 @@ class JointMonitorNode(Node):
     def __init__(self):
         super().__init__('mg400_joint_monitor')
         
+        # Initialize Connection for Controls
+        self.connection = RobotConnection(self.get_logger())
+        self.is_connected = False
+        
         # Subscription for Actual Robot State
-        self.sub_actual = self.create_subscription(
-            JointState,
-            ACTUAL_TOPIC_NAME,
-            self.listener_callback_actual,
-            10
-        )
+        self.sub_actual = self.create_subscription(JointState, ACTUAL_TOPIC_NAME, self.listener_callback_actual, 10)
         
         # Subscription for Target Command (from Unity/VR)
-        self.sub_target = self.create_subscription(
-            JointState,
-            TARGET_TOPIC_NAME,
-            self.listener_callback_target,
-            10
-        )
+        self.sub_target = self.create_subscription(JointState, TARGET_TOPIC_NAME, self.listener_callback_target, 10)
         
         # Tool Vectors
-        self.sub_tool_actual = self.create_subscription(
-            Float64MultiArray,
-            TOOL_ACTUAL_TOPIC,
-            self.listener_callback_tool_actual,
-            10
-        )
-        
-        self.sub_tool_target = self.create_subscription(
-            Float64MultiArray,
-            TOOL_TARGET_TOPIC,
-            self.listener_callback_tool_target,
-            10
-        )
+        self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
+        self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
 
         self.latest_actual_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_target_joints = [0.0, 0.0, 0.0, 0.0]
-        
         self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        
         self.last_target_time = 0.0
         self.last_actual_time = 0.0
 
         self.get_logger().info(f"Subscribed to {ACTUAL_TOPIC_NAME} and {TARGET_TOPIC_NAME}")
+        
+        # Connect to robot in a separate thread to avoid blocking GUI
+        threading.Thread(target=self._try_connect, daemon=True).start()
+
+    def _try_connect(self):
+        if self.connection.connect():
+            self.is_connected = True
+            self.get_logger().info("✅ Control Channel Connected")
+        else:
+            self.get_logger().error("❌ Failed to connect to Robot Control Channel")
+
+    def send_do_execute(self, port, status):
+        """Send DOExecute command directly to robot"""
+        if not self.is_connected:
+            self.get_logger().warn(f"⚠️ Not connected to robot. Cannot set DO {port}")
+            return False
+            
+        status_val = 1 if status else 0
+        cmd = f"DOExecute({port}, {status_val})"
+        return self.connection.send_motion_cmd(cmd)
 
     def listener_callback_actual(self, msg):
         if len(msg.position) >= 9:
-            q_rad = [
-                msg.position[0], # J1
-                msg.position[1], # J2
-                msg.position[3], # J3
-                msg.position[8]  # J4
-            ]
+            q_rad = [msg.position[0], msg.position[1], msg.position[3], msg.position[8]]
             self.latest_actual_joints = list(np.degrees(q_rad))
             self.last_actual_time = time.time()
 
     def listener_callback_target(self, msg):
         if len(msg.position) >= 4:
-            q_rad = msg.position[:4]
-            self.latest_target_joints = list(np.degrees(q_rad))
-            self.last_target_time = time.time() # Update receive time
+            self.latest_target_joints = list(np.degrees(msg.position[:4]))
+            self.last_target_time = time.time()
             
     def listener_callback_tool_actual(self, msg):
-        if len(msg.data) >= 6:
-            self.latest_tool_actual = list(msg.data)
+        if len(msg.data) >= 6: self.latest_tool_actual = list(msg.data)
             
     def listener_callback_tool_target(self, msg):
-        if len(msg.data) >= 6:
-            self.latest_tool_target = list(msg.data)
+        if len(msg.data) >= 6: self.latest_tool_target = list(msg.data)
 
 class MonitorGUI:
     def __init__(self, root, node):
@@ -254,6 +258,38 @@ class MonitorGUI:
 
         ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=15)
 
+        # --- 🎮 CONTROL PANEL ---
+        control_frame = ttk.LabelFrame(main_frame, text="Robot Direct Control", padding="10")
+        control_frame.pack(fill=tk.X, pady=5)
+
+        # 🌬️ Suction Control
+        suction_row = ttk.Frame(control_frame); suction_row.pack(fill=tk.X, pady=5)
+        ttk.Label(suction_row, text="Suction:", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
+        self.suction_state = False
+        self.btn_suction = tk.Button(suction_row, text="OFF", font=FONT_VALUE, width=10, bg=COLOR_OFF, command=self.toggle_suction)
+        self.btn_suction.pack(side=tk.LEFT, padx=5)
+
+        # 🚥 Light Indicators/Controls
+        light_row = ttk.Frame(control_frame); light_row.pack(fill=tk.X, pady=10)
+        ttk.Label(light_row, text="Lights:", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
+        
+        self.light_states = { "GREEN": False, "YELLOW": False, "RED": False }
+        self.btns_light = {}
+        
+        light_configs = [
+            ("GREEN", GREEN_LIGHT_DO_PORT, COLOR_GREEN),
+            ("YELLOW", YELLOW_LIGHT_DO_PORT, COLOR_YELLOW),
+            ("RED", RED_LIGHT_DO_PORT, COLOR_RED)
+        ]
+        
+        for name, port, color in light_configs:
+            btn = tk.Button(light_row, text=name, font=("Helvetica", 10, "bold"), width=8, bg=COLOR_OFF, 
+                            command=lambda n=name, p=port, c=color: self.toggle_light(n, p, c))
+            btn.pack(side=tk.LEFT, padx=2)
+            self.btns_light[name] = btn
+
+        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
+
         # --- EXECUTION METRICS ---
         metrics_frame = ttk.LabelFrame(main_frame, text="Execution Metrics", padding="10")
         metrics_frame.pack(fill=tk.X, pady=5)
@@ -287,6 +323,29 @@ class MonitorGUI:
 
         # Start Update Loop
         self.update_gui()
+
+    def toggle_suction(self):
+        self.suction_state = not self.suction_state
+        if self.suction_state:
+            # ON: Vacuum ON, Blow OFF
+            self.node.send_do_execute(VACUUM_DO_PORT, True)
+            self.node.send_do_execute(BLOW_DO_PORT, False)
+            self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
+        else:
+            # OFF: Blow ON then OFF (standard release sequence)
+            self.node.send_do_execute(VACUUM_DO_PORT, False)
+            self.node.send_do_execute(BLOW_DO_PORT, True)
+            time.sleep(0.5) # Quick blow to release
+            self.node.send_do_execute(BLOW_DO_PORT, False)
+            self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg="black")
+
+    def toggle_light(self, name, port, color):
+        self.light_states[name] = not self.light_states[name]
+        status = self.light_states[name]
+        if self.node.send_do_execute(port, status):
+            bg_color = color if status else COLOR_OFF
+            fg_color = "white" if status else "black"
+            self.btns_light[name].config(bg=bg_color, fg=fg_color)
 
     def toggle_logging(self):
         self.is_logging = not self.is_logging
