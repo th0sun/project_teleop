@@ -4,8 +4,9 @@
 """
 🤖 MG400 Joint Monitor GUI
 Simple GUI to visualize robot joint angles in real-time.
-Now includes Target vs Actual comparison, Latency monitoring, Execution Metrics, End Effector (XYZ) Monitoring,
-and Real-Time 4-Line Joint Tracking Graphs.
+Now includes Target vs Actual comparison, Latency monitoring, Execution Metrics,
+End Effector (XYZ) Monitoring, Real-Time 4-Line Joint Tracking Graphs,
+and Auto-Session Logging.
 """
 
 import rclpy
@@ -21,6 +22,7 @@ import time
 import math
 import csv
 import datetime
+import os
 from collections import deque
 
 # --- Matplotlib ---
@@ -75,6 +77,80 @@ GRAPH_UPDATE_HZ = 20      # Update rate
 # Motion Detection Thresholds
 START_THRESHOLD = 2.0  # degrees (Start timer if error > this)
 STOP_THRESHOLD = 0.5   # degrees (Stop timer if error < this)
+
+class SessionLogger:
+    """
+    Auto-starts on GUI launch.
+    Creates ~/project_teleop_ws/session_logs/YYYYMMDD_HHMMSS/ per session.
+    Logs all 4 joint streams (Unity, Predicted, Sent, Actual) + XYZ to CSV.
+    Timestamp = real wall-clock time (UTC+7 or system local time), accurate.
+    """
+    BASE_DIR = os.path.expanduser("~/project_teleop_ws/session_logs")
+
+    def __init__(self):
+        # Create session folder e.g. session_logs/20260225_032100/
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_dir = os.path.join(self.BASE_DIR, ts)
+        os.makedirs(self.session_dir, exist_ok=True)
+
+        # --- joints_tracking.csv ---
+        jt_path = os.path.join(self.session_dir, "joints_tracking.csv")
+        self._jt_file = open(jt_path, 'w', newline='')
+        self._jt_writer = csv.writer(self._jt_file)
+        self._jt_writer.writerow([
+            "timestamp", "elapsed_s",
+            "unity_j1", "unity_j2", "unity_j3", "unity_j4",
+            "predicted_j1", "predicted_j2", "predicted_j3", "predicted_j4",
+            "sent_j1", "sent_j2", "sent_j3", "sent_j4",
+            "actual_j1", "actual_j2", "actual_j3", "actual_j4",
+        ])
+
+        # --- xyz_tracking.csv ---
+        xyz_path = os.path.join(self.session_dir, "xyz_tracking.csv")
+        self._xyz_file = open(xyz_path, 'w', newline='')
+        self._xyz_writer = csv.writer(self._xyz_file)
+        self._xyz_writer.writerow([
+            "timestamp", "elapsed_s",
+            "target_x", "target_y", "target_z",
+            "actual_x", "actual_y", "actual_z",
+            "diff_x", "diff_y", "diff_z",
+        ])
+
+        self._start_time = time.time()
+        self._lock = threading.Lock()
+        print(f"[SessionLogger] Logging to: {self.session_dir}")
+
+    def log_joints(self, unity, predicted, sent, actual):
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        elapsed = round(time.time() - self._start_time, 3)
+        row = [ts, elapsed] + \
+              [round(v, 4) for v in unity] + \
+              [round(v, 4) for v in predicted] + \
+              [round(v, 4) for v in sent] + \
+              [round(v, 4) for v in actual]
+        with self._lock:
+            self._jt_writer.writerow(row)
+
+    def log_xyz(self, target, actual):
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        elapsed = round(time.time() - self._start_time, 3)
+        diff = [round(actual[i] - target[i], 3) for i in range(3)]
+        row = [ts, elapsed] + \
+              [round(v, 3) for v in target] + \
+              [round(v, 3) for v in actual] + diff
+        with self._lock:
+            self._xyz_writer.writerow(row)
+
+    def flush(self):
+        with self._lock:
+            self._jt_file.flush()
+            self._xyz_file.flush()
+
+    def close(self):
+        with self._lock:
+            self._jt_file.close()
+            self._xyz_file.close()
+
 
 class ExecutionMonitor:
     def __init__(self):
@@ -404,6 +480,10 @@ class MonitorGUI:
         self.last_sent_values = [0.0] * 4  # Hold-last for staircase sent line
         self.graph_start_time = time.time()
         
+        # ✅ Auto-start session logger
+        self.session_logger = SessionLogger()
+        self._log_flush_counter = 0
+        
         for i in range(4):
             ax = self.fig.add_subplot(4, 1, i + 1)
             ax.set_facecolor("#0d0d1a")
@@ -481,6 +561,19 @@ class MonitorGUI:
                 ax.set_ylim(mn - pad, mx + pad)
             
             all_lines.extend([l_unity, l_pred, l_sent, l_actual])
+        
+        # ✅ Log to CSV (every frame = 20Hz)
+        self.session_logger.log_joints(
+            unity=list(self.node.latest_target_joints),
+            predicted=list(self.node.latest_predicted_joints),
+            sent=list(self.last_sent_values),
+            actual=list(self.node.latest_actual_joints),
+        )
+        # Flush every ~5s (100 frames @ 20Hz)
+        self._log_flush_counter += 1
+        if self._log_flush_counter >= 100:
+            self.session_logger.flush()
+            self._log_flush_counter = 0
         
         return all_lines
 
@@ -640,6 +733,11 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            gui.session_logger.close()
+            print("[SessionLogger] Log closed.")
+        except Exception:
+            pass
         node.destroy_node()
         rclpy.shutdown()
         sys.exit(0)
