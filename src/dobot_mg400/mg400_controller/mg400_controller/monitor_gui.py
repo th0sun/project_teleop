@@ -152,6 +152,9 @@ class MonitorGUI:
         self.node = node
         self.monitor = ExecutionMonitor()
         
+        # 🛡️ Sync Lockout (to avoid flickering when hardware feedback is slightly delayed)
+        self.lockout = {} # port_id -> expiry_timestamp
+        
         self.root.title("MG400 Extended Monitor")
         self.root.geometry("600x750") # Increased height for XYZ
         self.root.configure(bg="#f0f0f0")
@@ -326,6 +329,9 @@ class MonitorGUI:
         self.suction_state = not self.suction_state
         self.node.request_suction(self.suction_state)
         
+        # Lockout sync for this port (16) for 0.8 seconds
+        self.lockout[VACUUM_DO_PORT] = time.time() + 0.8
+        
         if self.suction_state:
             self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
         else:
@@ -335,6 +341,9 @@ class MonitorGUI:
         self.light_states[name] = not self.light_states[name]
         status = self.light_states[name]
         self.node.request_light(port, status)
+        
+        # Lockout sync for this port for 0.8 seconds
+        self.lockout[port] = time.time() + 0.8
         
         bg_color = color if status else COLOR_OFF
         fg_color = "white" if status else "black"
@@ -387,28 +396,31 @@ class MonitorGUI:
         # --- Update Button States (DO Status Sync) ---
         do_status = self.node.latest_do_status
         
-        # 🌬️ Sync Suction (Vacuum Port)
-        actual_suction = bool((do_status >> (VACUUM_DO_PORT - 1)) & 1)
-        if actual_suction != self.suction_state:
-            self.suction_state = actual_suction
-            if self.suction_state:
-                self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
-            else:
-                self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg="black")
+        # 🌬️ Sync Suction (Vacuum Port) - Skip if locked out
+        now = time.time()
+        if now > self.lockout.get(VACUUM_DO_PORT, 0):
+            actual_suction = bool((do_status >> (VACUUM_DO_PORT - 1)) & 1)
+            if actual_suction != self.suction_state:
+                self.suction_state = actual_suction
+                if self.suction_state:
+                    self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
+                else:
+                    self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg="black")
         
-        # 🚥 Sync Lights
+        # 🚥 Sync Lights - Skip if locked out
         light_map = [
             ("GREEN", GREEN_LIGHT_DO_PORT, COLOR_GREEN),
             ("YELLOW", YELLOW_LIGHT_DO_PORT, COLOR_YELLOW),
             ("RED", RED_LIGHT_DO_PORT, COLOR_RED)
         ]
         for name, port, color in light_map:
-            actual_light = bool((do_status >> (port - 1)) & 1)
-            if actual_light != self.light_states[name]:
-                self.light_states[name] = actual_light
-                bg_color = color if actual_light else COLOR_OFF
-                fg_color = "white" if actual_light else "black"
-                self.btns_light[name].config(bg=bg_color, fg=fg_color)
+            if now > self.lockout.get(port, 0):
+                actual_light = bool((do_status >> (port - 1)) & 1)
+                if actual_light != self.light_states[name]:
+                    self.light_states[name] = actual_light
+                    bg_color = color if actual_light else COLOR_OFF
+                    fg_color = "white" if actual_light else "black"
+                    self.btns_light[name].config(bg=bg_color, fg=fg_color)
 
         # --- Update Cartesian Data (Robot Feedback) ---
         # Use values directly from robot controller (via FeedbackHandler)

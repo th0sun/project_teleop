@@ -12,16 +12,49 @@
 
 import time
 import re
+import queue
+import threading
 
 class CommandSender:
     def __init__(self, robot_connection, feedback_handler, logger):
         self.connection = robot_connection
         self.feedback = feedback_handler
         self.logger = logger
+        
+        # Dashboard Command Queue (to avoid blocking the caller/ROS executor)
+        self.dash_queue = queue.Queue()
+        self.worker_thread = threading.Thread(target=self._queue_worker, daemon=True)
+        self.worker_thread.start()
+        self.logger.info("🧵 Dashboard command worker thread started")
     
+    def _queue_worker(self):
+        """Processes dashboard commands in a separate thread"""
+        while True:
+            try:
+                # Command is a tuple: (command_string, callback_if_any)
+                cmd_item = self.dash_queue.get()
+                if cmd_item is None: break
+                
+                cmd_str, port, status = cmd_item
+                
+                # Execute using blocking send_and_wait (safe here in background thread)
+                response = self.connection.send_and_wait(cmd_str)
+                success = response is not None and "0," in response
+                
+                if success:
+                    state_str = "ON" if status else "OFF"
+                    self.logger.info(f"🔌 [Async] DO Port {port} set to {state_str}")
+                else:
+                    self.logger.error(f"❌ [Async] Failed to set DO Port {port}: {response}")
+                
+            except Exception as e:
+                self.logger.error(f"Error in dashboard worker: {e}")
+            finally:
+                self.dash_queue.task_done()
+
     def send(self, command):
         """
-        ส่งคำสั่งการเคลื่อนที่ (Non-blocking)
+        ส่งคำสั่งการเคลื่อนที่ (Non-blocking on Port 30003)
         """
         # ส่งคำสั่ง
         success = self.connection.send_motion_cmd(command)
@@ -34,22 +67,14 @@ class CommandSender:
 
     def set_digital_output(self, port: int, status: bool) -> bool:
         """
-        สั่งเปิด/ปิด Digital Output ทันที (DOInstant)
-        เหมาะสำหรับสั่ง Gripper หรือ Suction Cup แบบ Real-time
+        สั่งเปิด/ปิด Digital Output (Non-blocking via Queue)
         """
         status_val = 1 if status else 0
         command = f"DOExecute({port}, {status_val})"
         
-        # ส่งคำสั่งลงไปที่หุ่น (ใช้ Dashboard Port สำหรับ DOExecute บน V4 และรอ response)
-        response = self.connection.send_and_wait(command)
-        success = response is not None and "0," in response # Usually starts with 0 for success
-        if success:
-            state_str = "ON" if status else "OFF"
-            self.logger.info(f"🔌 DO Port {port} set to {state_str}")
-            return True
-        else:
-            self.logger.error(f"❌ Failed to set DO Port {port}")
-            return False
+        # Push to background queue to avoid blocking ROS executor
+        self.dash_queue.put((command, port, status))
+        return True
 
     def send_command_with_sync(self, command, timeout=5.0):
         """
