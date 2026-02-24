@@ -98,3 +98,34 @@ class MotionPlanner:
         self.last_command = q_target.copy()
         
         return command, speed, distance
+
+    def plan_batch_motion(self, q_target, q_current, num_steps=3):
+        """
+        วางแผนการเคลื่อนที่แบบชุด (Micro-interpolation)
+        เพื่อความนิ่งสูงสุดในจังหวะเคลื่อนที่ละเอียด
+        """
+        # ข้ามถ้าเคลื่อนที่น้อยเกินไป
+        if self.should_skip_motion(q_target, q_current):
+            return None, None, None
+            
+        q_start = self.last_command if self.last_command is not None else q_current
+        
+        # คำนวณความเร็ว
+        distance = np.linalg.norm(q_target - q_current)
+        speed = self.calculate_speed(q_target, q_current)
+        
+        # สร้างชุดคำสั่งจุดย่อย
+        commands = []
+        for i in range(1, num_steps + 1):
+            alpha = i / num_steps
+            q_step = q_start + alpha * (q_target - q_start)
+            cmd = self.format_command(q_step, speed)
+            commands.append(cmd)
+            
+        # รวมคำสั่งด้วย semicolon
+        batch_command = ";".join(commands)
+        
+        # บันทึกคำสั่งล่าสุด
+        self.last_command = q_target.copy()
+        
+        return batch_command, speed, distance

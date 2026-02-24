@@ -467,7 +467,7 @@ class TeleopNode(Node):
             
             if should_send:
                 # 1. Format Command
-                cmd_str, q_safe = self.controller.format_command_string(self.latest_target)
+                cmd_str, q_safe = self.controller.format_command_string(self.latest_target, q_current=q_current)
                 
                 if not cmd_str:
                     return

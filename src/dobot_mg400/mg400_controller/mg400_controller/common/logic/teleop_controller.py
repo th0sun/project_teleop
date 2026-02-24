@@ -146,19 +146,29 @@ class TeleopController:
 
         return False, "Wait"
 
-    def format_command_string(self, q_target):
+    def format_command_string(self, q_target, q_current=None):
         """
         Validate, Clamp, and Format Command String
+        
+        If moving slowly, use Batch Interpolation for higher stability.
         """
         # Validate & Clamp
         q_safe, is_clamped = self.validator.validate_and_clamp(q_target)
         if is_clamped:
             self.logger.warn("⚠️ Joint command exceeded limits - clamped to safe range")
             
-        # Calculate adaptive speed (Optional logic could go here)
+        # Calculate speed
         speed_percent = 100 
         
-        # Format Command
-        cmd_str = self.planner.format_command(q_safe, speed_percent)
+        # Determine if we should use BATCH mode (Precision Mode)
+        # Use batching if velocity is low < 0.1 rad/s
+        velocity_mag = np.max(self.robot_velocity)
         
-        return cmd_str, q_safe
+        if q_current is not None and velocity_mag < 0.1:
+            # ใช้ 3 จุดย่อยสำหรับจังหวะเล็งละเอียด
+            cmd_str, _, _ = self.planner.plan_batch_motion(q_safe, q_current, num_steps=3)
+            return cmd_str, q_safe
+        else:
+            # โหมดปกติ (Single Point)
+            cmd_str = self.planner.format_command(q_safe, speed_percent)
+            return cmd_str, q_safe
