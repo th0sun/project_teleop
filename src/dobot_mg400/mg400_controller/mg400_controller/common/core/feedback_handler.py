@@ -106,7 +106,9 @@ class FeedbackHandler:
             # Expecting 0x0123456789ABCDEF (Little Endian constant from Dobot)
             TEST_VALUE_OFFSET = 48
             test_val = struct.unpack_from('<Q', data, TEST_VALUE_OFFSET)[0]
-            if test_val != 0x0123456789ABCDEF:
+            # Accept real robot constant OR 0 (Mock/Docker default)
+            VALID_TEST_VALUES = (0x0123456789ABCDEF, 0)
+            if test_val not in VALID_TEST_VALUES:
                 self.logger.debug(f"⚠️  TestValue FAIL: {hex(test_val)}")
                 return 'tv'  # TestValue failed
 
