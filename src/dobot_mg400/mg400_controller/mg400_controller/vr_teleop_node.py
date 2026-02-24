@@ -127,8 +127,6 @@ class TeleopNode(Node):
             'Pred_J1', 'Pred_J2', 'Pred_J3', 'Pred_J4'
         ])
         self.get_logger().info(f"📊 Logging analytics to: {self.csv_filename}")
-        self.min_time_diff = float('inf')
-        self.is_time_calibrated = False
         
         # State Tracking
         self.target_recv_time = 0.0  # T2
@@ -243,56 +241,60 @@ class TeleopNode(Node):
     
     def _unity_callback(self, msg):
         """รับคำสั่งจาก Unity/VR - Store latest target only"""
-        if not self.connection.connected:
+        if not self.connection.connected or len(msg.position) < 4:
             return
         
-        # 1. Validate & Clamp Joints
-        q_target = np.array(msg.position)
-        q_safe, was_clamped = self.validator.validate_and_clamp(q_target)
-        
-        if was_clamped:
-            self.get_logger().warn("⚠️ Joint command exceeded limits - clamped to safe range", once=True)
-        
-        # 2. Extract Unity timestamp (T1) and ROS timestamp (T2)
-        unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        now_ros_sec = self.get_clock().now().nanoseconds * 1e-9
-        
-        # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION ---
-        # Find the absolute minimum difference (fastest packet over network)
-        # This isolated Network Delay from Absolute Clock Offset (e.g. 92 years diff)
-        time_diff = now_ros_sec - unity_send_time_sec
-        if time_diff < self.min_time_diff:
-            self.min_time_diff = time_diff
-            # We assume the absolute fastest ping achievable over LAN/Localhost is 1ms
-            self.clock_offset = self.min_time_diff - 0.001
-            
-            if not self.is_time_calibrated:
-                self.get_logger().info(f"⏰ Initial Clock Sync! Unity is {self.clock_offset:.3f}s off from ROS")
-                self.is_time_calibrated = True
-
-        # Correct Unity time to match Ubuntu time perfectly
-        corrected_unity_time = unity_send_time_sec + self.clock_offset
-        
-        # 3. Kalman Filter Prediction
-        # Overcome physical robot inertia by predicting targets +80ms into the future
-        # Use calibrated send time to ensure accurate dt calculation even over Tailscale
-        q_actual = self.feedback.get_current_position()
-        predicted_q = self.predictor.update_and_predict(q_safe, corrected_unity_time, q_actual=q_actual)
-        
-        # --- Log to CSV ---
         try:
-            self.csv_writer.writerow([
-                now_ros_sec, corrected_unity_time,
-                q_safe[0], q_safe[1], q_safe[2], q_safe[3],
-                predicted_q[0], predicted_q[1], predicted_q[2], predicted_q[3]
-            ])
-        except Exception as e:
-            pass # Ignore write errors to not block the control loop
+            # 1. Validate & Clamp Joints
+            q_target = np.array(msg.position)
+            q_safe, was_clamped = self.validator.validate_and_clamp(q_target)
             
-        # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
-        self.latest_target = predicted_q
-        self.target_recv_time = now_ros_sec          # T2: ROS receive time
-        self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
+            if was_clamped:
+                self.get_logger().warn("⚠️ Joint command exceeded limits - clamped to safe range", once=True)
+            
+            # 2. Extract Unity timestamp (T1) and ROS timestamp (T2)
+            unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            now_ros_sec = self.get_clock().now().nanoseconds * 1e-9
+            
+            # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION ---
+            # Find the absolute minimum difference (fastest packet over network)
+            # This isolated Network Delay from Absolute Clock Offset (e.g. 92 years diff)
+            time_diff = now_ros_sec - unity_send_time_sec
+            if time_diff < self.min_time_diff:
+                self.min_time_diff = time_diff
+                # We assume the absolute fastest ping achievable over LAN/Localhost is 1ms
+                self.clock_offset = self.min_time_diff - 0.001
+                
+                if not self.is_time_calibrated:
+                    self.get_logger().info(f"⏰ Initial Clock Sync! Unity is {self.clock_offset:.3f}s off from ROS")
+                    self.is_time_calibrated = True
+
+            # Correct Unity time to match Ubuntu time perfectly
+            corrected_unity_time = unity_send_time_sec + self.clock_offset
+            
+            # 3. Kalman Filter Prediction
+            # Overcome physical robot inertia by predicting targets +80ms into the future
+            # Use calibrated send time to ensure accurate dt calculation even over Tailscale
+            q_actual = self.feedback.get_current_position()
+            predicted_q = self.predictor.update_and_predict(q_safe, corrected_unity_time, q_actual=q_actual)
+            
+            # --- Log to CSV ---
+            try:
+                self.csv_writer.writerow([
+                    now_ros_sec, corrected_unity_time,
+                    q_safe[0], q_safe[1], q_safe[2], q_safe[3],
+                    predicted_q[0], predicted_q[1], predicted_q[2], predicted_q[3]
+                ])
+            except Exception:
+                pass # Ignore write errors to not block the control loop
+                
+            # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
+            self.latest_target = predicted_q
+            self.target_recv_time = now_ros_sec          # T2: ROS receive time
+            self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
+            
+        except Exception as e:
+            self.get_logger().error(f"Error in _unity_callback: {e}")
 
     def _suction_callback(self, msg):
         """รับคำสั่งเปิด/ปิดหัวดูด/Gripper จาก Unity (Trigger Button)"""
@@ -483,6 +485,10 @@ class TeleopNode(Node):
         self.feedback.stop()
         self.interactive.stop()
         self.connection.disconnect()
+        
+        if hasattr(self, 'csv_file') and not self.csv_file.closed:
+            self.csv_file.close()
+            self.get_logger().info(f"📊 Closed analytics log: {self.csv_filename}")
 
     def execute_motion_command(self, q_target):
         """
