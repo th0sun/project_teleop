@@ -49,34 +49,62 @@ TOOL_TARGET_TOPIC = "/mg400/tool_vector_target"
 PREDICTED_TOPIC = "/teleop/predicted_target"
 SENT_CMD_TOPIC = "/teleop/sent_command"
 
-# Colors for Lights
-COLOR_OFF = "#d0d0d0"
-COLOR_GREEN = "#2ecc71"
-COLOR_YELLOW = "#f1c40f"
-COLOR_RED = "#e74c3c"
-COLOR_VACUUM = "#3498db"
+# ── Dark Theme Palette ────────────────────────────────────────────
+BG_ROOT   = "#0d1117"   # window background
+BG_CARD   = "#161b22"   # card / panel bg
+BG_ROW    = "#1c2333"   # alternating row
+BG_HEADER = "#21262d"   # table header row
+FG_TEXT   = "#c9d1d9"   # primary text
+FG_DIM    = "#8b949e"   # secondary / dim text
+FG_ACCENT = "#58a6ff"   # blue accent
+BORDER    = "#30363d"   # subtle border
 
-# Graph colors
-COL_UNITY = "#f39c12"      # Orange
-COL_PREDICTED = "#9b59b6"  # Purple
-COL_SENT = "#27ae60"       # Green
-COL_ACTUAL = "#2980b9"     # Blue
+# Light pill colors for status
+COL_GOOD   = "#3fb950"   # green
+COL_WARN   = "#d29922"   # yellow
+COL_ERR    = "#f85149"   # red
+COL_IDLE   = "#8b949e"   # gray
+
+# Lights
+COLOR_OFF    = "#30363d"
+COLOR_GREEN  = "#3fb950"
+COLOR_YELLOW = "#d29922"
+COLOR_RED    = "#f85149"
+COLOR_VACUUM = "#58a6ff"
+
+# Graph colors (unchanged)
+COL_UNITY     = "#f39c12"
+COL_PREDICTED = "#9b59b6"
+COL_SENT      = "#27ae60"
+COL_ACTUAL    = "#2980b9"
 
 # Fonts
-FONT_HEADER = ("Helvetica", 14, "bold")
-FONT_LABEL = ("Helvetica", 12)
-FONT_VALUE = ("Helvetica", 12, "bold")
-FONT_LATENCY = ("Helvetica", 10)
-FONT_BIG_VALUE = ("Helvetica", 24, "bold")
-FONT_STATS = ("Helvetica", 11)
+FONT_HEADER    = ("Helvetica", 13, "bold")
+FONT_SECTION   = ("Helvetica", 10, "bold")
+FONT_LABEL     = ("Helvetica", 10)
+FONT_VALUE     = ("Courier",   11, "bold")   # monospace for numbers
+FONT_BIG_VALUE = ("Courier",   22, "bold")
+FONT_LATENCY   = ("Helvetica",  9)
+FONT_STATS     = ("Helvetica", 10)
 
 # Graph config
-GRAPH_WINDOW_SEC = 10.0   # Rolling window (seconds)
-GRAPH_UPDATE_HZ = 20      # Update rate
+GRAPH_WINDOW_SEC = 10.0
+GRAPH_UPDATE_HZ  = 20
 
 # Motion Detection Thresholds
-START_THRESHOLD = 2.0  # degrees (Start timer if error > this)
-STOP_THRESHOLD = 0.5   # degrees (Stop timer if error < this)
+START_THRESHOLD = 2.0
+STOP_THRESHOLD  = 0.5
+
+def _card(parent, **kw):
+    """Dark card frame helper."""
+    return tk.Frame(parent, bg=BG_CARD, relief="flat", **kw)
+
+def _lbl(parent, text="", fg=FG_TEXT, font=FONT_LABEL, **kw):
+    return tk.Label(parent, text=text, fg=fg, bg=BG_CARD, font=font, **kw)
+
+def _val(parent, var, fg=FG_TEXT, font=FONT_VALUE, **kw):
+    return tk.Label(parent, textvariable=var, fg=fg, bg=BG_CARD, font=font, **kw)
+
 
 class SessionLogger:
     """
@@ -279,196 +307,229 @@ class MonitorGUI:
         self.root = root
         self.node = node
         self.monitor = ExecutionMonitor()
-        
-        # 🛡️ Sync Lockout
         self.lockout = {}
-        
-        self.root.title("MG400 Extended Monitor")
-        self.root.configure(bg="#1a1a2e")
 
-        # ===== MAIN LAYOUT =====
-        # Left panel: existing controls + tables
-        # Right panel: real-time graphs
-        outer = tk.Frame(root, bg="#1a1a2e")
+        self.root.title("MG400 Extended Monitor")
+        self.root.configure(bg=BG_ROOT)
+
+        # ── MAIN LAYOUT ───────────────────────────────────────────
+        outer = tk.Frame(root, bg=BG_ROOT)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        left_frame = tk.Frame(outer, bg="#f0f0f0", width=600)
+        left_frame = tk.Frame(outer, bg=BG_ROOT, width=620)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH)
         left_frame.pack_propagate(False)
 
-        right_frame = tk.Frame(outer, bg="#1a1a2e")
+        right_frame = tk.Frame(outer, bg=BG_ROOT)
         right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # ===== LEFT PANEL (existing UI) =====
-        main_frame = ttk.Frame(left_frame, padding="15")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # scrollable canvas for left panel content
+        canvas_scroll = tk.Canvas(left_frame, bg=BG_ROOT, highlightthickness=0)
+        scrollbar = tk.Scrollbar(left_frame, orient="vertical", command=canvas_scroll.yview)
+        canvas_scroll.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        main_frame = tk.Frame(canvas_scroll, bg=BG_ROOT)
+        canvas_win = canvas_scroll.create_window((0, 0), window=main_frame, anchor="nw")
+        main_frame.bind("<Configure>", lambda e: canvas_scroll.configure(
+            scrollregion=canvas_scroll.bbox("all")))
+        canvas_scroll.bind("<Configure>", lambda e: canvas_scroll.itemconfig(canvas_win, width=e.width))
 
-        # Title
-        title_frame = ttk.Frame(main_frame)
-        title_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(title_frame, text="Real-time Monitor & Metrics", font=FONT_HEADER).pack(side=tk.LEFT)
-        
-        # Logging Button
+        def _section(parent, title):
+            """Titled dark card section."""
+            tk.Frame(parent, bg=BORDER, height=1).pack(fill=tk.X, padx=12, pady=(14, 0))
+            hdr = tk.Frame(parent, bg=BG_HEADER)
+            hdr.pack(fill=tk.X, padx=12)
+            tk.Label(hdr, text=f"  {title}", font=FONT_SECTION, fg=FG_ACCENT,
+                     bg=BG_HEADER, anchor="w").pack(side=tk.LEFT, ipady=4)
+            card = tk.Frame(parent, bg=BG_CARD)
+            card.pack(fill=tk.X, padx=12, pady=(0, 4))
+            return card
+
+        # ── TITLE ROW ─────────────────────────────────────────────
+        title_row = tk.Frame(main_frame, bg=BG_ROOT)
+        title_row.pack(fill=tk.X, padx=12, pady=(10, 4))
+        tk.Label(title_row, text="MG400 Monitor", font=FONT_HEADER,
+                 fg=FG_TEXT, bg=BG_ROOT).pack(side=tk.LEFT)
         self.is_logging = False
         self.log_start_time = 0.0
-        self.btn_log = ttk.Button(title_frame, text="▶ Start Logging", command=self.toggle_logging)
+        self.btn_log = tk.Button(title_row, text="● REC", font=FONT_SECTION,
+                                 bg=BG_CARD, fg=COL_IDLE, activebackground=BG_ROW,
+                                 relief="flat", padx=8, command=self.toggle_logging)
         self.btn_log.pack(side=tk.RIGHT)
 
-        # --- JOINT TABLE ---
-        header_frame = ttk.Frame(main_frame)
-        header_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(header_frame, text="Joint", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Target (°)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Actual (°)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Diff (°)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
+        # ── SESSION LOG LABEL ──────────────────────────────────────
+        self.var_log_path = tk.StringVar(value="Session: starting…")
+        tk.Label(main_frame, textvariable=self.var_log_path, font=FONT_LATENCY,
+                 fg=FG_DIM, bg=BG_ROOT, anchor="w").pack(fill=tk.X, padx=14)
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=5)
+        # ── JOINTS TABLE ──────────────────────────────────────────
+        card_j = _section(main_frame, "JOINT ANGLES")
+        hrow = tk.Frame(card_j, bg=BG_HEADER)
+        hrow.pack(fill=tk.X)
+        for txt, w, fg in [("", 6, FG_DIM), ("Unity °", 10, COL_UNITY),
+                            ("Actual °", 10, COL_ACTUAL), ("Δ °", 10, FG_DIM)]:
+            tk.Label(hrow, text=txt, font=FONT_SECTION, fg=fg,
+                     bg=BG_HEADER, width=w, anchor="e").pack(side=tk.LEFT, padx=2, pady=3)
 
         self.vars_target = []
         self.vars_actual = []
-        self.vars_diff = []
-        self.lbls_diff = []
-        
-        joints = ["J1", "J2", "J3", "J4"]
-        
-        for i, name in enumerate(joints):
-            frame = ttk.Frame(main_frame)
-            frame.pack(fill=tk.X, pady=2)
-            ttk.Label(frame, text=name, font=FONT_LABEL, width=12).pack(side=tk.LEFT)
-            
+        self.vars_diff   = []
+        self.lbls_diff   = []
+
+        for i, name in enumerate(["J1", "J2", "J3", "J4"]):
+            rowbg = BG_ROW if i % 2 else BG_CARD
+            row = tk.Frame(card_j, bg=rowbg)
+            row.pack(fill=tk.X)
+            tk.Label(row, text=name, font=FONT_LABEL, fg=FG_DIM,
+                     bg=rowbg, width=6, anchor="w").pack(side=tk.LEFT, padx=(8, 0))
+
             v_tgt = tk.StringVar(value="0.00")
-            ttk.Label(frame, textvariable=v_tgt, font=FONT_VALUE, foreground="darkgreen", width=12).pack(side=tk.LEFT)
+            tk.Label(row, textvariable=v_tgt, font=FONT_VALUE, fg=COL_UNITY,
+                     bg=rowbg, width=10, anchor="e").pack(side=tk.LEFT)
             self.vars_target.append(v_tgt)
 
             v_act = tk.StringVar(value="0.00")
-            ttk.Label(frame, textvariable=v_act, font=FONT_VALUE, foreground="blue", width=12).pack(side=tk.LEFT)
+            tk.Label(row, textvariable=v_act, font=FONT_VALUE, fg=COL_ACTUAL,
+                     bg=rowbg, width=10, anchor="e").pack(side=tk.LEFT)
             self.vars_actual.append(v_act)
 
             v_diff = tk.StringVar(value="0.00")
-            lbl_diff = ttk.Label(frame, textvariable=v_diff, font=FONT_VALUE, foreground="black", width=12)
-            lbl_diff.pack(side=tk.LEFT)
+            lbl = tk.Label(row, textvariable=v_diff, font=FONT_VALUE, fg=FG_DIM,
+                           bg=rowbg, width=10, anchor="e")
+            lbl.pack(side=tk.LEFT, padx=(0, 6))
             self.vars_diff.append(v_diff)
-            self.lbls_diff.append(lbl_diff)
+            self.lbls_diff.append(lbl)
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
-
-        # --- CARTESIAN MONITOR (XYZ) ---
-        ttk.Label(main_frame, text="Cartesian Coordinates (End Effector)", font=("Helvetica", 12, "bold")).pack(anchor=tk.W)
-
-        header_xyz = ttk.Frame(main_frame)
-        header_xyz.pack(fill=tk.X, pady=2)
-        ttk.Label(header_xyz, text="Axis",          font=FONT_LABEL, width=6).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Unity FK (mm)", font=FONT_LABEL, foreground="darkorange",   width=13).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Flange (mm)",   font=FONT_LABEL, foreground="royalblue",    width=13).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="TCP (mm)",       font=FONT_LABEL, foreground="green4",       width=13).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="ToolΔ (mm)",    font=FONT_LABEL, foreground="gray40",       width=12).pack(side=tk.LEFT)
+        # ── CARTESIAN XYZ ─────────────────────────────────────────
+        card_xyz = _section(main_frame, "CARTESIAN — END EFFECTOR")
+        hrow2 = tk.Frame(card_xyz, bg=BG_HEADER)
+        hrow2.pack(fill=tk.X)
+        for txt, w, fg in [("", 5, FG_DIM), ("Unity FK", 10, COL_UNITY),
+                            ("Flange", 10, FG_ACCENT), ("TCP", 10, COL_GOOD),
+                            ("ToolΔ", 9, FG_DIM)]:
+            tk.Label(hrow2, text=txt, font=FONT_SECTION, fg=fg,
+                     bg=BG_HEADER, width=w, anchor="e").pack(side=tk.LEFT, padx=2, pady=3)
 
         self.vars_xyz_tgt    = []
         self.vars_xyz_flange = []
         self.vars_xyz_act    = []
         self.vars_xyz_tool   = []
-        self.vars_xyz_diff   = []  # keep for session logger compat
+        self.vars_xyz_diff   = []  # compat alias
         self.lbls_xyz_diff   = []
 
-        for i, name in enumerate(["X", "Y", "Z"]):
-            frame = ttk.Frame(main_frame)
-            frame.pack(fill=tk.X, pady=2)
-            ttk.Label(frame, text=name, font=FONT_LABEL, width=7).pack(side=tk.LEFT)
+        for i, ax in enumerate(["X", "Y", "Z"]):
+            rowbg = BG_ROW if i % 2 else BG_CARD
+            row = tk.Frame(card_xyz, bg=rowbg)
+            row.pack(fill=tk.X)
+            tk.Label(row, text=ax, font=FONT_LABEL, fg=FG_DIM,
+                     bg=rowbg, width=5, anchor="w").pack(side=tk.LEFT, padx=(8, 0))
 
             v_tgt = tk.StringVar(value="0.0")
-            ttk.Label(frame, textvariable=v_tgt, font=FONT_VALUE, foreground="darkorange", width=12).pack(side=tk.LEFT)
+            tk.Label(row, textvariable=v_tgt, font=FONT_VALUE, fg=COL_UNITY,
+                     bg=rowbg, width=10, anchor="e").pack(side=tk.LEFT)
             self.vars_xyz_tgt.append(v_tgt)
 
-            v_flange = tk.StringVar(value="0.0")
-            ttk.Label(frame, textvariable=v_flange, font=FONT_VALUE, foreground="royalblue", width=12).pack(side=tk.LEFT)
-            self.vars_xyz_flange.append(v_flange)
+            v_fl = tk.StringVar(value="0.0")
+            tk.Label(row, textvariable=v_fl, font=FONT_VALUE, fg=FG_ACCENT,
+                     bg=rowbg, width=10, anchor="e").pack(side=tk.LEFT)
+            self.vars_xyz_flange.append(v_fl)
 
             v_act = tk.StringVar(value="0.0")
-            ttk.Label(frame, textvariable=v_act, font=FONT_VALUE, foreground="green4", width=12).pack(side=tk.LEFT)
+            tk.Label(row, textvariable=v_act, font=FONT_VALUE, fg=COL_GOOD,
+                     bg=rowbg, width=10, anchor="e").pack(side=tk.LEFT)
             self.vars_xyz_act.append(v_act)
 
-            v_tool = tk.StringVar(value="0.0")
-            lbl_tool = ttk.Label(frame, textvariable=v_tool, font=FONT_VALUE, foreground="gray40", width=11)
-            lbl_tool.pack(side=tk.LEFT)
+            v_tool = tk.StringVar(value="+0.0")
+            lbl_t = tk.Label(row, textvariable=v_tool, font=FONT_VALUE, fg=FG_DIM,
+                             bg=rowbg, width=9, anchor="e")
+            lbl_t.pack(side=tk.LEFT, padx=(0, 6))
             self.vars_xyz_tool.append(v_tool)
-            # compat aliases
             self.vars_xyz_diff.append(v_tool)
-            self.lbls_xyz_diff.append(lbl_tool)
+            self.lbls_xyz_diff.append(lbl_t)
 
-        # Tool Index label row (below XYZ table)
-        tool_idx_row = ttk.Frame(main_frame)
-        tool_idx_row.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(tool_idx_row, text="Active Tool:", font=FONT_LABEL, width=14).pack(side=tk.LEFT)
-        self.var_tool_index = tk.StringVar(value="— (querying...)")
-        ttk.Label(tool_idx_row, textvariable=self.var_tool_index, font=FONT_VALUE, foreground="gray40").pack(side=tk.LEFT)
+        # Active Tool row
+        tool_row = tk.Frame(card_xyz, bg=BG_CARD)
+        tool_row.pack(fill=tk.X, pady=(2, 4))
+        tk.Label(tool_row, text="Active Tool:", font=FONT_LABEL,
+                 fg=FG_DIM, bg=BG_CARD, padx=10).pack(side=tk.LEFT)
+        self.var_tool_index = tk.StringVar(value="— querying…")
+        tk.Label(tool_row, textvariable=self.var_tool_index, font=FONT_VALUE,
+                 fg=FG_DIM, bg=BG_CARD).pack(side=tk.LEFT)
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
+        # ── CONTROL PANEL ─────────────────────────────────────────
+        card_ctrl = _section(main_frame, "DIRECT CONTROL")
 
-        # --- 🎮 CONTROL PANEL ---
-        control_frame = ttk.LabelFrame(main_frame, text="Robot Direct Control", padding="10")
-        control_frame.pack(fill=tk.X, pady=5)
-
-        suction_row = ttk.Frame(control_frame)
-        suction_row.pack(fill=tk.X, pady=5)
-        ttk.Label(suction_row, text="Suction:", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
+        suction_row = tk.Frame(card_ctrl, bg=BG_CARD)
+        suction_row.pack(fill=tk.X, padx=8, pady=6)
+        tk.Label(suction_row, text="Suction", font=FONT_LABEL,
+                 fg=FG_DIM, bg=BG_CARD, width=8, anchor="w").pack(side=tk.LEFT)
         self.suction_state = False
-        self.btn_suction = tk.Button(suction_row, text="OFF", font=FONT_VALUE, width=10, bg=COLOR_OFF, command=self.toggle_suction)
-        self.btn_suction.pack(side=tk.LEFT, padx=5)
+        self.btn_suction = tk.Button(suction_row, text="OFF", font=FONT_SECTION,
+                                      bg=COLOR_OFF, fg=FG_TEXT, activebackground=BG_ROW,
+                                      relief="flat", padx=14, command=self.toggle_suction)
+        self.btn_suction.pack(side=tk.LEFT, padx=4)
 
-        light_row = ttk.Frame(control_frame)
-        light_row.pack(fill=tk.X, pady=10)
-        ttk.Label(light_row, text="Lights:", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        
-        self.light_states = { "GREEN": False, "YELLOW": False, "RED": False }
+        light_row = tk.Frame(card_ctrl, bg=BG_CARD)
+        light_row.pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Label(light_row, text="Lights", font=FONT_LABEL,
+                 fg=FG_DIM, bg=BG_CARD, width=8, anchor="w").pack(side=tk.LEFT)
+
+        self.light_states = {"GREEN": False, "YELLOW": False, "RED": False}
         self.btns_light = {}
-        
-        for name, port, color in [("GREEN", GREEN_LIGHT_DO_PORT, COLOR_GREEN), ("YELLOW", YELLOW_LIGHT_DO_PORT, COLOR_YELLOW), ("RED", RED_LIGHT_DO_PORT, COLOR_RED)]:
-            btn = tk.Button(light_row, text=name, font=("Helvetica", 10, "bold"), width=8, bg=COLOR_OFF, 
-                            command=lambda n=name, p=port, c=color: self.toggle_light(n, p, c))
-            btn.pack(side=tk.LEFT, padx=2)
+        for name, port, col in [("GREEN", GREEN_LIGHT_DO_PORT, COLOR_GREEN),
+                                  ("YELLOW", YELLOW_LIGHT_DO_PORT, COLOR_YELLOW),
+                                  ("RED", RED_LIGHT_DO_PORT, COLOR_RED)]:
+            btn = tk.Button(light_row, text=name, font=FONT_SECTION,
+                            bg=COLOR_OFF, fg=FG_TEXT, relief="flat", padx=10,
+                            command=lambda n=name, p=port, c=col: self.toggle_light(n, p, c))
+            btn.pack(side=tk.LEFT, padx=3)
             self.btns_light[name] = btn
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
+        # ── EXECUTION METRICS ─────────────────────────────────────
+        card_ex = _section(main_frame, "EXECUTION METRICS")
+        ex_row1 = tk.Frame(card_ex, bg=BG_CARD)
+        ex_row1.pack(fill=tk.X, padx=10, pady=(6, 0))
 
-        # --- EXECUTION METRICS ---
-        metrics_frame = ttk.LabelFrame(main_frame, text="Execution Metrics", padding="10")
-        metrics_frame.pack(fill=tk.X, pady=5)
-        
-        row1 = ttk.Frame(metrics_frame)
-        row1.pack(fill=tk.X)
         self.var_status = tk.StringVar(value="IDLE")
-        self.lbl_status = ttk.Label(row1, textvariable=self.var_status, font=("Helvetica", 12, "bold"), foreground="gray")
+        self.lbl_status = tk.Label(ex_row1, textvariable=self.var_status,
+                                    font=FONT_SECTION, fg=COL_IDLE, bg=BG_CARD)
         self.lbl_status.pack(side=tk.LEFT)
+
         self.var_timer = tk.StringVar(value="0.00s")
-        self.lbl_timer = ttk.Label(row1, textvariable=self.var_timer, font=FONT_BIG_VALUE, foreground="black")
+        self.lbl_timer = tk.Label(ex_row1, textvariable=self.var_timer,
+                                   font=FONT_BIG_VALUE, fg=FG_TEXT, bg=BG_CARD)
         self.lbl_timer.pack(side=tk.RIGHT)
-        
-        row2 = ttk.Frame(metrics_frame)
-        row2.pack(fill=tk.X, pady=5)
-        self.var_stats = tk.StringVar(value="Avg: 0.00s | Min: 0.00s | Max: 0.00s")
-        ttk.Label(row2, textvariable=self.var_stats, font=FONT_STATS).pack(anchor=tk.E)
 
-        # --- STATUS BAR ---
-        status_frame = ttk.Frame(main_frame)
-        status_frame.pack(fill=tk.X, pady=10)
-        
-        self.var_latency = tk.StringVar(value="Waiting for data...")
-        ttk.Label(status_frame, textvariable=self.var_latency, font=FONT_LATENCY).pack(side=tk.LEFT)
+        self.var_stats = tk.StringVar(value="Avg: —  Min: —  Max: —")
+        tk.Label(card_ex, textvariable=self.var_stats, font=FONT_STATS,
+                 fg=FG_DIM, bg=BG_CARD, anchor="e").pack(fill=tk.X, padx=10, pady=(0, 8))
 
-        self.var_mode = tk.StringVar(value="MODE: -")
-        tk.Label(status_frame, textvariable=self.var_mode, font=("Arial", 10), bg="#f0f0f0").pack(side=tk.RIGHT, padx=10)
-        
-        self.var_error = tk.StringVar(value="ERR: 00")
-        self.lbl_error = tk.Label(status_frame, textvariable=self.var_error, font=("Arial", 10, "bold"), bg="#f0f0f0", fg="red")
-        self.lbl_error.pack(side=tk.RIGHT, padx=5)
-        
+        # ── STATUS BAR ────────────────────────────────────────────
+        status_bar = tk.Frame(main_frame, bg=BG_HEADER)
+        status_bar.pack(fill=tk.X, padx=12, pady=(8, 12))
+
+        self.var_latency = tk.StringVar(value="Waiting for data…")
+        tk.Label(status_bar, textvariable=self.var_latency, font=FONT_LATENCY,
+                 fg=FG_DIM, bg=BG_HEADER).pack(side=tk.LEFT, padx=6, pady=4)
+
         self.var_do_hex = tk.StringVar(value="DO: 0x0000")
-        ttk.Label(status_frame, textvariable=self.var_do_hex, font=FONT_LATENCY, foreground="gray").pack(anchor=tk.W)
+        tk.Label(status_bar, textvariable=self.var_do_hex, font=FONT_LATENCY,
+                 fg=FG_DIM, bg=BG_HEADER).pack(side=tk.LEFT, padx=6)
 
-        # ===== RIGHT PANEL: REAL-TIME GRAPHS =====
+        self.var_error = tk.StringVar(value="ERR: 00")
+        self.lbl_error = tk.Label(status_bar, textvariable=self.var_error,
+                                   font=FONT_SECTION, fg=COL_ERR, bg=BG_HEADER)
+        self.lbl_error.pack(side=tk.RIGHT, padx=6)
+
+        self.var_mode = tk.StringVar(value="MODE: —")
+        tk.Label(status_bar, textvariable=self.var_mode, font=FONT_LATENCY,
+                 fg=FG_DIM, bg=BG_HEADER).pack(side=tk.RIGHT, padx=6)
+
+        # ── RIGHT PANEL: GRAPHS ───────────────────────────────────
         self._setup_graphs(right_frame)
 
-        # Start Update Loop
+        # Start update loop
         self.update_gui()
 
     def _setup_graphs(self, parent):
@@ -627,7 +688,7 @@ class MonitorGUI:
     def toggle_logging(self):
         self.is_logging = not self.is_logging
         if self.is_logging:
-            self.btn_log.config(text="⏹ Stop Logging")
+            self.btn_log.config(text="■ STOP", bg=BG_CARD, fg=COL_ERR)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             self.fn_target = f"teleop_target_{timestamp}.csv"
             self.fn_actual = f"teleop_actual_{timestamp}.csv"
@@ -638,7 +699,7 @@ class MonitorGUI:
             self.log_start_time = time.time()
             self.node.get_logger().info(f"Started logging to {self.fn_target}")
         else:
-            self.btn_log.config(text="▶ Start Logging")
+            self.btn_log.config(text="● REC", bg=BG_CARD, fg=COL_IDLE)
             self.node.get_logger().info("Stopped logging.")
 
     def update_gui(self):
@@ -655,11 +716,11 @@ class MonitorGUI:
             self.vars_diff[i].set(f"{diff:+.2f}")
             total_diff += abs(diff)
             if abs(diff) > 2.0:
-                self.lbls_diff[i].configure(foreground="red")
+                self.lbls_diff[i].configure(fg=COL_ERR)
             elif abs(diff) > 0.5:
-                self.lbls_diff[i].configure(foreground="orange")
+                self.lbls_diff[i].configure(fg=COL_WARN)
             else:
-                self.lbls_diff[i].configure(foreground="green")
+                self.lbls_diff[i].configure(fg=COL_GOOD)
 
         # --- Update System Info ---
         mode = self.node.latest_robot_mode
@@ -679,14 +740,14 @@ class MonitorGUI:
             if self.suction_state:
                 self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
             else:
-                self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg="black")
+                self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg=FG_TEXT)
         
         for name, port, color in [("GREEN", GREEN_LIGHT_DO_PORT, COLOR_GREEN), ("YELLOW", YELLOW_LIGHT_DO_PORT, COLOR_YELLOW), ("RED", RED_LIGHT_DO_PORT, COLOR_RED)]:
             if now > self.lockout.get(port, 0):
                 actual_light = bool((do_status >> (port - 1)) & 1)
                 self.light_states[name] = actual_light
                 bg_color = color if actual_light else COLOR_OFF
-                fg_color = "white" if actual_light else "black"
+                fg_color = "white" if actual_light else FG_DIM
                 self.btns_light[name].config(bg=bg_color, fg=fg_color, text=name)
 
         # --- Update Cartesian Data ---
@@ -711,18 +772,18 @@ class MonitorGUI:
         # --- Execution Monitor ---
         status = self.monitor.update(total_diff)
         if self.monitor.state == "MOVING":
-            self.var_status.set("MOVING...")
-            self.lbl_status.configure(foreground="red")
+            self.var_status.set("● MOVING")
+            self.lbl_status.configure(fg=COL_WARN)
             self.var_timer.set(f"{time.time() - self.monitor.start_time:.2f}s")
-            self.lbl_timer.configure(foreground="red")
+            self.lbl_timer.configure(fg=COL_WARN)
         elif self.monitor.state == "ARRIVED":
-            self.var_status.set("ARRIVED")
-            self.lbl_status.configure(foreground="green")
+            self.var_status.set("✓ ARRIVED")
+            self.lbl_status.configure(fg=COL_GOOD)
             self.var_timer.set(f"{self.monitor.last_duration:.2f}s")
-            self.lbl_timer.configure(foreground="green")
+            self.lbl_timer.configure(fg=COL_GOOD)
         else:
             self.var_status.set("IDLE")
-            self.lbl_status.configure(foreground="gray")
+            self.lbl_status.configure(fg=COL_IDLE)
         
         avg_t, min_t, max_t = self.monitor.get_stats()
         self.var_stats.set(f"Avg: {avg_t:.2f}s | Min: {min_t:.2f}s | Max: {max_t:.2f}s | Count: {len(self.monitor.durations)}")
