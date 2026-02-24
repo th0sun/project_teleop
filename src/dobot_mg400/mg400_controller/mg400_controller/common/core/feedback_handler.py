@@ -53,12 +53,7 @@ class FeedbackHandler:
         
         self.logger.info("🎧 Listening for binary feedback (1440 bytes/packet)...")
         
-        # --- Diagnostic Counters ---
-        _pkt_recv = 0   # total packets received from socket
-        _pkt_ok = 0     # packets that passed TestValue
-        _pkt_pub = 0    # packets successfully published
-        _log_every = 200  # print stats every N packets
-        
+
         while not self.stop_event.is_set():
             try:
                 # 🔄 Flush buffer to get LATEST packet (As seen in dobot_api.py)
@@ -79,18 +74,7 @@ class FeedbackHandler:
                     buffer = buffer[PACKET_SIZE:]
                 
                 if latest_packet:
-                    _pkt_recv += 1
-                    result = self._process_packet(latest_packet)
-                    if result == 'ok':   _pkt_pub += 1
-                    elif result == 'tv': pass  # TestValue fail
-                    
-                    if _pkt_recv % _log_every == 0:
-                        self.logger.info(
-                            f"📡 FeedbackDiag: recv={_pkt_recv} "
-                            f"published={_pkt_pub} "
-                            f"tv_fail={_pkt_recv - _pkt_ok} "
-                            f"(tv_ok={_pkt_ok})"
-                        )
+                    self._process_packet(latest_packet)
                 
                 # Small sleep to yield
                 time.sleep(0.001)
@@ -109,8 +93,7 @@ class FeedbackHandler:
             # Accept real robot constant OR 0 (Mock/Docker default)
             VALID_TEST_VALUES = (0x0123456789ABCDEF, 0)
             if test_val not in VALID_TEST_VALUES:
-                self.logger.debug(f"⚠️  TestValue FAIL: {hex(test_val)}")
-                return 'tv'  # TestValue failed
+                return
 
             # 1. Parse Joint Angles (Offset 432)
             OFFSET_JOINT_ACTUAL = 432
@@ -120,8 +103,7 @@ class FeedbackHandler:
             
             # --- Sanity Check ---
             if not self.kinematics.validate_sanity(self.last_valid_joints, q_rad):
-                self.logger.debug(f"⚠️  Sanity check FAIL: {np.degrees(q_rad)}")
-                return 'sanity'
+                return
             
             self.last_valid_joints = q_rad
             self.current_position = q_rad
@@ -162,11 +144,9 @@ class FeedbackHandler:
             msg.name = all_joints['names']
             msg.position = all_joints['positions']
             self.publisher.publish(msg)
-            return 'ok'
             
         except Exception as e:
             self.logger.error(f"Packet processing error: {e}")
-            return 'err'
     
     def get_robot_mode(self):
         """Thread-safe access to robot mode"""
