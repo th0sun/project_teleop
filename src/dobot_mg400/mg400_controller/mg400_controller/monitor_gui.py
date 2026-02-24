@@ -199,6 +199,7 @@ class JointMonitorNode(Node):
         self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_unity_xyz   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of Unity input
         self.latest_flange_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of actual joints
+        self.latest_tool_index = -1  # active tool index from GetTool()
         self.latest_do_status = 0
         self.latest_robot_mode = 0
         self.latest_error_status = 0
@@ -214,6 +215,7 @@ class JointMonitorNode(Node):
         self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
         self.sub_unity_xyz = self.create_subscription(Float64MultiArray, "/teleop/unity_xyz", self.listener_callback_unity_xyz, 10)
         self.sub_flange_actual = self.create_subscription(Float64MultiArray, "/robot/flange_actual", self.listener_callback_flange_actual, 10)
+        self.sub_tool_index = self.create_subscription(Int32, "/robot/tool_index", self.listener_callback_tool_index, 10)
         self.sub_do_status = self.create_subscription(Int64, DO_STATUS_TOPIC, self.listener_callback_do_status, 10)
         self.sub_robot_mode = self.create_subscription(Int32, ROBOT_MODE_TOPIC, self.listener_callback_robot_mode, 10)
         self.sub_error_status = self.create_subscription(Int32, ERROR_STATUS_TOPIC, self.listener_callback_error_status, 10)
@@ -258,6 +260,9 @@ class JointMonitorNode(Node):
 
     def listener_callback_flange_actual(self, msg):
         if len(msg.data) >= 6: self.latest_flange_actual = list(msg.data)
+
+    def listener_callback_tool_index(self, msg):
+        self.latest_tool_index = int(msg.data)
         
     def listener_callback_do_status(self, msg):
         self.latest_do_status = int(msg.data)
@@ -389,6 +394,13 @@ class MonitorGUI:
             # compat aliases
             self.vars_xyz_diff.append(v_tool)
             self.lbls_xyz_diff.append(lbl_tool)
+
+        # Tool Index label row (below XYZ table)
+        tool_idx_row = ttk.Frame(main_frame)
+        tool_idx_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(tool_idx_row, text="Active Tool:", font=FONT_LABEL, width=14).pack(side=tk.LEFT)
+        self.var_tool_index = tk.StringVar(value="— (querying...)")
+        ttk.Label(tool_idx_row, textvariable=self.var_tool_index, font=FONT_VALUE, foreground="gray40").pack(side=tk.LEFT)
 
         ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
 
@@ -688,6 +700,13 @@ class MonitorGUI:
             # Tool offset = TCP - Flange (live, no preconfig needed)
             tool_delta = xyz_tcp[i] - xyz_flange[i]
             self.vars_xyz_tool[i].set(f"{tool_delta:+.1f}")
+
+        # Tool index label
+        tidx = self.node.latest_tool_index
+        if tidx >= 0:
+            self.var_tool_index.set(f"Tool {tidx}")
+        else:
+            self.var_tool_index.set("— (querying...)")
 
         # --- Execution Monitor ---
         status = self.monitor.update(total_diff)

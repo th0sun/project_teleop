@@ -168,6 +168,7 @@ class TeleopNode(Node):
         self.pub_tool_actual = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_actual", 10)
         self.pub_tool_target = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_target", 10)
         self.pub_flange_actual = self.create_publisher(Float64MultiArray, "/robot/flange_actual", 10)
+        self.pub_tool_index = self.create_publisher(Int32, "/robot/tool_index", 10)
         
         # 📊 Graph Data Publishers (for monitor_gui.py visualization)
         self.pub_predicted_target = self.create_publisher(JointState, "/teleop/predicted_target", 10)
@@ -518,6 +519,24 @@ class TeleopNode(Node):
             err_msg = Int32()
             err_msg.data = int(err_info['error_status'])
             self.pub_error_status.publish(err_msg)
+
+            # === PERIODIC TOOL INDEX QUERY (every ~5s at 20Hz = 100 cycles) ===
+            self._tool_query_counter += 1
+            if self._tool_query_counter >= 100:
+                self._tool_query_counter = 0
+                try:
+                    resp = self.connection.send_and_wait("GetTool()", timeout=1.0)
+                    if resp:
+                        # Response format: "0,{N},GetTool();"
+                        import re
+                        m = re.search(r'\{(\d+)\}', resp)
+                        if m:
+                            tidx = int(m.group(1))
+                            ti_msg = Int32()
+                            ti_msg.data = tidx
+                            self.pub_tool_index.publish(ti_msg)
+                except Exception:
+                    pass
             
             # === MOTION TRACKING (Latency Analyzer) ===
             # T4: Motion Start
