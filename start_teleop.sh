@@ -33,56 +33,97 @@ else
 fi
 
 # 3. เตรียมคำสั่งสำหรับแต่ละ Pane
-CMD_NODE="export ROBOT_IP=$ROBOT_IP && source install/setup.bash && ros2 run mg400_controller vr_teleop_node"
-CMD_RVIZ="source install/setup.bash && ros2 launch mg400_bringup main.launch.py"
+#    ✅ เพิ่ม "; exec bash" ต่อท้ายทุก command
+#    -> pane จะ "ค้าง" หลัง process ตาย, ไม่ปิดทิ้ง
+#    -> สามารถกด ↑ Enter เพื่อรันใหม่, หรือ copy error ได้เลย
+
+_src="source install/setup.bash"
+_ip="export ROBOT_IP=$ROBOT_IP"
+_stay="; exec bash"
+
+CMD_NODE="$_ip && $_src && ros2 run mg400_controller vr_teleop_node$_stay"
+CMD_RVIZ="$_src && ros2 launch mg400_bringup main.launch.py$_stay"
+CMD_MONITOR="$_src && ros2 run mg400_controller monitor_gui$_stay"
 
 if [ "$MODE" = "3" ] || [ "$MODE" = "4" ]; then
-    CMD_EXTRA="source install/setup.bash && ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0"
+    CMD_EXTRA="$_src && ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0$_stay"
 else
-    CMD_EXTRA="source install/setup.bash && ros2 run mg400_simulator unity_simulator"
+    CMD_EXTRA="$_src && ros2 run mg400_simulator unity_simulator$_stay"
 fi
 
 # 4. สร้าง Tmux Session
-SESSION_NAME="teleop_session"
+SESSION="mg400"
 
 # ตรวจสอบว่ามี Session อยู่แล้วหรือไม่ ถ้ามีให้ kill ก่อน
-tmux has-session -t $SESSION_NAME 2>/dev/null
-if [ $? == 0 ]; then
-    echo "🗑️  Killing existing tmux session..."
-    tmux kill-session -t $SESSION_NAME
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "🗑️  Killing existing session..."
+    tmux kill-session -t "$SESSION"
 fi
 
 echo "🚀 Launching Tmux Session..."
 
-# สร้างหน้าต่างหลัก (Pane 0 - ซ้ายเต็ม) - รัน Node หลัก
-tmux new-session -d -s $SESSION_NAME -n "teleop" "$CMD_NODE"
+# --- Layout ---
+# Window: teleop (default)
+#  ┌──────────────┬──────────────┐
+#  │              │   RViz       │
+#  │  Teleop Node ├──────────────┤
+#  │              │  TCP/Sim     │
+#  ├──────────────┴──────────────┤
+#  │         Monitor GUI         │
+#  └─────────────────────────────┘
 
-# แบ่งครึ่งแนวนอน (Pane 1 - ขวาบน) - รัน RViz
-tmux split-window -h -t $SESSION_NAME "$CMD_RVIZ"
+# Pane 0: Teleop Node (ซ้าย, ใหญ่)
+tmux new-session -d -s "$SESSION" -n "teleop" -x 220 -y 55
+tmux send-keys -t "$SESSION" "echo '[ TELEOP NODE ] Ctrl+C -> process stops, terminal stays. Up+Enter to restart.' && $CMD_NODE" Enter
 
-# แบ่งครึ่งล่างของด้านขวา (Pane 2 - ขวาล่าง) - รัน TCP Endpoint หรือ Simulator
-tmux split-window -v -t $SESSION_NAME "$CMD_EXTRA"
+# Pane 1: RViz (ขวาบน)
+tmux split-window -h -t "$SESSION":0
+tmux send-keys -t "$SESSION" "echo '[ RVIZ ] ' && $CMD_RVIZ" Enter
 
-# ถ้าโหมดเป็น 2 หรือ 4 ให้เพิ่มช่องสำหรับดู Log จาก Docker
+# Pane 2: TCP Endpoint หรือ Simulator (ขวาล่าง)
+tmux split-window -v -t "$SESSION":0.1
+tmux send-keys -t "$SESSION" "echo '[ ENDPOINT/SIM ] ' && $CMD_EXTRA" Enter
+
+# Pane 3: Monitor GUI (ล่างสุด, เต็มความกว้าง)
+tmux select-pane -t "$SESSION":0.0
+tmux split-window -v -t "$SESSION":0.0 -p 22
+tmux send-keys -t "$SESSION" "echo '[ MONITOR GUI ] ' && $CMD_MONITOR" Enter
+
+# Docker Logs pane (โหมด Mock เท่านั้น)
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
-    CMD_DOCKER_LOGS="docker compose -f MG400_Mock/docker/docker-compose.yml logs -f"
-    # แบ่งครึ่งของ Pane 0 (ซ้าย) ให้เป็นบน-ล่าง สำหรับ Docker
-    tmux split-window -v -t $SESSION_NAME:0.0 "$CMD_DOCKER_LOGS"
+    tmux split-window -v -t "$SESSION":0.0 -p 40
+    tmux send-keys -t "$SESSION" "docker compose -f MG400_Mock/docker/docker-compose.yml logs -f; exec bash" Enter
 fi
 
-# เปิดโหมด Mouse เพื่อให้คลิกเลือก Pane สะดวกๆ ได้
+# 5. Global Tmux Settings
 tmux set -g mouse on
 
-# ส่งข้อความเตือนความจำไว้ด้านล่างจอ
-tmux display-message -t $SESSION_NAME "💡 Tip: Click pane, press Ctrl+C, then Up Arrow(↑) + Enter to restart."
+# ✅ การ Copy ด้วย Mouse: ต้องกด Shift+Click แล้วลากเพื่อ Select text ปกติ
+# ✅ ถ้าต้องการ Scroll กอปปี้ normal terminal: กด Shift+PageUp / Shift+PageDown
 
-# Attach เข้าไปดู
-tmux attach -t $SESSION_NAME
+# Set pane titles (แสดง label ใน status bar)
+tmux set -g pane-border-status top
+tmux set -g pane-border-format " #{pane_index}: #{pane_title} "
+tmux select-pane -t "$SESSION":0.0 -T "🤖 Teleop Node"
+tmux select-pane -t "$SESSION":0.1 -T "📐 RViz"
+tmux select-pane -t "$SESSION":0.2 -T "🔌 TCP/Simulator"
+tmux select-pane -t "$SESSION":0.3 -T "� Monitor GUI"
 
-# เมื่อกดออก (detached/killed) ถ้าเป็น Mode 2 หรือ 4 ให้ถามว่าจะปิด Docker ไหม
+# 6. Status bar hint
+tmux set -g status-right " 💡 Ctrl+C=stop (stays) | ↑+Enter=restart | Shift+drag=copy "
+tmux set -g status-right-length 70
+tmux set -g status-style "bg=#1a1a2e fg=#aaaaaa"
+
+# โฟกัสไปที่ Pane หลัก (Teleop Node)
+tmux select-pane -t "$SESSION":0.0
+
+# Attach
+tmux attach -t "$SESSION"
+
+# เมื่อ detach ออกมา ถ้าเป็น Mock mode ถามว่าจะปิด Docker ไหม
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
     echo ""
-    read -p "🛑 Do you want to stop Docker Mock? (y/N): " STOP_DOCKER
+    read -p "🛑 Stop Docker Mock? (y/N): " STOP_DOCKER
     if [[ "$STOP_DOCKER" =~ ^[Yy]$ ]]; then
         echo "🐳 Stopping Docker..."
         docker compose -f MG400_Mock/docker/docker-compose.yml down
