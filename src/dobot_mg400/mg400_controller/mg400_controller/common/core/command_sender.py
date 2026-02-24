@@ -40,8 +40,9 @@ class CommandSender:
         status_val = 1 if status else 0
         command = f"DOExecute({port}, {status_val})"
         
-        # ส่งคำสั่งลงไปที่หุ่น
-        success = self.connection.send_motion_cmd(command)
+        # ส่งคำสั่งลงไปที่หุ่น (ใช้ Dashboard Port สำหรับ DOExecute บน V4 และรอ response)
+        response = self.connection.send_and_wait(command)
+        success = response is not None and "0," in response # Usually starts with 0 for success
         if success:
             state_str = "ON" if status else "OFF"
             self.logger.info(f"🔌 DO Port {port} set to {state_str}")

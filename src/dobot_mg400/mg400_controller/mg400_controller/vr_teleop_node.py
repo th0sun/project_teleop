@@ -302,16 +302,16 @@ class TeleopNode(Node):
         """รับคำสั่งเปิด/ปิดหัวดูด/Gripper จาก Unity (Trigger Button)"""
         requested_state = msg.data
         
-        # ตรวจสอบว่าสถานะที่ขอมาต่างกับสถานะปัจจุบัน หรือต่างกับคำสั่งที่รอดำเนินการอยู่หรือไม่
-        if requested_state != self.suction_state and requested_state != self.suction_requested_state:
+        # ตรวจสอบว่าสถานะที่ขอมาต่างกับสถานะปัจจุบันหรือไม่
+        if requested_state != self.suction_state:
             self.suction_requested_state = requested_state
             
-            if motion_config.SMART_SUCTION_ENABLED and self.latest_target is not None:
+            if requested_state and motion_config.SMART_SUCTION_ENABLED and self.latest_target is not None:
                 self.suction_target_q = self.latest_target.copy()
                 self.suction_pending = True
-                self.get_logger().info(f"🔘 Smart Suction queued: {'ON' if requested_state else 'OFF'} (Waiting for robot to reach target)")
+                self.get_logger().info(f"🔘 Smart Suction queued: ON (Waiting for robot to reach target)")
             else:
-                # สั่งทันที (Immediate Mode)
+                # สั่งทันที (Immediate Mode) สำหรับการปิด/ปล่อย หรือเมื่อไม่ได้เปิด Smart Suction
                 self._handle_suction_cmd(requested_state)
 
     def _handle_suction_cmd(self, state):
