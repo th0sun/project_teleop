@@ -25,9 +25,10 @@ import datetime
 from mg400_controller.common.config.motion_config import (
     UNITY_TOPIC, SUCTION_TOPIC, LIGHT_TOPIC, 
     VACUUM_DO_PORT, BLOW_DO_PORT, 
-    GREEN_LIGHT_DO_PORT, YELLOW_LIGHT_DO_PORT, RED_LIGHT_DO_PORT
+    GREEN_LIGHT_DO_PORT, YELLOW_LIGHT_DO_PORT, RED_LIGHT_DO_PORT,
+    DO_STATUS_TOPIC
 )
-from std_msgs.msg import Bool, Int32MultiArray
+from std_msgs.msg import Bool, Int32MultiArray, Int64
 
 # Configuration
 ACTUAL_TOPIC_NAME = "/joint_states"
@@ -102,6 +103,7 @@ class JointMonitorNode(Node):
         self.latest_target_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        self.latest_do_status = 0
         self.last_target_time = 0.0
         self.last_actual_time = 0.0
 
@@ -110,6 +112,7 @@ class JointMonitorNode(Node):
         self.sub_target = self.create_subscription(JointState, TARGET_TOPIC_NAME, self.listener_callback_target, 10)
         self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
         self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
+        self.sub_do_status = self.create_subscription(Int64, DO_STATUS_TOPIC, self.listener_callback_do_status, 10)
 
     def request_suction(self, state):
         """Publish suction request via ROS"""
@@ -139,6 +142,9 @@ class JointMonitorNode(Node):
             
     def listener_callback_tool_target(self, msg):
         if len(msg.data) >= 6: self.latest_tool_target = list(msg.data)
+        
+    def listener_callback_do_status(self, msg):
+        self.latest_do_status = int(msg.data)
 
 class MonitorGUI:
     def __init__(self, root, node):
@@ -373,6 +379,32 @@ class MonitorGUI:
                 self.lbls_diff[i].configure(foreground="orange")
             else:
                 self.lbls_diff[i].configure(foreground="green")
+
+        # --- Update Button States (DO Status Sync) ---
+        do_status = self.node.latest_do_status
+        
+        # 🌬️ Sync Suction (Vacuum Port)
+        actual_suction = bool((do_status >> (VACUUM_DO_PORT - 1)) & 1)
+        if actual_suction != self.suction_state:
+            self.suction_state = actual_suction
+            if self.suction_state:
+                self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
+            else:
+                self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg="black")
+        
+        # 🚥 Sync Lights
+        light_map = [
+            ("GREEN", GREEN_LIGHT_DO_PORT, COLOR_GREEN),
+            ("YELLOW", YELLOW_LIGHT_DO_PORT, COLOR_YELLOW),
+            ("RED", RED_LIGHT_DO_PORT, COLOR_RED)
+        ]
+        for name, port, color in light_map:
+            actual_light = bool((do_status >> (port - 1)) & 1)
+            if actual_light != self.light_states[name]:
+                self.light_states[name] = actual_light
+                bg_color = color if actual_light else COLOR_OFF
+                fg_color = "white" if actual_light else "black"
+                self.btns_light[name].config(bg=bg_color, fg=fg_color)
 
         # --- Update Cartesian Data (Robot Feedback) ---
         # Use values directly from robot controller (via FeedbackHandler)

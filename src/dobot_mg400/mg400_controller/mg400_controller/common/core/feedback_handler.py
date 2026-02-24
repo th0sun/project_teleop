@@ -117,6 +117,10 @@ class FeedbackHandler:
                 OFFSET_CMD_ID = 1112
                 self.command_id = struct.unpack_from('<Q', data, OFFSET_CMD_ID)[0]
                 
+                # Digital Output Status (Offset 1312, 64-bit mask for V4)
+                OFFSET_DO_STATUS = 1312
+                self.do_status = struct.unpack_from('<Q', data, OFFSET_DO_STATUS)[0]
+                
             except Exception as e:
                 self.logger.warn(f"Extra data parse error: {e}")
             
@@ -175,6 +179,10 @@ class FeedbackHandler:
     def get_motor_temperatures(self):
         """ดึงอุณหภูมิมอเตอร์ทั้ง 6 แกน"""
         return np.array(getattr(self, 'motor_temperatures', []))
+
+    def get_do_status(self):
+        """ดึงสถานะ Digital Output ทั้งหมด (Bitmask)"""
+        return getattr(self, 'do_status', 0)
 
     def stop(self):
         """หยุด thread"""

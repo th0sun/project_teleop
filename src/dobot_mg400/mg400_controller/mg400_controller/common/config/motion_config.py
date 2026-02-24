@@ -56,6 +56,7 @@ SAFETY_TOPIC = "/mg400/safety_status" # Safety status reporting
 HAPTIC_TOPIC = "/mg400/haptic_feedback" # Collision-based haptic feedback for VR
 SUCTION_TOPIC = "/vr/suction_cmd" # สั่งเปิด/ปิดหัวดูดจาก Unity (std_msgs/Bool)
 LIGHT_TOPIC = "/mg400/light_cmd"     # สั่งเปิด/ปิดไฟสัญญาณ (std_msgs/Int32MultiArray: [port, status])
+DO_STATUS_TOPIC = "/mg400/do_status" # รับสถานะของ Digital Output (std_msgs/Int64)
 
 # 🛠️ Hardware Configuration
 VACUUM_DO_PORT = 16  # หมายเลขพอร์ต Digital Output สำหรับดูด (Vacuum/Suction)

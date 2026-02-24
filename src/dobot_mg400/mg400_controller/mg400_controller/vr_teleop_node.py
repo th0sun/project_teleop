@@ -13,7 +13,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray
+from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray, Int64
 import threading
 import numpy as np
 import time
@@ -149,6 +149,7 @@ class TeleopNode(Node):
         self.pub_rviz = self.create_publisher(JointState, RVIZ_TOPIC, 10)
         self.pub_debug = self.create_publisher(String, DEBUG_TOPIC, 10)
         self.pub_safety = self.create_publisher(String, SAFETY_TOPIC, 10)
+        self.pub_do_status = self.create_publisher(Int64, motion_config.DO_STATUS_TOPIC, 10)
         
         # Tool Vector Publishers (XYZ Reading)
         self.pub_tool_actual = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_actual", 10)
@@ -386,6 +387,11 @@ class TeleopNode(Node):
             msg_tgt = Float64MultiArray()
             msg_tgt.data = tool_tgt.tolist()
             self.pub_tool_target.publish(msg_tgt)
+            
+            # === PUBLISH DO STATUS (Bitmask) ===
+            do_msg = Int64()
+            do_msg.data = int(self.feedback.get_do_status())
+            self.pub_do_status.publish(do_msg)
             
             # === MOTION TRACKING (Latency Analyzer) ===
             # T4: Motion Start
