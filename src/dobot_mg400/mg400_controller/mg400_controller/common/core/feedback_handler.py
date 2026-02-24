@@ -146,9 +146,6 @@ class FeedbackHandler:
             
         except Exception as e:
             self.logger.error(f"Packet processing error: {e}")
-            
-        except Exception as e:
-            self.logger.error(f"Packet processing error: {e}")
     
     def get_robot_mode(self):
         """Thread-safe access to robot mode"""

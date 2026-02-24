@@ -74,25 +74,24 @@ echo "🚀 Launching Tmux Session..."
 
 # Pane 0: Teleop Node (ซ้าย, ใหญ่)
 tmux new-session -d -s "$SESSION" -n "teleop" -x 220 -y 55
-tmux send-keys -t "$SESSION" "echo '[ TELEOP NODE ] Ctrl+C -> process stops, terminal stays. Up+Enter to restart.' && $CMD_NODE" Enter
+tmux send-keys -t "$SESSION":0.0 "echo '[ TELEOP NODE ] Ctrl+C -> stops, stays. Up+Enter to restart.' && $CMD_NODE" Enter
 
-# Pane 1: RViz (ขวาบน)
-tmux split-window -h -t "$SESSION":0
-tmux send-keys -t "$SESSION" "echo '[ RVIZ ] ' && $CMD_RVIZ" Enter
+# Pane 1: RViz (ขวาบน) — split right
+tmux split-window -h -t "$SESSION":0.0
+tmux send-keys -t "$SESSION":0.1 "echo '[ RVIZ ] ' && $CMD_RVIZ" Enter
 
 # Pane 2: TCP Endpoint หรือ Simulator (ขวาล่าง)
 tmux split-window -v -t "$SESSION":0.1
-tmux send-keys -t "$SESSION" "echo '[ ENDPOINT/SIM ] ' && $CMD_EXTRA" Enter
+tmux send-keys -t "$SESSION":0.2 "echo '[ ENDPOINT/SIM ] ' && $CMD_EXTRA" Enter
 
-# Pane 3: Monitor GUI (ล่างสุด, เต็มความกว้าง)
-tmux select-pane -t "$SESSION":0.0
-tmux split-window -v -t "$SESSION":0.0 -p 22
-tmux send-keys -t "$SESSION" "echo '[ MONITOR GUI ] ' && $CMD_MONITOR" Enter
+# Pane 3: Monitor GUI (ด้านล่างของ Teleop Node)
+tmux split-window -v -t "$SESSION":0.0 -p 25
+tmux send-keys -t "$SESSION":0.3 "echo '[ MONITOR GUI ] ' && $CMD_MONITOR" Enter
 
 # Docker Logs pane (โหมด Mock เท่านั้น)
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
-    tmux split-window -v -t "$SESSION":0.0 -p 40
-    tmux send-keys -t "$SESSION" "docker compose -f MG400_Mock/docker/docker-compose.yml logs -f; exec bash" Enter
+    tmux split-window -v -t "$SESSION":0.0 -p 30
+    tmux send-keys -t "$SESSION":0.4 "docker compose -f MG400_Mock/docker/docker-compose.yml logs -f; exec bash" Enter
 fi
 
 # 5. Global Tmux Settings
