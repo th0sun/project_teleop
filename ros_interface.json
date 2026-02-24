@@ -1,0 +1,305 @@
+{
+    "_meta": {
+        "project": "MG400 VR Teleop",
+        "description": "Single source of truth for all ROS↔Unity topics. Use this file to configure both the ROS node and the Unity ROS-TCP-Connector. All topic names, message types, directions, and field schemas are defined here.",
+        "ros_package": "ros_tcp_connector",
+        "ros_bridge": "ROS-TCP-Connector",
+        "ros_distro": "humble",
+        "network": {
+            "ros_bridge_port": 10000,
+            "robot_ip": "192.168.1.6",
+            "dashboard_port": 29999,
+            "motion_port": 30003,
+            "feedback_port": 30004
+        },
+        "update_rate_hz": {
+            "joint_feedback": 125,
+            "status_publish": 20,
+            "tool_index_query_interval_s": 5
+        }
+    },
+    "topics": [
+        {
+            "topic": "/unity/joint_cmd",
+            "direction": "Unity → ROS",
+            "ros_msg_type": "sensor_msgs/JointState",
+            "unity_msg_class": "SensorMsgs.JointState",
+            "description": "Main teleop command. Unity publishes 4 joint angles (rad) every frame. ROS receives, validates, runs Kalman filter, and sends to robot.",
+            "fields": {
+                "header": {
+                    "stamp": "RosTime — current Unity timestamp (used for latency calculation)"
+                },
+                "name": [
+                    "joint1",
+                    "joint2",
+                    "joint3",
+                    "joint4"
+                ],
+                "position": "float64[4] — joint angles in RADIANS. Order: [J1, J2, J3, J4]",
+                "velocity": "float64[] — not used, leave empty",
+                "effort": "float64[] — not used, leave empty"
+            },
+            "notes": "Angles must be within robot limits: J1 ±160°, J2 ±90°, J3 -175°~0°, J4 ±160°. Validated on ROS side automatically."
+        },
+        {
+            "topic": "/joint_states",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "sensor_msgs/JointState",
+            "unity_msg_class": "SensorMsgs.JointState",
+            "description": "Actual robot joint state (9 joints including passive/mimic joints for URDF visualization). Published at 125Hz from feedback packet byte offset 432.",
+            "fields": {
+                "header": {
+                    "stamp": "RosTime — hardware timestamp from feedback packet"
+                },
+                "name": [
+                    "joint1",
+                    "joint2",
+                    "joint2_2",
+                    "joint3",
+                    "joint3_2",
+                    "joint4",
+                    "joint4_1",
+                    "joint4_2",
+                    "joint4_2_end"
+                ],
+                "position": "float64[9] — joint angles in RADIANS. Active joints at index 0,1,3,8."
+            },
+            "notes": "For UI display of J1-J4, read indices 0,1,3,8 and convert rad→deg."
+        },
+        {
+            "topic": "/mg400/tool_vector_actual",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Float64MultiArray",
+            "unity_msg_class": "StdMsgs.Float64MultiArray",
+            "description": "End-effector TCP position reported by robot firmware (includes active tool offset). From binary feedback packet offset 624. Updated at 20Hz.",
+            "fields": {
+                "data": "float64[6] — [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]"
+            },
+            "notes": "For MG400, ry=rz=0 always. rx = J1+J4 (wrist orientation). This value includes tool offset configured in Dobot Studio."
+        },
+        {
+            "topic": "/mg400/tool_vector_target",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Float64MultiArray",
+            "unity_msg_class": "StdMsgs.Float64MultiArray",
+            "description": "End-effector TCP target position from firmware (firmware's own target, not Unity input). From feedback packet offset 768.",
+            "fields": {
+                "data": "float64[6] — [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]"
+            }
+        },
+        {
+            "topic": "/robot/flange_actual",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Float64MultiArray",
+            "unity_msg_class": "StdMsgs.Float64MultiArray",
+            "description": "Flange (J4 tip) XYZ computed via FK from actual joint angles. Does NOT include tool offset. Use this to compare with Unity FK — difference = latency/control error only.",
+            "fields": {
+                "data": "float64[6] — [x_mm, y_mm, z_mm, rx_deg, 0, 0]"
+            },
+            "notes": "tool_offset_effective = tool_vector_actual[:3] - flange_actual[:3]. Updated at 20Hz."
+        },
+        {
+            "topic": "/teleop/unity_xyz",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Float64MultiArray",
+            "unity_msg_class": "StdMsgs.Float64MultiArray",
+            "description": "FK result of the Unity joint input (what XYZ Unity is targeting). Computed from q_safe in _unity_callback using MG400 kinematics. No tool offset included.",
+            "fields": {
+                "data": "float64[6] — [x_mm, y_mm, z_mm, rx_deg, 0, 0]"
+            }
+        },
+        {
+            "topic": "/teleop/predicted_target",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "sensor_msgs/JointState",
+            "unity_msg_class": "SensorMsgs.JointState",
+            "description": "Output of the Kalman filter + target predictor. The smoothed/predicted joint target the ROS controller actually uses before sending to robot.",
+            "fields": {
+                "position": "float64[4] — [J1, J2, J3, J4] in RADIANS"
+            }
+        },
+        {
+            "topic": "/teleop/sent_command",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "sensor_msgs/JointState",
+            "unity_msg_class": "SensorMsgs.JointState",
+            "description": "The actual command sent to the robot after proximity gating. Used for staircase visualization — only updates when command actually changes.",
+            "fields": {
+                "position": "float64[4] — [J1, J2, J3, J4] in RADIANS"
+            }
+        },
+        {
+            "topic": "/robot/tool_index",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Int32",
+            "unity_msg_class": "StdMsgs.Int32",
+            "description": "Currently active tool index on the robot (from GetTool() dashboard command). Queried every 5 seconds automatically.",
+            "fields": {
+                "data": "int32 — active tool index (0-9). Index 0 = flange (no offset)."
+            }
+        },
+        {
+            "topic": "/mg400/robot_mode",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Int32",
+            "unity_msg_class": "StdMsgs.Int32",
+            "description": "Current robot operating mode from firmware. Published at 20Hz.",
+            "fields": {
+                "data": "int32"
+            },
+            "enum": {
+                "1": "INIT",
+                "2": "BRAKE_OPEN",
+                "3": "POWER_OFF",
+                "4": "DISABLED",
+                "5": "ENABLED (idle, ready)",
+                "6": "DRAG (teach mode)",
+                "7": "RUNNING (motion executing)",
+                "8": "RECORDING",
+                "9": "ERROR (alarm active)",
+                "10": "PAUSE",
+                "11": "JOG"
+            },
+            "notes": "Unity should NOT send commands when mode != 5 (ENABLED). Show 'ERROR' UI if mode == 9."
+        },
+        {
+            "topic": "/mg400/error_status",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Int32",
+            "unity_msg_class": "StdMsgs.Int32",
+            "description": "Robot error/alarm code from firmware feedback packet offset 1029.",
+            "fields": {
+                "data": "int32 — 0 = no error. Non-zero = alarm code. Robot is in error state."
+            },
+            "notes": "When non-zero, show alert in Unity UI. Robot will not move."
+        },
+        {
+            "topic": "/mg400/do_status",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Int64",
+            "unity_msg_class": "StdMsgs.Int64",
+            "description": "Bitmask of all 16 Digital Output ports on the robot. Bit N-1 = state of DO port N.",
+            "fields": {
+                "data": "int64 — bitmask. bit0 = DO1, bit1 = DO2, ..., bit15 = DO16"
+            },
+            "port_map": {
+                "DO1": "Vacuum (suction cup)",
+                "DO2": "Blow (reverse pressure)",
+                "DO7": "Green light",
+                "DO8": "Yellow light",
+                "DO9": "Red light"
+            },
+            "example": "0x0001 = suction ON, 0x0040 = green light ON"
+        },
+        {
+            "topic": "/vr/suction_cmd",
+            "direction": "Unity → ROS",
+            "ros_msg_type": "std_msgs/Bool",
+            "unity_msg_class": "StdMsgs.Bool",
+            "description": "Toggle vacuum suction cup. True = turn ON suction, False = turn OFF.",
+            "fields": {
+                "data": "bool — true: enable vacuum (DO1 ON), false: disable"
+            },
+            "notes": "ROS side has 2-second lockout after each command to wait for DO feedback to stabilize."
+        },
+        {
+            "topic": "/mg400/light_cmd",
+            "direction": "Unity → ROS",
+            "ros_msg_type": "std_msgs/Int32MultiArray",
+            "unity_msg_class": "StdMsgs.Int32MultiArray",
+            "description": "Control signal lights on the robot base. Send [port, state] pair.",
+            "fields": {
+                "data": "int32[2] — [do_port, state]. state: 1=ON, 0=OFF"
+            },
+            "port_map": {
+                "7": "Green light",
+                "8": "Yellow light",
+                "9": "Red light"
+            },
+            "examples": [
+                "[7, 1] → green ON",
+                "[8, 1] → yellow ON",
+                "[9, 0] → red OFF"
+            ]
+        },
+        {
+            "topic": "/mg400/haptic_feedback",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/String",
+            "unity_msg_class": "StdMsgs.String",
+            "description": "Collision haptic signal for Meta Quest 3 controller vibration. Sent when robot collision is detected.",
+            "fields": {
+                "data": "string — 'COLLISION' when collision detected"
+            },
+            "notes": "Unity should trigger controller haptic on receipt. Signal is debounced on ROS side."
+        },
+        {
+            "topic": "/teleop/ros_ping",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/Int64",
+            "unity_msg_class": "StdMsgs.Int64",
+            "description": "Heartbeat from ROS to Unity. Sent every 1 second with Unix timestamp in milliseconds.",
+            "fields": {
+                "data": "int64 — Unix epoch milliseconds (time.time() * 1000)"
+            },
+            "notes": "Used to verify ROS-Unity connection is alive and to measure clock offset."
+        },
+        {
+            "topic": "/teleop/unity_pong",
+            "direction": "Unity → ROS",
+            "ros_msg_type": "std_msgs/String",
+            "unity_msg_class": "StdMsgs.String",
+            "description": "Heartbeat echo from Unity back to ROS. Send back the timestamp received from /teleop/ros_ping.",
+            "fields": {
+                "data": "string — echo of received ping timestamp as string, e.g. '1708820400123'"
+            },
+            "notes": "ROS uses this to calibrate clock offset between ROS and Unity for timestamp correction."
+        },
+        {
+            "topic": "/teleop/debug",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/String",
+            "unity_msg_class": "StdMsgs.String",
+            "description": "Debug messages from ROS controller. Subscribe for diagnostic info in Unity console.",
+            "fields": {
+                "data": "string — human-readable debug message"
+            }
+        }
+    ],
+    "unity_setup": {
+        "package": "ROS-TCP-Connector (Unity Asset Store)",
+        "ros_settings": {
+            "RosIPAddress": "192.168.1.x (Ubuntu VM IP)",
+            "RosPort": 10000
+        },
+        "required_message_packages": [
+            "ROS-TCP-Connector",
+            "URDF-Importer (optional, for robot visualization)"
+        ],
+        "unity_publisher_topics": [
+            "/unity/joint_cmd",
+            "/vr/suction_cmd",
+            "/mg400/light_cmd",
+            "/teleop/unity_pong"
+        ],
+        "unity_subscriber_topics": [
+            "/joint_states",
+            "/mg400/tool_vector_actual",
+            "/robot/flange_actual",
+            "/teleop/unity_xyz",
+            "/teleop/predicted_target",
+            "/teleop/sent_command",
+            "/robot/tool_index",
+            "/mg400/robot_mode",
+            "/mg400/error_status",
+            "/mg400/do_status",
+            "/mg400/haptic_feedback",
+            "/teleop/ros_ping"
+        ]
+    },
+    "ros_launch": {
+        "command": "cd ~/project_teleop_ws && source install/setup.bash && ros2 run mg400_controller vr_teleop_node",
+        "monitor_gui": "ros2 run mg400_controller monitor_gui",
+        "mock_robot": "cd ~/project_teleop_ws/project_teleop/MG400_Mock && docker-compose up"
+    }
+}
