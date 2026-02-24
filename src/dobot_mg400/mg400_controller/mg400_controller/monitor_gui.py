@@ -23,10 +23,11 @@ import datetime
 
 # Import Configuration
 from mg400_controller.common.config.motion_config import (
-    UNITY_TOPIC, VACUUM_DO_PORT, BLOW_DO_PORT, 
+    UNITY_TOPIC, SUCTION_TOPIC, LIGHT_TOPIC, 
+    VACUUM_DO_PORT, BLOW_DO_PORT, 
     GREEN_LIGHT_DO_PORT, YELLOW_LIGHT_DO_PORT, RED_LIGHT_DO_PORT
 )
-from mg400_controller.common.core.robot_connection import RobotConnection
+from std_msgs.msg import Bool, Int32MultiArray
 
 # Configuration
 ACTUAL_TOPIC_NAME = "/joint_states"
@@ -92,20 +93,11 @@ class JointMonitorNode(Node):
     def __init__(self):
         super().__init__('mg400_joint_monitor')
         
-        # Initialize Connection for Controls
-        self.connection = RobotConnection(self.get_logger())
-        self.is_connected = False
+        # Publishers for Controls
+        self.pub_suction = self.create_publisher(Bool, SUCTION_TOPIC, 10)
+        self.pub_light = self.create_publisher(Int32MultiArray, LIGHT_TOPIC, 10)
         
-        # Subscription for Actual Robot State
-        self.sub_actual = self.create_subscription(JointState, ACTUAL_TOPIC_NAME, self.listener_callback_actual, 10)
-        
-        # Subscription for Target Command (from Unity/VR)
-        self.sub_target = self.create_subscription(JointState, TARGET_TOPIC_NAME, self.listener_callback_target, 10)
-        
-        # Tool Vectors
-        self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
-        self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
-
+        # Joint variables
         self.latest_actual_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_target_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -113,27 +105,23 @@ class JointMonitorNode(Node):
         self.last_target_time = 0.0
         self.last_actual_time = 0.0
 
-        self.get_logger().info(f"Subscribed to {ACTUAL_TOPIC_NAME} and {TARGET_TOPIC_NAME}")
-        
-        # Connect to robot in a separate thread to avoid blocking GUI
-        threading.Thread(target=self._try_connect, daemon=True).start()
+        # Subscriptions
+        self.sub_actual = self.create_subscription(JointState, ACTUAL_TOPIC_NAME, self.listener_callback_actual, 10)
+        self.sub_target = self.create_subscription(JointState, TARGET_TOPIC_NAME, self.listener_callback_target, 10)
+        self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
+        self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
 
-    def _try_connect(self):
-        if self.connection.connect():
-            self.is_connected = True
-            self.get_logger().info("✅ Control Channel Connected")
-        else:
-            self.get_logger().error("❌ Failed to connect to Robot Control Channel")
+    def request_suction(self, state):
+        """Publish suction request via ROS"""
+        msg = Bool()
+        msg.data = state
+        self.pub_suction.publish(msg)
 
-    def send_do_execute(self, port, status):
-        """Send DOExecute command directly to robot"""
-        if not self.is_connected:
-            self.get_logger().warn(f"⚠️ Not connected to robot. Cannot set DO {port}")
-            return False
-            
-        status_val = 1 if status else 0
-        cmd = f"DOExecute({port}, {status_val})"
-        return self.connection.send_motion_cmd(cmd)
+    def request_light(self, port, state):
+        """Publish light request via ROS"""
+        msg = Int32MultiArray()
+        msg.data = [port, int(state)]
+        self.pub_light.publish(msg)
 
     def listener_callback_actual(self, msg):
         if len(msg.position) >= 9:
@@ -326,26 +314,21 @@ class MonitorGUI:
 
     def toggle_suction(self):
         self.suction_state = not self.suction_state
+        self.node.request_suction(self.suction_state)
+        
         if self.suction_state:
-            # ON: Vacuum ON, Blow OFF
-            self.node.send_do_execute(VACUUM_DO_PORT, True)
-            self.node.send_do_execute(BLOW_DO_PORT, False)
             self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
         else:
-            # OFF: Blow ON then OFF (standard release sequence)
-            self.node.send_do_execute(VACUUM_DO_PORT, False)
-            self.node.send_do_execute(BLOW_DO_PORT, True)
-            time.sleep(0.5) # Quick blow to release
-            self.node.send_do_execute(BLOW_DO_PORT, False)
             self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg="black")
 
     def toggle_light(self, name, port, color):
         self.light_states[name] = not self.light_states[name]
         status = self.light_states[name]
-        if self.node.send_do_execute(port, status):
-            bg_color = color if status else COLOR_OFF
-            fg_color = "white" if status else "black"
-            self.btns_light[name].config(bg=bg_color, fg=fg_color)
+        self.node.request_light(port, status)
+        
+        bg_color = color if status else COLOR_OFF
+        fg_color = "white" if status else "black"
+        self.btns_light[name].config(bg=bg_color, fg=fg_color)
 
     def toggle_logging(self):
         self.is_logging = not self.is_logging

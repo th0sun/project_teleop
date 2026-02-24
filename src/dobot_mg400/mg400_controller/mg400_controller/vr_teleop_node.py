@@ -13,7 +13,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String, Float64MultiArray, Bool
+from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray
 import threading
 import numpy as np
 import time
@@ -25,7 +25,11 @@ from mg400_controller.common.config.robot_config import (
     JOINT_LIMITS,
     ELBOW_ANGLE_LIMIT
 )
-from mg400_controller.common.config.motion_config import UNITY_TOPIC, RVIZ_TOPIC, DEBUG_TOPIC, SAFETY_TOPIC, HAPTIC_TOPIC, SUCTION_TOPIC, VACUUM_DO_PORT, BLOW_DO_PORT, SUCTION_ACTIVATION_THRESHOLD, SMART_SUCTION_ENABLED
+from mg400_controller.common.config.motion_config import (
+    UNITY_TOPIC, RVIZ_TOPIC, DEBUG_TOPIC, SAFETY_TOPIC, HAPTIC_TOPIC, 
+    SUCTION_TOPIC, LIGHT_TOPIC, VACUUM_DO_PORT, BLOW_DO_PORT, 
+    SUCTION_ACTIVATION_THRESHOLD, SMART_SUCTION_ENABLED
+)
 import mg400_controller.common.config.motion_config as motion_config
 
 # Import core modules
@@ -141,9 +145,8 @@ class TeleopNode(Node):
             depth=1
         )
         
-        self.sub_unity = self.create_subscription(
-            JointState, UNITY_TOPIC, self._unity_callback, qos_profile
-        )
+        # Subscriptions (Delayed UNITY to avoid race condition)
+        self.sub_unity = None
         
         self.pub_rviz = self.create_publisher(JointState, RVIZ_TOPIC, 10)
         self.pub_debug = self.create_publisher(String, DEBUG_TOPIC, 10)
@@ -160,6 +163,11 @@ class TeleopNode(Node):
         self.suction_target_q = None
         self.sub_suction = self.create_subscription(
             Bool, SUCTION_TOPIC, self._suction_callback, 10
+        )
+        
+        # Light Control
+        self.sub_lights = self.create_subscription(
+            Int32MultiArray, LIGHT_TOPIC, self._light_callback, 10
         )
         
         # 3. Connect to Robot
@@ -208,6 +216,13 @@ class TeleopNode(Node):
         
         # 6. Start Threads
         self.feedback.start()
+        
+        # 5. Start Unity Subscriber (End of init to prevent race condition)
+        self.sub_unity = self.create_subscription(
+            JointState, UNITY_TOPIC, self._unity_callback, qos_profile
+        )
+        
+        self.get_logger().info("✅ Teleop Node fully initialized and listening.")
         self.interactive.start()
         
         # 6. Start Control Loop (50Hz) - Sends latest target when robot is close enough
@@ -303,6 +318,16 @@ class TeleopNode(Node):
                             self.get_logger().info(f"🔘 Immediate Suction Activated: {'ON' if requested_state else 'OFF'}")
                 else:
                     self.get_logger().warn("⚠️ Cannot toggle suction; Robot disconnected.")
+    
+    def _light_callback(self, msg):
+        """Callback for external light control (e.g. from GUI)"""
+        if len(msg.data) >= 2:
+            port = msg.data[0]
+            state = bool(msg.data[1])
+            if self.connection.connected:
+                self.sender.set_digital_output(port, state)
+            else:
+                self.get_logger().warn(f"⚠️ Cannot set light port {port}; Robot disconnected.")
     
     def _control_loop(self):
         """

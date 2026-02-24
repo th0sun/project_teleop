@@ -119,7 +119,7 @@ class TargetPredictor:
         # If the robot is far (high tracking error), use full prediction to gain speed.
         final_horizon = self.horizon
         
-        if q_actual is not None:
+        if q_actual is not None and np.any(q_actual != 0.0):
             # Tracking Error = Distance between current hand position and robot actual position
             tracking_error = np.max(np.abs(raw_target_q - q_actual))
             
