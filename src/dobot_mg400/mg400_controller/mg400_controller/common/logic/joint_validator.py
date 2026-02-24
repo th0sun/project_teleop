@@ -41,6 +41,11 @@ class JointValidator:
         q_safe = q_target.copy()
         was_clamped = False
         
+        # 0. Check Input Length (Must have 4 joints for MG400)
+        if len(q_safe) < 4:
+            self.logger.error(f"❌ JointValidator: Expected 4 joints, got {len(q_safe)}. Validation aborted.")
+            return q_safe, False
+        
         # 1. Clamp with Safety Margin for 4-decimal formatting (0.0001 deg)
         # Reason: MotionPlanner formats string with {:.4f}, so nextafter's 1e-16 diff disappears.
         # We need margin >= 0.0001 to ensure rounding doesn't hit the limit.
