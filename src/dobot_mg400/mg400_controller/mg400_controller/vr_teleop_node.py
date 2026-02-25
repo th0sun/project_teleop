@@ -332,6 +332,12 @@ class TeleopNode(Node):
         try:
             # 1. Validate & Clamp Joints
             q_target = np.array(msg.position)
+            
+            # 🛡️ Anti-NaN Protection
+            if np.any(np.isnan(q_target)):
+                self.get_logger().warn("⚠️ Received NaN joints from Unity - ignoring command")
+                return
+                
             q_safe, was_clamped = self.validator.validate_and_clamp(q_target)
             
             if was_clamped:

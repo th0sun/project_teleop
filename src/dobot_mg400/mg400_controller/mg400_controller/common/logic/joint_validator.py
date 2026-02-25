@@ -52,6 +52,14 @@ class JointValidator:
         # We need margin >= 0.0001 to ensure rounding doesn't hit the limit.
         FORMATTING_MARGIN = 0.0001
         
+        is_clamped = False
+        clamp_reasons = []
+        
+        # Protective check bounds against NaNs
+        if np.any(np.isnan(q_safe)):
+            self.logger.error(f"❌ JointValidator: Detected NaN in target joint positions. Validation aborted.")
+            return q_safe, True
+
         for joint_id, (min_val, max_val) in self.limits.items():
             min_safe_deg = min_val + FORMATTING_MARGIN
             max_safe_deg = max_val - FORMATTING_MARGIN
@@ -59,7 +67,7 @@ class JointValidator:
             min_rad = np.radians(min_safe_deg)
             max_rad = np.radians(max_safe_deg)
             
-            if q_safe[joint_id] <= min_rad or q_safe[joint_id] >= max_rad:
+            if q_safe[joint_id] < min_rad or q_safe[joint_id] > max_rad:
                 orig_deg = np.degrees(q_safe[joint_id])
                 q_safe[joint_id] = np.clip(q_safe[joint_id], min_rad, max_rad)
                 new_deg = np.degrees(q_safe[joint_id])
