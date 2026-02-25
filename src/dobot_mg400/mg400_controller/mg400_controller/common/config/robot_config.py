@@ -13,10 +13,10 @@
 
 # 🔧 Joint Limits (degrees) - MG400
 JOINT_LIMITS = {
-    0: (-160, 160),   # J1 - Base Rotation
-    1: (-25, 85),     # J2 - Shoulder
-    2: (-25, 105),    # J3 - Elbow
-    3: (-360, 360)    # J4 - Wrist
+    0: (-160.0, 160.0),   # J1 - Base Rotation
+    1: (-24.5, 84.5),     # J2 - Shoulder (Buffered to prevent -25.0 hard limit alarm)
+    2: (-24.5, 104.5),    # J3 - Elbow (Buffered to prevent J3 hard limit)
+    3: (-360.0, 360.0)    # J4 - Wrist
 }
 
 # 🦾 Elbow Angle Limit (degrees) - MG400 Physical Constraint
@@ -35,7 +35,4 @@ CONTROL_MODE = "jointmovj"
 # กรองการเคลื่อนที่เล็กๆ ที่ไม่จำเป็น
 SPATIAL_THRESHOLD = 0.0005  # ~0.03 degrees
 
-# ⚙️ Feature Flags
-# Enable GetError() API for detailed error reporting
-# NOTE: Set to False when using MG400_MOCK simulator (not implemented)
-ENABLE_GET_ERROR = True  # Default: disabled for simulator compatibility
+ENABLE_GET_ERROR = False  # Disabled by default since V4 firmware uses GetErrorID

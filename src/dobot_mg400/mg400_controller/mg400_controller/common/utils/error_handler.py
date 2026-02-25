@@ -45,49 +45,55 @@ class ErrorHandler:
         
     def check_errors(self) -> List[Dict]:
         """
-        Get current errors from robot using GetError() API
+        Get current errors from robot using GetErrorID() API
         
         Returns:
-            List of error dictionaries, each containing:
-            - id: Error code
-            - level: Severity level
-            - description: Error description
-            - solution: Suggested solution
-            - mode: Robot mode when error occurred
-            - date: Date of error
-            - time: Time of error
+            List of error dictionaries
         """
         try:
-            # Call GetError() API via Dashboard port
-            result = self.connection.send_and_wait(
-                f"GetError(language=\"{self.language}\")"
-            )
+            # Call GetErrorID() API via Dashboard port
+            result = self.connection.send_and_wait("GetErrorID()")
             
-            if not result:
+            if not result or ',{' not in result:
                 return []
             
-            # Parse response format: "0,{errMsg:[...]};" or "0,{};" (no errors)
-            # Remove error code prefix
-            if ',' in result:
-                parts = result.split(',', 1)
-                if len(parts) == 2:
-                    json_part = parts[1].strip()
-                    
-                    # Remove trailing semicolon if present
-                    if json_part.endswith(';'):
-                        json_part = json_part[:-1]
-                    
-                    try:
-                        data = json.loads(json_part)
-                        return data.get('errMsg', [])
-                    except json.JSONDecodeError:
-                        # GetError might not be supported or empty response
-                        return []
+            # Extract the JSON-like array block from "0,{[[...]]},GetErrorID();"
+            start_idx = result.find('{')
+            end_idx = result.find('}')
             
+            if start_idx != -1 and end_idx != -1:
+                content = result[start_idx+1:end_idx]
+                
+                # Extract all numbers from the arrays
+                import re
+                nums = re.findall(r'-?\d+', content)
+                error_ids = [int(n) for n in nums if int(n) > 0] # Ignore 0 (no error) and -2 (collision placeholder)
+                
+                if not error_ids:
+                    return []
+                
+                # We have errors. Use RobotErrorDecoder to get descriptions
+                from mg400_controller.common.utils.error_decoder import RobotErrorDecoder
+                decoder = RobotErrorDecoder()
+                
+                parsed_errors = []
+                for eid in set(error_ids):
+                    desc, sol, _ = decoder.decode_error(eid)
+                    parsed_errors.append({
+                        'id': eid,
+                        'level': 2, # Assume error
+                        'description': desc,
+                        'solution': sol,
+                        'mode': 9,
+                        'date': '',
+                        'time': ''
+                    })
+                return parsed_errors
+                
             return []
                 
         except Exception as e:
-            self.logger.warn(f"GetError() API call failed: {e}")
+            self.logger.warn(f"GetErrorID() API call failed: {e}")
             return []
     
     def format_error_message(self, error: Dict) -> Dict:

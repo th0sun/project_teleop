@@ -513,8 +513,9 @@ class TeleopNode(Node):
                 self.last_do_status = do_status
             
             # === PUBLISH ROBOT MODE & ERROR ===
+            current_mode = int(self.feedback.get_robot_mode())
             mode_msg = Int32()
-            mode_msg.data = int(self.feedback.get_robot_mode())
+            mode_msg.data = current_mode
             self.pub_robot_mode.publish(mode_msg)
             
             err_info = self.feedback.get_error_status()
@@ -522,23 +523,16 @@ class TeleopNode(Node):
             err_msg.data = int(err_info['error_status'])
             self.pub_error_status.publish(err_msg)
 
-            # === PERIODIC TOOL INDEX QUERY (every ~5s at 20Hz = 100 cycles) ===
-            self._tool_query_counter += 1
-            if self._tool_query_counter >= 100:
-                self._tool_query_counter = 0
-                try:
-                    resp = self.connection.send_and_wait("GetTool()", timeout=1.0)
-                    if resp:
-                        # Response format: "0,{N},GetTool();"
-                        import re
-                        m = re.search(r'\{(\d+)\}', resp)
-                        if m:
-                            tidx = int(m.group(1))
-                            ti_msg = Int32()
-                            ti_msg.data = tidx
-                            self.pub_tool_index.publish(ti_msg)
-                except Exception:
-                    pass
+            # === AUTO-RECOVERY (Clear Error) ===
+            # If the robot actually hits a hardware limit or another error, it enters Mode 9.
+            # We auto-clear it so it doesn't stay permanently frozen.
+            if current_mode == 9:
+                if not hasattr(self, 'last_clear_error_time'):
+                    self.last_clear_error_time = 0.0
+                if now - self.last_clear_error_time > 3.0:
+                    self.get_logger().error("🛑 Robot is in ERROR STATE (Mode 9). Auto-clearing error...")
+                    self.connection.send_and_wait("ClearError()")
+                    self.last_clear_error_time = now
             
             # === MOTION TRACKING (Latency Analyzer) ===
             # T4: Motion Start
