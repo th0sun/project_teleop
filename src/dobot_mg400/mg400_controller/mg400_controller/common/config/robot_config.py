@@ -38,5 +38,4 @@ SPATIAL_THRESHOLD = 0.0005  # ~0.03 degrees
 # ⚙️ Feature Flags
 # Enable GetError() API for detailed error reporting
 # NOTE: Set to False when using MG400_MOCK simulator (not implemented)
-#       Set to True when connected to real MG400 hardware
-ENABLE_GET_ERROR = False  # Default: disabled for simulator compatibility
+ENABLE_GET_ERROR = True  # Default: disabled for simulator compatibility

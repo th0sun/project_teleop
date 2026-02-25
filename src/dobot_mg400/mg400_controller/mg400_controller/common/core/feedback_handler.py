@@ -102,11 +102,9 @@ class FeedbackHandler:
             test_val = struct.unpack_from('<Q', data, TEST_VALUE_OFFSET)[0]
             
             # 🛑 ZERO-LOCK FIX:
-            # Real robots send 0x0123456789ABCDEF. Mocks might send 0.
-            # If the robot is in a reconnect phase, it might send a buffer of Zeros.
-            # We strictly reject 0 if we are on Real Hardware (ENABLE_GET_ERROR=True).
-            from mg400_controller.common.config.robot_config import ENABLE_GET_ERROR
-            VALID_TEST_VALUES = (0x0123456789ABCDEF, ) if ENABLE_GET_ERROR else (0x0123456789ABCDEF, 0)
+            # Real robots send 0x0123456789ABCDEF. Mocks send 0.
+            # Accept both so we don't break the Mock Simulator.
+            VALID_TEST_VALUES = (0x0123456789ABCDEF, 0)
             
             if test_val not in VALID_TEST_VALUES:
                 self.logger.warn(f"Packet Rejected: TestValue mismatch. Got: {hex(test_val)}", throttle_duration_sec=1.0)
@@ -116,6 +114,15 @@ class FeedbackHandler:
             OFFSET_JOINT_ACTUAL = 432
             q_all = struct.unpack_from('<6d', data, OFFSET_JOINT_ACTUAL)
             j1, j2, j3, j4 = q_all[0:4]
+            
+            # 🛑 ZERO-LOCK FIX (Continued):
+            # If the robot reconnects and sends a completely empty buffer, 
+            # test_val is 0 AND the joints are exactly 0.0, 0.0, 0.0, 0.0.
+            # We must reject this so it doesn't lock the Robot's Position at 0.
+            if test_val == 0 and sum(abs(x) for x in q_all[0:4]) < 0.000001:
+                self.logger.warn("Packet Rejected: Blank zero-buffer detected (Zero-Lock Prevention)", throttle_duration_sec=1.0)
+                return
+                
             q_rad = np.radians([j1, j2, j3, j4])
             
             # --- Sanity Check ---
