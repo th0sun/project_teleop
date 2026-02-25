@@ -564,16 +564,16 @@ class TeleopNode(Node):
                         # CLI Log
                         self.get_logger().info(report)
                         
-                        # CSV Log
-                    # CSV Log (Async)
-                    self.log_queue.put(('TELEOP_LATENCY', [
-                        now, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
-                        metrics['network_ms'], metrics['decision_ms'], metrics['command_ms'],
-                        metrics['response_ms'], metrics['motion_time_ms'], metrics['execution_ms'],
-                        metrics['e2e_ms'],
-                        metrics['target'], metrics['final_q'],
-                        metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
-                    ]))
+                        # CSV Log (Async)
+                        self.log_queue.put(('TELEOP_LATENCY', [
+                            now, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
+                            metrics['network_ms'], metrics['decision_ms'], metrics['command_ms'],
+                            metrics['response_ms'], metrics['motion_time_ms'], metrics['execution_ms'],
+                            metrics['e2e_ms'],
+                            metrics['target'], metrics['final_q'],
+                            metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
+                        ]))
+
             
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION

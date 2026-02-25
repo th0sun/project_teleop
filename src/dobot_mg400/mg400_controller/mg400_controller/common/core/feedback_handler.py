@@ -57,15 +57,16 @@ class FeedbackHandler:
         while not self.stop_event.is_set():
             try:
                 # 🔄 Flush buffer to get LATEST packet (As seen in dobot_api.py)
-                # This prevents processing stale data when the loop falls behind
                 self.connection.fb_sock.setblocking(False)
                 latest_packet = None
                 while True:
                     try:
                         chunk = self.connection.fb_sock.recv(4096)
-                        if not chunk: break
+                        if not chunk: 
+                            # Socket closed by peer
+                            raise socket.error("Feedback socket closed by peer")
                         buffer += chunk
-                    except (BlockingIOError, socket.error):
+                    except BlockingIOError:
                         break
                 
                 # Process only the LATEST complete packet from the buffer
@@ -79,9 +80,18 @@ class FeedbackHandler:
                 # Small sleep to yield
                 time.sleep(0.001)
                 
+            except (socket.error, OSError) as e:
+                self.logger.error(f"📡 Feedback socket error: {e}. Reconnecting...")
+                if self.connection._reconnect_port('fb'):
+                    # Success reconnected
+                    self.connection.fb_sock.settimeout(None)
+                    buffer = b'' # Clear stale buffer
+                else:
+                    time.sleep(1.0) # Wait before retry
             except Exception as e:
-                self.logger.error(f"Feedback error: {e}")
+                self.logger.error(f"Feedback loop error: {e}")
                 time.sleep(0.5)
+
     
     def _process_packet(self, data):
         """ประมวลผล binary packet ตามโครงสร้าง MyType ใน dobot_api.py"""

@@ -64,32 +64,42 @@ class RobotConnection:
                 self.logger.info("🟢 Robot Enabled")
                 return True
             except Exception as e:
-                self.logger.error(f"Enable failed: {e}")
+                self.logger.error(f"❌ Reconnect failed: {retry_e}")
                 return False
-    
-    
-    def _reconnect_dashboard(self):
-        """Try to reconnect dashboard socket only"""
+        return False
+
+    def _reconnect_port(self, port_name):
+        """Generic reconnect for a specific port"""
+        target_port = DASHBOARD_PORT if port_name == 'dashboard' else (CMD_PORT if port_name == 'cmd' else FEEDBACK_PORT)
+        
         try:
-            self.logger.warn("🔄 Reconnecting Dashboard Socket...")
-            if self.dashboard:
-                try: self.dashboard.close()
-                except: pass
+            self.logger.warn(f"🔄 Reconnecting {port_name.upper()} Socket ({target_port})...")
+            new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            new_sock.settimeout(SOCKET_TIMEOUT)
+            new_sock.connect((ROBOT_IP, target_port))
             
-            self.dashboard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.dashboard.settimeout(SOCKET_TIMEOUT)
-            self.dashboard.connect((ROBOT_IP, DASHBOARD_PORT))
-            self.logger.info("✅ Dashboard Socket Reconnected!")
+            if port_name == 'dashboard':
+                if self.dashboard: self.dashboard.close()
+                self.dashboard = new_sock
+            elif port_name == 'cmd':
+                if self.cmd_sock: self.cmd_sock.close()
+                self.cmd_sock = new_sock
+            elif port_name == 'fb':
+                if self.fb_sock: self.fb_sock.close()
+                self.fb_sock = new_sock
+            
+            self.logger.info(f"✅ {port_name.upper()} Socket Reconnected!")
             return True
         except Exception as e:
-            self.logger.error(f"❌ Reconnect failed: {e}")
+            self.logger.error(f"❌ Reconnect {port_name} failed: {e}")
             return False
+
 
     def send_dashboard_cmd(self, command):
         """ส่งคำสั่งผ่าน Dashboard Port with Auto-Reconnect"""
         if not self.connected: 
             # Try to revive safely
-            if not self._reconnect_dashboard():
+            if not self._reconnect_port('dashboard'):
                 return False
         
         with self.dash_lock:
@@ -104,7 +114,7 @@ class RobotConnection:
                 return False
             except (OSError, socket.error) as e:
                 self.logger.warn(f"Dashboard socket error: {e}. Reconnecting...")
-                if self._reconnect_dashboard():
+                if self._reconnect_port('dashboard'):
                     try:
                         self.dashboard.send(cmd_bytes)
                         return True
@@ -127,7 +137,7 @@ class RobotConnection:
             str: Response from robot, or None if failed
         """
         if not self.connected:
-             if not self._reconnect_dashboard():
+             if not self._reconnect_port('dashboard'):
                 return None
         with self.dash_lock:
             try:
@@ -148,7 +158,7 @@ class RobotConnection:
                 
             except (OSError, socket.error) as e:
                 self.logger.warn(f"Dashboard socket error in send_and_wait: {e}. Reconnecting...")
-                if self._reconnect_dashboard():
+                if self._reconnect_port('dashboard'):
                     try:
                         self.dashboard.send(cmd_bytes)
                         self.dashboard.settimeout(timeout)
@@ -167,15 +177,25 @@ class RobotConnection:
                 self.dashboard.settimeout(SOCKET_TIMEOUT)
     
     def send_motion_cmd(self, command):
-        """ส่งคำสั่งการเคลื่อนที่"""
+        """ส่งคำสั่งการเคลื่อนที่ with Auto-Reconnect"""
         if not self.connected:
-            return False
+            if not self._reconnect_port('cmd'):
+                return False
         try:
             cmd_str = command if isinstance(command, str) else command.decode()
             if not cmd_str.endswith('\n'):
                 cmd_str += '\n'
             self.cmd_sock.send(cmd_str.encode())
             return True
+        except (OSError, socket.error) as e:
+            self.logger.warn(f"Motion socket error: {e}. Reconnecting...")
+            if self._reconnect_port('cmd'):
+                try:
+                    self.cmd_sock.send(cmd_str.encode())
+                    return True
+                except Exception as retry_e:
+                    self.logger.error(f"Retry motion failed: {retry_e}")
+            return False
         except Exception as e:
             self.logger.error(f"Motion command failed: {e}")
             return False
