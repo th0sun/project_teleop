@@ -77,8 +77,8 @@ class ClockCalibrator:
         if len(self.delay_history) >= self.window_size:
             self.regression_points.append((elapsed_ros, stable_offset))
             
-            # Re-estimate drift every 50 points in the regression buffer
-            if len(self.regression_points) >= 50 and len(self.regression_points) % 10 == 0:
+            # Re-estimate drift every 50 points
+            if len(self.regression_points) >= 50:
                 self._estimate_drift()
         
         # 5. Final Corrected T1
@@ -103,10 +103,14 @@ class ClockCalibrator:
         # Update the total drift rate (accumulation)
         self.drift_rate += residual_drift
         
-        # Adjust base_offset to prevent jumps when drift_rate changes
-        # We want (elapsed * old_drift) + old_stable = (elapsed * new_drift) + new_stable
-        # This implementation simply adds to rate; the next 'stable_offset' 
-        # calculation in calibrate() will naturally adjust.
+        # 🛡️ Anti-Overflow: Clamp drift rate to realistic local clock drift limits (±5ms/sec)
+        # Also clean NaNs if polyfit failed
+        if np.isnan(self.drift_rate):
+            self.drift_rate = 0.0
+        self.drift_rate = np.clip(self.drift_rate, -0.005, 0.005)
+        
+        # Clear regression points so we don't mix old data (before drift change) with new data
+        self.regression_points.clear()
 
     def get_current_offset(self):
         """Returns the total current offset including drift"""

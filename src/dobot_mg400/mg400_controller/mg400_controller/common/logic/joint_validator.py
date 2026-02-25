@@ -92,14 +92,12 @@ class JointValidator:
             clamp_reasons.append(f"Elbow({elbow_angle:.2f}°->{elbow_clamped:.2f}°)")
             was_clamped = True
         
-        if was_clamped:
+        if clamp_reasons:
             import time
             now = time.time()
-            # แสดง warning ทุก 2 วินาที
-            if now - self.last_warning_time > 2.0:
-                reasons_str = ", ".join(clamp_reasons)
-                self.logger.warn(f"⚠️ Limit Exceeded [{reasons_str}] - Clamped")
-                self.last_warning_time = now
+            if not hasattr(self, '_last_warn_time') or (now - self._last_warn_time) > 2.0:
+                self.logger.warn(f"⚠️ Limit Exceeded [{', '.join(clamp_reasons)}] - Clamped")
+                self._last_warn_time = now
         
         return q_safe, was_clamped
 
