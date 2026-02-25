@@ -143,6 +143,8 @@ class TeleopNode(Node):
         self.target_recv_time = 0.0  # T2
         self.unity_send_time = 0.0   # T1
         
+        self._tool_query_counter = 0
+
         # File Logger
         self.teleop_logger = TeleopLogger("~/project_teleop_ws/logs")
         self.get_logger().info(f" Logging to: {self.teleop_logger.log_dir}")
