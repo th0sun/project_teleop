@@ -216,7 +216,7 @@ class MonitorGUI:
         self.status_pill_frame = tk.Frame(self.top_bar, bg=BG_MAIN)
         self.status_pill_frame.pack(side=tk.LEFT, padx=16, pady=4)
         
-        self.lbl_mode = tk.Label(self.status_pill_frame, text="INIT", font=FONT_STATUS, fg=FG_MAIN, bg=COLOR_PURPLE, padx=10, pady=2, relief="flat")
+        self.lbl_mode = tk.Label(self.status_pill_frame, text="INIT", font=FONT_STATUS, fg=FG_PRIMARY, bg=COLOR_PURPLE, padx=10, pady=2, relief="flat")
         self.lbl_mode.pack(side=tk.LEFT, padx=4)
         
         self.lbl_err = tk.Label(self.status_pill_frame, text="OK", font=FONT_STATUS, fg=BG_MAIN, bg=COLOR_GREEN, padx=10, pady=2)
