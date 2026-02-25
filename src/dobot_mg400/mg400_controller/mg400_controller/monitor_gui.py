@@ -438,6 +438,10 @@ class MonitorGUI:
         self.var_do_hex = tk.StringVar(value="DO: 0x0000")
         ttk.Label(status_frame, textvariable=self.var_do_hex, font=FONT_LATENCY, foreground="gray").pack(anchor=tk.W)
 
+        self.is_logging = False
+        self.btn_log = tk.Button(status_frame, text="▶ Start Logging", command=self.toggle_logging, bg="#f0f0f0")
+        self.btn_log.pack(side=tk.RIGHT, padx=5)
+
         # ===== RIGHT PANEL: REAL-TIME GRAPHS =====
         self._setup_graphs(right_frame)
 
@@ -596,6 +600,24 @@ class MonitorGUI:
         self.node.request_light(port, status)
         self.lockout[port] = time.time() + 2.0
         self.btns_light[name].config(bg="orange", text=f"{name}...")
+
+    def toggle_logging(self):
+        self.is_logging = not self.is_logging
+        if self.is_logging:
+            self.btn_log.config(text="⏹ Stop Logging", bg="yellow")
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.fn_target = f"teleop_target_{timestamp}.csv"
+            self.fn_actual = f"teleop_actual_{timestamp}.csv"
+            with open(self.fn_target, 'w', newline='') as f:
+                csv.writer(f).writerow(["Time", "X", "Y", "Z", "Reach", "J1", "J2", "J3", "J4", "DiffTotal"])
+            with open(self.fn_actual, 'w', newline='') as f:
+                csv.writer(f).writerow(["Time", "X", "Y", "Z", "Reach", "J1", "J2", "J3", "J4"])
+            self.log_start_time = time.time()
+            self.node.get_logger().info(f"Started manual logging to {self.fn_target}")
+        else:
+            self.btn_log.config(text="▶ Start Logging", bg="#f0f0f0")
+            self.node.get_logger().info("Stopped manual logging.")
+
     def update_gui(self):
         # Get latest data
         tgt = self.node.latest_target_joints
