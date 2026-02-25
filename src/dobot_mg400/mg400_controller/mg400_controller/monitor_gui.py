@@ -519,10 +519,11 @@ class MonitorGUI:
         self.canvas = canvas
         
         # Animation - drives graph redraws
+        # blit=False: more stable, avoids animation stopping when blitting fails
         self.ani = animation.FuncAnimation(
             self.fig, self._update_graphs,
             interval=int(1000 / GRAPH_UPDATE_HZ),
-            blit=True,
+            blit=False,
             cache_frame_data=False
         )
 
@@ -569,19 +570,6 @@ class MonitorGUI:
                 ax.set_ylim(mn - pad, mx + pad)
             
             all_lines.extend([l_unity, l_pred, l_sent, l_actual])
-        
-        # ✅ Log to CSV (every frame = 20Hz)
-        self.session_logger.log_joints(
-            unity=list(self.node.latest_target_joints),
-            predicted=list(self.node.latest_predicted_joints),
-            sent=list(self.last_sent_values),
-            actual=list(self.node.latest_actual_joints),
-        )
-        # Flush every ~5s (100 frames @ 20Hz)
-        self._log_flush_counter += 1
-        if self._log_flush_counter >= 100:
-            self.session_logger.flush()
-            self._log_flush_counter = 0
         
         return all_lines
 
@@ -722,6 +710,25 @@ class MonitorGUI:
             reach_act = math.sqrt(xyz_act[0]**2 + xyz_act[1]**2)
             with open(self.fn_actual, 'a', newline='') as f:
                 csv.writer(f).writerow([f"{t:.3f}", f"{xyz_act[0]:.3f}", f"{xyz_act[1]:.3f}", f"{xyz_act[2]:.3f}", f"{reach_act:.3f}", f"{act[0]:.3f}", f"{act[1]:.3f}", f"{act[2]:.3f}", f"{act[3]:.3f}"])
+
+        # ✅ Session Logger: runs from Tkinter loop - never stops even if graph freezes
+        try:
+            self.session_logger.log_joints(
+                unity=list(self.node.latest_target_joints),
+                predicted=list(self.node.latest_predicted_joints),
+                sent=list(self.last_sent_values),
+                actual=list(self.node.latest_actual_joints),
+            )
+            self.session_logger.log_xyz(
+                target=list(xyz_tgt),
+                actual=list(xyz_act),
+            )
+            self._log_flush_counter += 1
+            if self._log_flush_counter >= 100:
+                self.session_logger.flush()
+                self._log_flush_counter = 0
+        except Exception:
+            pass
 
         # Schedule next update at 20Hz
         self.root.after(50, self.update_gui)
