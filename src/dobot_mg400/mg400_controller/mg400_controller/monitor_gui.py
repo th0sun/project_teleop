@@ -4,6 +4,8 @@
 """
 🍎 MG400 Monitor GUI - Apple UI Style 
 Clean, Dark-Mode, Minimalist Robot Teleop Monitor.
+All features restored: SessionLogger, Tool Index, Flange/ToolΔ/Diff,
+Execution Stats, DO Hex, Manual Logging.
 """
 
 import rclpy
@@ -14,6 +16,7 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 import numpy as np
+import sys
 import time
 import math
 import csv
@@ -57,6 +60,7 @@ COLOR_ORANGE  = "#FF9F0A"
 COLOR_RED     = "#FF453A"
 COLOR_PURPLE  = "#BF5AF2"
 COLOR_TEAL    = "#64D2FF"
+COLOR_ROYAL   = "#5E5CE6"  # Indigo for Flange
 
 # Fonts (Graceful fallback to Helvetica/Arial)
 FONT_H1       = ("Helvetica Neue", 20, "bold")
@@ -65,11 +69,89 @@ FONT_LABEL    = ("Helvetica Neue", 11)
 FONT_VALUE    = ("Menlo", 13)
 FONT_BIG      = ("Menlo", 18, "bold")
 FONT_STATUS   = ("Helvetica Neue", 10)
+FONT_SMALL    = ("Menlo", 10)
 
 GRAPH_WINDOW_SEC = 10.0
 GRAPH_UPDATE_HZ  = 20
 START_THRESHOLD = 2.0
 STOP_THRESHOLD  = 0.5
+
+
+# =========================================================
+# SESSION LOGGER (Auto CSV Logging)
+# =========================================================
+class SessionLogger:
+    """
+    Auto-starts on GUI launch.
+    Creates ~/project_teleop_ws/session_logs/YYYYMMDD_HHMMSS/ per session.
+    Logs all 4 joint streams (Unity, Predicted, Sent, Actual) + XYZ to CSV.
+    Timestamp = real wall-clock time (local time), accurate.
+    """
+    BASE_DIR = os.path.expanduser("~/project_teleop_ws/session_logs")
+
+    def __init__(self):
+        # Create session folder e.g. session_logs/20260225_032100/
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_dir = os.path.join(self.BASE_DIR, ts)
+        os.makedirs(self.session_dir, exist_ok=True)
+
+        # --- joints_tracking.csv ---
+        jt_path = os.path.join(self.session_dir, "joints_tracking.csv")
+        self._jt_file = open(jt_path, 'w', newline='')
+        self._jt_writer = csv.writer(self._jt_file)
+        self._jt_writer.writerow([
+            "timestamp", "elapsed_s",
+            "unity_j1", "unity_j2", "unity_j3", "unity_j4",
+            "predicted_j1", "predicted_j2", "predicted_j3", "predicted_j4",
+            "sent_j1", "sent_j2", "sent_j3", "sent_j4",
+            "actual_j1", "actual_j2", "actual_j3", "actual_j4",
+        ])
+
+        # --- xyz_tracking.csv ---
+        xyz_path = os.path.join(self.session_dir, "xyz_tracking.csv")
+        self._xyz_file = open(xyz_path, 'w', newline='')
+        self._xyz_writer = csv.writer(self._xyz_file)
+        self._xyz_writer.writerow([
+            "timestamp", "elapsed_s",
+            "target_x", "target_y", "target_z",
+            "actual_x", "actual_y", "actual_z",
+            "diff_x", "diff_y", "diff_z",
+        ])
+
+        self._start_time = time.time()
+        self._lock = threading.Lock()
+        print(f"[SessionLogger] Logging to: {self.session_dir}")
+
+    def log_joints(self, unity, predicted, sent, actual):
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        elapsed = round(time.time() - self._start_time, 3)
+        row = [ts, elapsed] + \
+              [round(v, 4) for v in unity] + \
+              [round(v, 4) for v in predicted] + \
+              [round(v, 4) for v in sent] + \
+              [round(v, 4) for v in actual]
+        with self._lock:
+            self._jt_writer.writerow(row)
+
+    def log_xyz(self, target, actual):
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        elapsed = round(time.time() - self._start_time, 3)
+        diff = [round(actual[i] - target[i], 3) for i in range(3)]
+        row = [ts, elapsed] + \
+              [round(v, 3) for v in target] + \
+              [round(v, 3) for v in actual] + diff
+        with self._lock:
+            self._xyz_writer.writerow(row)
+
+    def flush(self):
+        with self._lock:
+            self._jt_file.flush()
+            self._xyz_file.flush()
+
+    def close(self):
+        with self._lock:
+            self._jt_file.close()
+            self._xyz_file.close()
 
 
 # =========================================================
@@ -94,7 +176,7 @@ def create_card(parent, title, bg_color=BG_CARD):
     return inner
 
 # =========================================================
-# CORE LOGIC CLASSES (Simplified for clarity)
+# CORE LOGIC CLASSES
 # =========================================================
 class ExecutionMonitor:
     def __init__(self):
@@ -136,6 +218,7 @@ class JointMonitorNode(Node):
         self.latest_predicted_joints = [0.0]*4
         self.latest_sent_joints = [0.0]*4
         self.latest_tool_actual = [0.0]*6
+        self.latest_tool_target = [0.0]*6
         self.latest_unity_xyz   = [0.0]*6
         self.latest_flange_actual = [0.0]*6
         self.latest_tool_index = -1
@@ -151,6 +234,7 @@ class JointMonitorNode(Node):
         self.create_subscription(JointState, PREDICTED_TOPIC, self.cb_pred, 10)
         self.create_subscription(JointState, SENT_CMD_TOPIC, self.cb_sent, 10)
         self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.cb_tool, 10)
+        self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.cb_tool_tgt, 10)
         self.create_subscription(Float64MultiArray, "/teleop/unity_xyz", self.cb_uxyz, 10)
         self.create_subscription(Float64MultiArray, "/robot/flange_actual", self.cb_flange, 10)
         self.create_subscription(Int32, "/robot/tool_index", self.cb_tidx, 10)
@@ -182,6 +266,8 @@ class JointMonitorNode(Node):
         if len(msg.position) >= 4: self.latest_sent_joints = list(np.degrees(msg.position[:4]))
     def cb_tool(self, msg):
         if len(msg.data) >= 6: self.latest_tool_actual = list(msg.data)
+    def cb_tool_tgt(self, msg):
+        if len(msg.data) >= 6: self.latest_tool_target = list(msg.data)
     def cb_uxyz(self, msg):
         if len(msg.data) >= 6: self.latest_unity_xyz = list(msg.data)
     def cb_flange(self, msg):
@@ -204,7 +290,7 @@ class MonitorGUI:
         
         self.root.title("MG400 Monitor")
         self.root.configure(bg=BG_MAIN)
-        self.root.geometry("1100x850")
+        self.root.geometry("1100x900")
 
         # Layout
         self.top_bar = tk.Frame(root, bg=BG_MAIN)
@@ -222,6 +308,15 @@ class MonitorGUI:
         self.lbl_err = tk.Label(self.status_pill_frame, text="OK", font=FONT_STATUS, fg=BG_MAIN, bg=COLOR_GREEN, padx=10, pady=2)
         self.lbl_err.pack(side=tk.LEFT, padx=4)
 
+        # Manual Log Button (top right)
+        self.is_logging = False
+        self.log_start_time = 0.0
+        self.btn_log = tk.Button(self.top_bar, text="▶ Log", font=FONT_STATUS, 
+                                 bg=BG_CARD_ALT, fg=FG_PRIMARY, relief="flat",
+                                 command=self.toggle_logging, padx=10, pady=2,
+                                 highlightbackground=BG_MAIN)
+        self.btn_log.pack(side=tk.RIGHT, padx=4)
+
         # Connection Latency
         self.var_latency = tk.StringVar(value="Data latency: ...")
         tk.Label(self.top_bar, textvariable=self.var_latency, font=FONT_STATUS, fg=FG_SECONDARY, bg=BG_MAIN).pack(side=tk.RIGHT)
@@ -231,7 +326,7 @@ class MonitorGUI:
         self.content.pack(fill=tk.BOTH, expand=True)
         
         # Left Panel (Data & Controls)
-        self.left_panel = tk.Frame(self.content, bg=BG_MAIN, width=400)
+        self.left_panel = tk.Frame(self.content, bg=BG_MAIN, width=460)
         self.left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=4)
         self.left_panel.pack_propagate(False)
 
@@ -244,6 +339,7 @@ class MonitorGUI:
         self._build_joints_card()
         self._build_controls_card()
         self._build_metrics_card()
+        self._build_status_card()
         
         # Graphs
         self._setup_graphs(self.right_panel)
@@ -255,23 +351,51 @@ class MonitorGUI:
         
         # Grid layout for items
         self.vars_xyz_tgt = []
+        self.vars_xyz_flange = []
         self.vars_xyz_act = []
+        self.vars_xyz_tool = []
         
-        # Header row
-        for j, txt in enumerate(["Axis", "Unity", "Actual"]):
-            col = FG_PRIMARY if j==0 else (COLOR_ORANGE if j==1 else COLOR_GREEN)
-            tk.Label(card, text=txt, font=FONT_LABEL, fg=col, bg=BG_CARD).grid(row=0, column=j, sticky="w", pady=(0,8), padx=(0, 20))
+        # Header row: Axis | Unity | Flange | TCP | ToolΔ
+        headers = [("Axis", FG_PRIMARY), ("Unity", COLOR_ORANGE), ("Flange", COLOR_ROYAL), 
+                    ("TCP", COLOR_GREEN), ("ToolΔ", FG_SECONDARY)]
+        for j, (txt, col) in enumerate(headers):
+            tk.Label(card, text=txt, font=FONT_LABEL, fg=col, bg=BG_CARD).grid(
+                row=0, column=j, sticky="w", pady=(0,8), padx=(0, 10))
             
         for i, axes in enumerate(["X", "Y", "Z"]):
-            tk.Label(card, text=axes, font=FONT_VALUE, fg=FG_SECONDARY, bg=BG_CARD).grid(row=i+1, column=0, sticky="w", pady=4)
+            tk.Label(card, text=axes, font=FONT_VALUE, fg=FG_SECONDARY, bg=BG_CARD).grid(
+                row=i+1, column=0, sticky="w", pady=4)
             
+            # Unity FK (target)
             vt = tk.StringVar(value="0.0")
-            tk.Label(card, textvariable=vt, font=FONT_VALUE, fg=FG_PRIMARY, bg=BG_CARD).grid(row=i+1, column=1, sticky="w", pady=4, padx=(0, 20))
+            tk.Label(card, textvariable=vt, font=FONT_VALUE, fg=FG_PRIMARY, bg=BG_CARD).grid(
+                row=i+1, column=1, sticky="w", pady=4, padx=(0, 10))
             self.vars_xyz_tgt.append(vt)
+
+            # Flange
+            vf = tk.StringVar(value="0.0")
+            tk.Label(card, textvariable=vf, font=FONT_VALUE, fg=COLOR_ROYAL, bg=BG_CARD).grid(
+                row=i+1, column=2, sticky="w", pady=4, padx=(0, 10))
+            self.vars_xyz_flange.append(vf)
             
+            # TCP (Actual)
             va = tk.StringVar(value="0.0")
-            tk.Label(card, textvariable=va, font=FONT_VALUE, fg=FG_PRIMARY, bg=BG_CARD).grid(row=i+1, column=2, sticky="w", pady=4)
+            tk.Label(card, textvariable=va, font=FONT_VALUE, fg=FG_PRIMARY, bg=BG_CARD).grid(
+                row=i+1, column=3, sticky="w", pady=4, padx=(0, 10))
             self.vars_xyz_act.append(va)
+
+            # ToolΔ (TCP - Flange)
+            vd = tk.StringVar(value="0.0")
+            tk.Label(card, textvariable=vd, font=FONT_VALUE, fg=FG_SECONDARY, bg=BG_CARD).grid(
+                row=i+1, column=4, sticky="w", pady=4)
+            self.vars_xyz_tool.append(vd)
+
+        # Tool Index label
+        tk.Label(card, text="Active Tool:", font=FONT_LABEL, fg=FG_SECONDARY, bg=BG_CARD).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(8,0))
+        self.var_tool_index = tk.StringVar(value="— (querying...)")
+        tk.Label(card, textvariable=self.var_tool_index, font=FONT_VALUE, fg=FG_SECONDARY, bg=BG_CARD).grid(
+            row=4, column=2, columnspan=3, sticky="w", pady=(8,0))
 
     def _build_joints_card(self):
         card = create_card(self.left_panel, "Joint Angles")
@@ -327,12 +451,27 @@ class MonitorGUI:
     def _build_metrics_card(self):
         card = create_card(self.left_panel, "Execution")
         
+        # Row 1: Status + Timer
+        row1 = tk.Frame(card, bg=BG_CARD)
+        row1.pack(fill=tk.X)
+        
         self.var_mov_stat = tk.StringVar(value="IDLE")
-        self.lbl_mov_stat = tk.Label(card, textvariable=self.var_mov_stat, font=FONT_H2, fg=FG_SECONDARY, bg=BG_CARD)
+        self.lbl_mov_stat = tk.Label(row1, textvariable=self.var_mov_stat, font=FONT_H2, fg=FG_SECONDARY, bg=BG_CARD)
         self.lbl_mov_stat.pack(side=tk.LEFT)
         
         self.var_timer = tk.StringVar(value="0.00s")
-        tk.Label(card, textvariable=self.var_timer, font=FONT_BIG, fg=FG_PRIMARY, bg=BG_CARD).pack(side=tk.RIGHT)
+        tk.Label(row1, textvariable=self.var_timer, font=FONT_BIG, fg=FG_PRIMARY, bg=BG_CARD).pack(side=tk.RIGHT)
+
+        # Row 2: Execution Stats (Avg/Min/Max/Count)
+        self.var_stats = tk.StringVar(value="Avg: 0.00s | Min: 0.00s | Max: 0.00s | Count: 0")
+        tk.Label(card, textvariable=self.var_stats, font=FONT_SMALL, fg=FG_TERTIARY, bg=BG_CARD).pack(anchor=tk.E, pady=(4,0))
+
+    def _build_status_card(self):
+        """DO Hex status bar at the bottom of left panel"""
+        card = create_card(self.left_panel, "Digital Output")
+        
+        self.var_do_hex = tk.StringVar(value="DO: 0x0000 | Bits: 0b0")
+        tk.Label(card, textvariable=self.var_do_hex, font=FONT_SMALL, fg=FG_TERTIARY, bg=BG_CARD).pack(anchor=tk.W)
 
     def toggle_suction(self):
         self.suction_state = not self.suction_state
@@ -348,9 +487,27 @@ class MonitorGUI:
     def _update_light_btns(self):
         for name, data in self.btns_light.items():
             st = self.light_states[name]
-            # using foreground mapping since bg styling on Mac tk buttons is slightly weird 
-            # without ttk, but we fake it
             pass
+
+    def toggle_logging(self):
+        """Manual CSV logging toggle (separate from auto SessionLogger)"""
+        self.is_logging = not self.is_logging
+        if self.is_logging:
+            self.btn_log.config(text="⏹ Stop", bg=COLOR_RED, fg=FG_PRIMARY)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_dir = os.path.expanduser("~/project_teleop_ws/session_logs")
+            os.makedirs(log_dir, exist_ok=True)
+            self.fn_target = os.path.join(log_dir, f"manual_target_{timestamp}.csv")
+            self.fn_actual = os.path.join(log_dir, f"manual_actual_{timestamp}.csv")
+            with open(self.fn_target, 'w', newline='') as f:
+                csv.writer(f).writerow(["Time", "X", "Y", "Z", "Reach", "J1", "J2", "J3", "J4", "DiffTotal"])
+            with open(self.fn_actual, 'w', newline='') as f:
+                csv.writer(f).writerow(["Time", "X", "Y", "Z", "Reach", "J1", "J2", "J3", "J4"])
+            self.log_start_time = time.time()
+            self.node.get_logger().info(f"Started manual logging to {self.fn_target}")
+        else:
+            self.btn_log.config(text="▶ Log", bg=BG_CARD_ALT, fg=FG_PRIMARY)
+            self.node.get_logger().info("Stopped manual logging.")
 
     def _setup_graphs(self, parent):
         # Frame wrapper for styling padding
@@ -380,6 +537,10 @@ class MonitorGUI:
         self.a_buff = [deque(maxlen=max_pts) for _ in range(4)]
         self.lsv = [0.0]*4
         self.t0 = time.time()
+        
+        # ✅ Auto-start session logger
+        self.session_logger = SessionLogger()
+        self._log_flush_counter = 0
         
         for i in range(4):
             ax = self.fig.add_subplot(4,1,i+1)
@@ -436,6 +597,20 @@ class MonitorGUI:
                 ax.set_ylim(mn - pad, mx + pad)
             
             all_l.extend([u,p,s,a])
+
+        # ✅ Log joints to CSV (every frame = 20Hz)
+        self.session_logger.log_joints(
+            unity=list(self.node.latest_target_joints),
+            predicted=list(self.node.latest_predicted_joints),
+            sent=list(self.lsv),
+            actual=list(self.node.latest_actual_joints),
+        )
+        # Flush every ~5s (100 frames @ 20Hz)
+        self._log_flush_counter += 1
+        if self._log_flush_counter >= 100:
+            self.session_logger.flush()
+            self._log_flush_counter = 0
+
         return all_l
 
     def update_gui(self):
@@ -453,11 +628,30 @@ class MonitorGUI:
             elif abs(d) > 0.5: self.lbls_jdiff[i].config(fg=COLOR_ORANGE)
             else: self.lbls_jdiff[i].config(fg=FG_SECONDARY)
 
-        ux = self.node.latest_unity_xyz
-        tx = self.node.latest_tool_actual
+        # --- Update Cartesian Data ---
+        xyz_unity  = self.node.latest_unity_xyz[:3]
+        xyz_flange = self.node.latest_flange_actual[:3]
+        xyz_tcp    = self.node.latest_tool_actual[:3]
         for i in range(3):
-            self.vars_xyz_tgt[i].set(f"{ux[i]:.1f}")
-            self.vars_xyz_act[i].set(f"{tx[i]:.1f}")
+            self.vars_xyz_tgt[i].set(f"{xyz_unity[i]:.1f}")
+            self.vars_xyz_flange[i].set(f"{xyz_flange[i]:.1f}")
+            self.vars_xyz_act[i].set(f"{xyz_tcp[i]:.1f}")
+            # Tool offset = TCP - Flange
+            tool_delta = xyz_tcp[i] - xyz_flange[i]
+            self.vars_xyz_tool[i].set(f"{tool_delta:+.1f}")
+
+        # Tool index label
+        tidx = self.node.latest_tool_index
+        if tidx >= 0:
+            self.var_tool_index.set(f"Tool {tidx}")
+        else:
+            self.var_tool_index.set("— (querying...)")
+
+        # --- Log XYZ to session logger ---
+        self.session_logger.log_xyz(
+            target=xyz_unity[:3],
+            actual=xyz_tcp[:3],
+        )
 
         # Metrics
         st = self.monitor.update(tot_d)
@@ -473,6 +667,10 @@ class MonitorGUI:
             self.var_mov_stat.set("IDLE")
             self.lbl_mov_stat.config(fg=FG_SECONDARY)
             self.var_timer.set("0.00s")
+
+        # Execution Stats
+        avg_t, min_t, max_t = self.monitor.get_stats()
+        self.var_stats.set(f"Avg: {avg_t:.2f}s | Min: {min_t:.2f}s | Max: {max_t:.2f}s | Count: {len(self.monitor.durations)}")
 
         # Status
         mode = self.node.latest_robot_mode
@@ -490,6 +688,10 @@ class MonitorGUI:
         # DO Sync
         now = time.time()
         do_s = self.node.latest_do_status
+        
+        # DO Hex display
+        self.var_do_hex.set(f"DO: 0x{do_s:04X} | Bits: {bin(do_s)}")
+        
         if now > self.lockout.get(VACUUM_DO_PORT, 0):
             act_suc = bool((do_s >> (VACUUM_DO_PORT-1)) & 1)
             self.suction_state = act_suc
@@ -505,6 +707,16 @@ class MonitorGUI:
                 self.light_states[name] = act_l
                 self.btns_light[name]["btn"].config(bg=col_on if act_l else BG_CARD_ALT, fg=BG_MAIN if act_l else FG_PRIMARY)
 
+        # --- Manual CSV Logging ---
+        if self.is_logging:
+            t = time.time() - self.log_start_time
+            reach_tgt = math.sqrt(xyz_unity[0]**2 + xyz_unity[1]**2)
+            with open(self.fn_target, 'a', newline='') as f:
+                csv.writer(f).writerow([f"{t:.3f}", f"{xyz_unity[0]:.3f}", f"{xyz_unity[1]:.3f}", f"{xyz_unity[2]:.3f}", f"{reach_tgt:.3f}", f"{tgt[0]:.3f}", f"{tgt[1]:.3f}", f"{tgt[2]:.3f}", f"{tgt[3]:.3f}", f"{tot_d:.3f}"])
+            reach_act = math.sqrt(xyz_tcp[0]**2 + xyz_tcp[1]**2)
+            with open(self.fn_actual, 'a', newline='') as f:
+                csv.writer(f).writerow([f"{t:.3f}", f"{xyz_tcp[0]:.3f}", f"{xyz_tcp[1]:.3f}", f"{xyz_tcp[2]:.3f}", f"{reach_act:.3f}", f"{act[0]:.3f}", f"{act[1]:.3f}", f"{act[2]:.3f}", f"{act[3]:.3f}"])
+
         self.root.after(50, self.update_gui)
 
 def main(args=None):
@@ -516,9 +728,25 @@ def main(args=None):
     thread.start()
     
     root = tk.Tk()
-    app = MonitorGUI(root, node)
-    root.protocol("WM_DELETE_WINDOW", lambda: (node.destroy_node(), rclpy.shutdown(), root.destroy()))
-    root.mainloop()
+    gui = MonitorGUI(root, node)
+    
+    def on_close():
+        try:
+            gui.session_logger.close()
+            print("[SessionLogger] Log closed.")
+        except Exception:
+            pass
+        node.destroy_node()
+        rclpy.shutdown()
+        root.destroy()
+    
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        on_close()
+        sys.exit(0)
 
 if __name__ == '__main__':
     main()
