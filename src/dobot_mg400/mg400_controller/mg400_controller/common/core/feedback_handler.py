@@ -100,8 +100,14 @@ class FeedbackHandler:
             # Expecting 0x0123456789ABCDEF (Little Endian constant from Dobot)
             TEST_VALUE_OFFSET = 48
             test_val = struct.unpack_from('<Q', data, TEST_VALUE_OFFSET)[0]
-            # Accept real robot constant OR 0 (Mock/Docker default)
-            VALID_TEST_VALUES = (0x0123456789ABCDEF, 0)
+            
+            # 🛑 ZERO-LOCK FIX:
+            # Real robots send 0x0123456789ABCDEF. Mocks might send 0.
+            # If the robot is in a reconnect phase, it might send a buffer of Zeros.
+            # We strictly reject 0 if we are on Real Hardware (ENABLE_GET_ERROR=True).
+            from mg400_controller.common.config.robot_config import ENABLE_GET_ERROR
+            VALID_TEST_VALUES = (0x0123456789ABCDEF, ) if ENABLE_GET_ERROR else (0x0123456789ABCDEF, 0)
+            
             if test_val not in VALID_TEST_VALUES:
                 self.logger.warn(f"Packet Rejected: TestValue mismatch. Got: {hex(test_val)}", throttle_duration_sec=1.0)
                 return

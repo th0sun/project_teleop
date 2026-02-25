@@ -258,7 +258,7 @@ class TeleopNode(Node):
         
         self.get_logger().info(f"✅ Teleop Node Ready")
         self.get_logger().info(f"📊 Control Strategy: Proximity + Velocity-Based Stuck Detection")
-        self.get_logger().info(f"📏 Proximity Threshold: {motion_config.PROXIMITY_THRESHOLD:.3f} rad ({np.degrees(motion_config.PROXIMITY_THRESHOLD):.1f} deg)")
+        self.get_logger().info(f"📏 Dyn Proximity Base: {motion_config.DYNAMIC_PROXIMITY_BASE_RAD:.3f} rad ({np.degrees(motion_config.DYNAMIC_PROXIMITY_BASE_RAD):.1f} deg)")
         self.get_logger().info(f"🎯 Target Change Threshold: {motion_config.TARGET_CHANGE_THRESHOLD:.3f} rad ({np.degrees(motion_config.TARGET_CHANGE_THRESHOLD):.1f} deg)")
         self.get_logger().info(f"⏱️  Stuck Time Threshold: {motion_config.STUCK_TIME_THRESHOLD:.1f} s")
         self.get_logger().info(f"🚫 No Timeout - Pure Real-Time Control")
@@ -614,11 +614,15 @@ class TeleopNode(Node):
                     time_since_last = t3_cmd_send - self.controller.last_sent_time
                     velocity_mag = np.max(self.controller.robot_velocity)
                     
+                    robot_status = self.hnd_feedback.get_error_status()
+                    
                     # CLI Report
                     msg = self.latency_analyzer.format_sent_report(
                         should_send, send_reason, q_current, self.latest_target, 
                         self.controller.last_sent_target, self.controller.last_sent_time,
-                        self.controller.robot_velocity
+                        self.controller.robot_velocity,
+                        robot_mode=robot_status['robot_mode'],
+                        error_status=robot_status['error_status']
                     )
                     self.get_logger().info(msg)
                     

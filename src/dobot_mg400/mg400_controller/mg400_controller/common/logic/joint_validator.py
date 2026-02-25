@@ -40,6 +40,7 @@ class JointValidator:
         """
         q_safe = q_target.copy()
         was_clamped = False
+        clamp_reasons = []
         
         # 0. Check Input Length (Must have 4 joints for MG400)
         if len(q_safe) < 4:
@@ -59,7 +60,10 @@ class JointValidator:
             max_rad = np.radians(max_safe_deg)
             
             if q_safe[joint_id] <= min_rad or q_safe[joint_id] >= max_rad:
+                orig_deg = np.degrees(q_safe[joint_id])
                 q_safe[joint_id] = np.clip(q_safe[joint_id], min_rad, max_rad)
+                new_deg = np.degrees(q_safe[joint_id])
+                clamp_reasons.append(f"J{joint_id+1}({orig_deg:.2f}°->{new_deg:.2f}°)")
                 was_clamped = True
         
         # 2. Validate Elbow Angle Constraint (J3 - J2)
@@ -77,6 +81,7 @@ class JointValidator:
             elbow_clamped = np.clip(elbow_angle, safe_elbow_min, safe_elbow_max)
             j3_new_deg = j2_deg + elbow_clamped
             q_safe[2] = np.radians(j3_new_deg)
+            clamp_reasons.append(f"Elbow({elbow_angle:.2f}°->{elbow_clamped:.2f}°)")
             was_clamped = True
         
         if was_clamped:
@@ -84,7 +89,8 @@ class JointValidator:
             now = time.time()
             # แสดง warning ทุก 2 วินาที
             if now - self.last_warning_time > 2.0:
-                self.logger.warn("⚠️ Joint command exceeded limits - clamped to safe range")
+                reasons_str = ", ".join(clamp_reasons)
+                self.logger.warn(f"⚠️ Limit Exceeded [{reasons_str}] - Clamped")
                 self.last_warning_time = now
         
         return q_safe, was_clamped

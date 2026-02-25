@@ -20,7 +20,7 @@ import numpy as np
 import math
 from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import (
-    PROXIMITY_THRESHOLD, STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
+    STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
     TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC
 )
 
@@ -79,7 +79,7 @@ class TeleopController:
         Internal method to check if robot is stuck
         """
         # If moving slow AND far from target -> Potential Stuck
-        if velocity_mag < STUCK_VELOCITY_THRESHOLD and dist_to_target > PROXIMITY_THRESHOLD:
+        if velocity_mag < STUCK_VELOCITY_THRESHOLD and dist_to_target > DYNAMIC_PROXIMITY_BASE_RAD:
             if self.stuck_start_time == 0:
                 self.stuck_start_time = now
             elif (now - self.stuck_start_time) > STUCK_TIME_THRESHOLD:
@@ -138,7 +138,7 @@ class TeleopController:
             
             if self.check_stuck_condition(velocity_mag, error_to_last_target, now):
                 # Only trigger if user REALLY moved their hand OR if the robot is far from the current target
-                if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > PROXIMITY_THRESHOLD:
+                if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > DYNAMIC_PROXIMITY_BASE_RAD:
                     # 🛡️ Cooldown: prevent stuck from firing more than once per 2s
                     if (now - self.last_stuck_trigger_time) < 2.0:
                         return False, "StuckCooldown"

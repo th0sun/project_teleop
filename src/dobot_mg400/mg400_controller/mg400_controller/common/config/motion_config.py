@@ -26,9 +26,8 @@ SPEED_FAR = 100      # %
 SPEED_MEDIUM = 100   # %
 SPEED_NEAR = 100     # %
 
-#  Real-Time Control Parameters (Proximity + Velocity-Based Stuck Detection)
+#  Real-Time Control Parameters (Velocity-Based Stuck Detection)
 # ปรับค่านี้เพื่อควบคุมความไวและความเร็วในการตอบสนอง
-PROXIMITY_THRESHOLD = 0.08       # rad (~4.5°) - Increased to allow coarser updates (drain queue)
 STUCK_VELOCITY_THRESHOLD = 0.005 # rad/s - ความเร็วต่ำกว่านี้ถือว่า "นิ่ง"
 STUCK_TIME_THRESHOLD = 0.3       # seconds - ต้องนิ่งนานเท่านี้ถึงจะ trigger stuck recovery
 TARGET_CHANGE_THRESHOLD = 0.005  # rad (~0.3°) - Target ต้องเปลี่ยนอย่างน้อยเท่านี้

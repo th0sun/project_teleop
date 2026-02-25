@@ -172,7 +172,7 @@ class LatencyAnalyzer:
         
         return metrics, report
 
-    def format_sent_report(self, should_send, reason, q_current, target, prev_target, prev_time, velocity):
+    def format_sent_report(self, should_send, reason, q_current, target, prev_target, prev_time, velocity, robot_mode=None, error_status=None):
         """Generate CLI report for SEND event"""
         if not should_send: return ""
         
@@ -188,8 +188,11 @@ class LatencyAnalyzer:
         velocity_mag = np.linalg.norm(velocity)
         velocity_deg = np.degrees(velocity)
         
+        mode_str = f" | Robot Mode: {robot_mode}" if robot_mode is not None else ""
+        error_str = f" | Error Status: {error_status}" if error_status is not None else ""
+        
         log_msg = (
-            f"\n🚀 SENT [{reason}]"
+            f"\n🚀 SENT [{reason}]{mode_str}{error_str}"
             f"\n   Network Delay: {network_delay_ms:.1f} ms (Unity→ROS)"
             f"\n   Decision Delay: {decision_delay_ms:.1f} ms (ROS processing)"
             f"\n   Time Since Last Cmd: {time_since_last*1000:.1f} ms"
