@@ -51,6 +51,7 @@ class TeleopController:
         self.stuck_start_time = 0.0
         self.is_stuck = False
         self.last_stuck_check_time = 0.0
+        self.last_stuck_trigger_time = 0.0  # Cooldown: prevent firing more than once per 2s
         
     def update_robot_state(self, q_current, now):
         """
@@ -138,19 +139,24 @@ class TeleopController:
             if self.check_stuck_condition(velocity_mag, error_to_last_target, now):
                 # Only trigger if user REALLY moved their hand OR if the robot is far from the current target
                 if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > PROXIMITY_THRESHOLD:
+                    # 🛡️ Cooldown: prevent stuck from firing more than once per 2s
+                    if (now - self.last_stuck_trigger_time) < 2.0:
+                        return False, "StuckCooldown"
                     self.logger.warn(f"⚠️ Stuck Detected (Vel: {velocity_mag:.4f}) - Retriggering")
                     self.last_sent_target = latest_target
                     self.last_sent_time = now
                     self.stuck_start_time = 0
+                    self.last_stuck_trigger_time = now  # Start cooldown
                     return True, f"Stuck_Vel{velocity_mag:.4f}_Delta{change_in_target:.3f}"
 
         return False, "Wait"
 
-    def format_command_string(self, q_target, q_current=None):
+    def format_command_string(self, q_target, q_current=None, force_send=False):
         """
         Validate, Clamp, and Format Command String
         
         If moving slowly, use Batch Interpolation for higher stability.
+        force_send=True bypasses skip logic (used for Stuck recovery).
         """
         # Validate & Clamp
         q_safe, is_clamped = self.validator.validate_and_clamp(q_target)
@@ -158,13 +164,19 @@ class TeleopController:
             self.logger.warn("⚠️ Joint command exceeded limits - clamped to safe range")
             
         # Calculate speed
-        speed_percent = 100 
+        speed_percent = 100
         
         # Determine if we should use BATCH mode (Precision Mode)
         # Use batching if velocity is low < 0.1 rad/s
         velocity_mag = np.max(self.robot_velocity)
         
-        if q_current is not None and velocity_mag < 0.1:
+        if force_send:
+            # 🛡️ Force single-point command (bypasses should_skip_motion in batch planner)
+            # Always update last_command so next batch won't skip
+            self.planner.last_command = q_safe.copy()
+            cmd_str = self.planner.format_command(q_safe, speed_percent)
+            return cmd_str, q_safe
+        elif q_current is not None and velocity_mag < 0.1:
             # ใช้ 3 จุดย่อยสำหรับจังหวะเล็งละเอียด
             cmd_str, _, _ = self.planner.plan_batch_motion(q_safe, q_current, num_steps=3)
             return cmd_str, q_safe

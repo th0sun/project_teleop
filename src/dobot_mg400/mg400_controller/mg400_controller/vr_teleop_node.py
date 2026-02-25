@@ -586,7 +586,10 @@ class TeleopNode(Node):
             
             if should_send:
                 # 1. Format Command
-                cmd_str, q_safe = self.controller.format_command_string(self.latest_target, q_current=q_current)
+                # force_send=True when stuck: bypass should_skip_motion which silently drops commands
+                is_stuck_recovery = send_reason.startswith("Stuck")
+                cmd_str, q_safe = self.controller.format_command_string(
+                    self.latest_target, q_current=q_current, force_send=is_stuck_recovery)
                 
                 if not cmd_str:
                     return
