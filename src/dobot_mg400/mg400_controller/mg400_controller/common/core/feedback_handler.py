@@ -93,6 +93,7 @@ class FeedbackHandler:
             # Accept real robot constant OR 0 (Mock/Docker default)
             VALID_TEST_VALUES = (0x0123456789ABCDEF, 0)
             if test_val not in VALID_TEST_VALUES:
+                self.logger.warn(f"Packet Rejected: TestValue mismatch. Got: {hex(test_val)}", throttle_duration_sec=1.0)
                 return
 
             # 1. Parse Joint Angles (Offset 432)
@@ -103,6 +104,7 @@ class FeedbackHandler:
             
             # --- Sanity Check ---
             if not self.kinematics.validate_sanity(self.last_valid_joints, q_rad):
+                self.logger.warn(f"Packet Rejected: Sanity check failed. Jump from {np.degrees(self.last_valid_joints)} to {np.degrees(q_rad)}", throttle_duration_sec=1.0)
                 return
             
             self.last_valid_joints = q_rad
