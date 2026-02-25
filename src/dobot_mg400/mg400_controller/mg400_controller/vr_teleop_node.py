@@ -614,7 +614,7 @@ class TeleopNode(Node):
                     time_since_last = t3_cmd_send - self.controller.last_sent_time
                     velocity_mag = np.max(self.controller.robot_velocity)
                     
-                    robot_status = self.hnd_feedback.get_error_status()
+                    robot_status = self.feedback.get_error_status()
                     
                     # CLI Report
                     msg = self.latency_analyzer.format_sent_report(
