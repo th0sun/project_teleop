@@ -113,19 +113,27 @@ class TeleopController:
         change_in_target = np.max(np.abs(latest_target - self.last_sent_target))
         
         # ========================================================
-        # 🚀 STRATEGY A: VELOCITY-BASED DYNAMIC PROXIMITY
+        # 🚀 STRATEGY A: VELOCITY-BASED DYNAMIC PROXIMITY & TIME INTERVAL
         # ========================================================
-        # ดูจุดที่หุ่นกำลังพุ่งไป ถ้าความเร็วสูงมาก ระยะส่งต่อก็จะกว้าง(ไกล)ตาม
+        # เราพบว่าถ้าเรา "รอให้หุ่นตามมาใกล้ๆ ค่อยส่ง" (Wait for robot to catch up) 
+        # คิวจะว่างและเกิด Latency สะสม (Send Rate เหลือ 5%)
+        # วิธีแก้: ถ้าเป้าหมายใหม่ขยับเกิน Threshold เราจะส่งคำสั่งถี่ยิบขึ้น (เช่น ทุกๆ 100ms = 10Hz) 
+        # เพื่อเติมคิวให้หุ่นไหลลื่น และพิจารณาระยะห่างควบคู่ไปด้วย
         
-        # นี่คือเส้นสีแดงที่ถ้าหุ่นวิ่งข้ามเมื่อไหร่ เราจะสโลว์ดาวน์เป้าใหม่ทันที
         trigger_distance = DYNAMIC_PROXIMITY_BASE_RAD + (velocity_mag * DYNAMIC_PROXIMITY_LOOKAHEAD_SEC)
         
-        if dist_to_last < trigger_distance:
-            if change_in_target > SPATIAL_THRESHOLD:
+        # ถ้าระยะห่างน้อยกว่า trigger_distance (หุ่นตามมาทันแล้ว) 
+        # หรือ เวลาผ่านไปเกิน 0.1 วิ (10Hz) และเป้าหมายใหม่ขยับเกินสัดส่วน (หุ่นช้าเกินไป ต้องส่งนำหน้า)
+        time_since_last_send = now - self.last_sent_time
+        target_moved_enough = change_in_target > SPATIAL_THRESHOLD
+
+        if target_moved_enough:
+            if (dist_to_last < trigger_distance) or (time_since_last_send > 0.1):
                 self.last_sent_target = latest_target
                 self.last_sent_time = now
                 self.stuck_start_time = 0 # Reset stuck timer
-                return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
+                reason = "DynProx" if dist_to_last < trigger_distance else f"Time{time_since_last_send:.2f}s"
+                return True, f"{reason}_Delta{change_in_target:.3f}"
         
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!
