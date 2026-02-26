@@ -346,15 +346,16 @@ class MonitorGUI:
         # ===== MAIN LAYOUT =====
         # Left panel: existing controls + tables
         # Right panel: real-time graphs
-        outer = tk.Frame(root, bg="#1a1a2e")
+        
+        # Use a PanedWindow so the user can drag the separator between GUI and Graphs
+        outer = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg="#1a1a2e", sashwidth=5, sashrelief=tk.RAISED)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        left_frame = tk.Frame(outer, bg="#f0f0f0", width=680)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH)
-        left_frame.pack_propagate(False)
-
+        left_frame = tk.Frame(outer, bg="#f0f0f0")
         right_frame = tk.Frame(outer, bg="white")
-        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        outer.add(left_frame, minsize=600, stretch="never") # Left side stays its natural size or min 600
+        outer.add(right_frame, minsize=400, stretch="always") # Right side takes all extra expanding space
 
         # ===== LEFT PANEL (existing UI) =====
         main_frame = ttk.Frame(left_frame, padding="15")
