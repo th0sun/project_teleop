@@ -134,19 +134,15 @@ class SessionLogger:
     def _logging_loop(self):
         target_hz = 20.0
         period = 1.0 / target_hz
-        next_time = time.time() + period
+        next_time = time.perf_counter() + period
 
         while self._is_running:
             try:
-                # Thread-safe copy of latest values
-                # Grab EXACT raw unity values straight from the /unity/joint_cmd topic
-                unity = list(self.node.latest_raw_unity_joints)
+                unity   = list(self.node.latest_raw_unity_joints)
                 predicted = list(self.node.latest_predicted_joints)
-                # Read directly from node instead of GUI proxy to avoid GUI lag
-                sent = list(self.node.latest_sent_joints)
-                actual = list(self.node.latest_actual_joints)
+                sent    = list(self.node.latest_sent_joints)
+                actual  = list(self.node.latest_actual_joints)
 
-                # XYZ calculations
                 xyz_tgt = self.node.latest_unity_xyz[:3] if any(v != 0 for v in self.node.latest_unity_xyz) \
                           else self.node.latest_tool_target[:3]
                 xyz_act = list(self.node.latest_tool_actual[:3])
@@ -161,15 +157,16 @@ class SessionLogger:
             except Exception as e:
                 print(f"[SessionLogger] Error in logging loop: {e}")
 
-            now = time.time()
+            now = time.perf_counter()
             sleep_time = next_time - now
             if sleep_time > 0:
                 time.sleep(sleep_time)
-            
+
             next_time += period
-            if time.time() > next_time + period:
-                # Catch up if severely delayed
-                next_time = time.time() + period
+            # If severely behind (>2 periods), resync to now to avoid burst catch-up
+            if time.perf_counter() > next_time + period:
+                next_time = time.perf_counter() + period
+
 
     def _log_joints(self, unity, predicted, sent, actual):
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
