@@ -167,8 +167,9 @@ class TeleopController:
         speed_percent = 100
         
         # Determine if we should use BATCH mode (Precision Mode)
-        # Use batching if velocity is low < 0.1 rad/s
+        # Use batching if velocity is low < 0.1 rad/s AND distance is small < 0.1 rad
         velocity_mag = np.max(self.robot_velocity)
+        dist_to_target = np.max(np.abs(q_safe - q_current)) if q_current is not None else 0
         
         if force_send:
             # 🛡️ Force single-point command (bypasses should_skip_motion in batch planner)
@@ -176,8 +177,8 @@ class TeleopController:
             self.planner.last_command = q_safe.copy()
             cmd_str = self.planner.format_command(q_safe, speed_percent)
             return cmd_str, q_safe
-        elif q_current is not None and velocity_mag < 0.1:
-            # ใช้ 3 จุดย่อยสำหรับจังหวะเล็งละเอียด
+        elif q_current is not None and velocity_mag < 0.1 and dist_to_target < 0.1:
+            # ใช้ 3 จุดย่อยสำหรับจังหวะเล็งละเอียด (เฉพาะใกล้เป้าหมาย)
             cmd_str, _, _ = self.planner.plan_batch_motion(q_safe, q_current, num_steps=3)
             return cmd_str, q_safe
         else:
