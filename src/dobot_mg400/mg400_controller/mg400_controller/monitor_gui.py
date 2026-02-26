@@ -40,6 +40,7 @@ from mg400_controller.common.config.motion_config import (
     SUCTION_TOPIC, LIGHT_TOPIC, DO_STATUS_TOPIC, ROBOT_MODE_TOPIC, ERROR_STATUS_TOPIC
 )
 from std_msgs.msg import Bool, Int32MultiArray, Int64, Int32
+from mg400_controller.common.utils.error_decoder import RobotErrorDecoder
 
 # Configuration
 ACTUAL_TOPIC_NAME   = "/joint_states"
@@ -109,6 +110,7 @@ class SessionLogger:
             "predicted_j1", "predicted_j2", "predicted_j3", "predicted_j4",
             "sent_j1", "sent_j2", "sent_j3", "sent_j4",
             "actual_j1", "actual_j2", "actual_j3", "actual_j4",
+            "robot_mode", "error_status",
         ])
 
         xyz_path = os.path.join(self.session_dir, "xyz_tracking.csv")
@@ -147,7 +149,10 @@ class SessionLogger:
                           else self.node.latest_tool_target[:3]
                 xyz_act = list(self.node.latest_tool_actual[:3])
 
-                self._log_joints(unity, predicted, sent, actual)
+                robot_mode = self.node.latest_robot_mode
+                error_status = self.node.latest_error_status
+
+                self._log_joints(unity, predicted, sent, actual, robot_mode, error_status)
                 self._log_xyz(xyz_tgt, xyz_act)
 
                 self._log_flush_counter += 1
@@ -168,14 +173,15 @@ class SessionLogger:
                 next_time = time.perf_counter() + period
 
 
-    def _log_joints(self, unity, predicted, sent, actual):
+    def _log_joints(self, unity, predicted, sent, actual, robot_mode, error_status):
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         elapsed = round(time.time() - self._start_time, 3)
         row = [ts, elapsed] + \
               [round(v, 4) for v in unity] + \
               [round(v, 4) for v in predicted] + \
               [round(v, 4) for v in sent] + \
-              [round(v, 4) for v in actual]
+              [round(v, 4) for v in actual] + \
+              [robot_mode, error_status]
         with self._lock:
             self._jt_writer.writerow(row)
 
@@ -528,6 +534,9 @@ class MonitorGUI:
         # ===== RIGHT PANEL: REAL-TIME GRAPHS =====
         self._setup_graphs(right_frame)
 
+        # Decoder for error messages
+        self.error_decoder = RobotErrorDecoder()
+
         # Start Update Loop
         self.update_gui()
 
@@ -712,9 +721,20 @@ class MonitorGUI:
         mode = self.node.latest_robot_mode
         error = self.node.latest_error_status
         mode_names = {1: "INIT", 4: "DISABLED", 5: "ENABLE", 6: "DRAG", 7: "RUN", 9: "ERROR", 11: "COLLISION"}
-        self.var_mode.set(f"MODE: {mode_names.get(mode, str(mode))}")
-        self.var_error.set(f"ERR: {error:02X}")
-        self.lbl_error.configure(fg="red" if error != 0 or mode == 9 else "gray")
+        mode_str = mode_names.get(mode, str(mode))
+        
+        # Color coding for mode
+        mode_color = "red" if mode == 9 or mode == 11 else "black"
+        self.var_mode.set(f"🤖 MODE: {mode_str}")
+        
+        if error != 0:
+            desc, _, _ = self.error_decoder.decode_error(error)
+            err_text = desc if desc else "Unknown Error"
+            self.var_error.set(f"❌ ERR {error:02X}: {err_text}")
+            self.lbl_error.configure(fg="red")
+        else:
+            self.var_error.set("✅ ERR: 00 (Clear)")
+            self.lbl_error.configure(fg="gray")
         
         # --- Update Button States (DO Status Sync) ---
         do_status = self.node.latest_do_status
