@@ -143,6 +143,11 @@ class FeedbackHandler:
             self.di_status = struct.unpack_from('<Q', data, OFFSET_DI_STATUS)[0]
             self.do_status = struct.unpack_from('<Q', data, OFFSET_DO_STATUS)[0]
             
+            # 🌟 3.5 Parse Speed Scaling (SpeedFactor) -> Offset 64 (float64)
+            OFFSET_SPEED_SCALING = 64
+            self.speed_scaling = struct.unpack_from('<d', data, OFFSET_SPEED_SCALING)[0]
+            self.logger.info(f"🚀 SpeedFactor Confirm: {self.speed_scaling}", throttle_duration_sec=3.0)
+            
             # 4. Parse Error/Collision status
             OFFSET_ERROR = 1029
             OFFSET_COLLISION = 1038
