@@ -14,7 +14,7 @@
 # ⚡ Speed & Acceleration Settings
 MAX_SPEED_DEG = 300.0  # Maximum joint speed (degrees/sec)
 ACC_VALUE = 100        # Acceleration value (0-100)
-CP_VALUE = 80          # Continuous Path value (smoothness: 0-100)
+CP_VALUE = 100         # Continuous Path value (smoothness: 0-100)
 
 # 🎮 Adaptive Speed Thresholds
 # กำหนดความเร็วตามระยะห่างจากเป้าหมาย
