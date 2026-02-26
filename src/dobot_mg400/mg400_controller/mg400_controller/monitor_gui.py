@@ -34,20 +34,23 @@ import matplotlib.animation as animation
 
 # Import Configuration
 from mg400_controller.common.config.motion_config import (
-    UNITY_TOPIC, SUCTION_TOPIC, LIGHT_TOPIC, 
-    VACUUM_DO_PORT, BLOW_DO_PORT, 
+    RVIZ_TOPIC, UNITY_TOPIC,
+    VACUUM_DO_PORT, BLOW_DO_PORT,
     GREEN_LIGHT_DO_PORT, YELLOW_LIGHT_DO_PORT, RED_LIGHT_DO_PORT,
-    DO_STATUS_TOPIC, ROBOT_MODE_TOPIC, ERROR_STATUS_TOPIC
+    SUCTION_TOPIC, LIGHT_TOPIC, DO_STATUS_TOPIC, ROBOT_MODE_TOPIC, ERROR_STATUS_TOPIC
 )
 from std_msgs.msg import Bool, Int32MultiArray, Int64, Int32
 
 # Configuration
-ACTUAL_TOPIC_NAME = "/joint_states"
-TARGET_TOPIC_NAME = UNITY_TOPIC
-TOOL_ACTUAL_TOPIC = "/mg400/tool_vector_actual"
-TOOL_TARGET_TOPIC = "/mg400/tool_vector_target"
-PREDICTED_TOPIC = "/teleop/predicted_target"
-SENT_CMD_TOPIC = "/teleop/sent_command"
+ACTUAL_TOPIC_NAME   = "/joint_states"
+TARGET_TOPIC_NAME   = UNITY_TOPIC
+TOOL_ACTUAL_TOPIC   = "/mg400/tool_vector_actual"
+TOOL_TARGET_TOPIC   = "/mg400/tool_vector_target"
+PREDICTED_TOPIC     = "/teleop/predicted_target"
+SENT_CMD_TOPIC      = "/teleop/sent_command"
+UNITY_XYZ_TOPIC     = "/teleop/unity_xyz"
+FLANGE_ACTUAL_TOPIC = "/robot/flange_actual"
+TOOL_INDEX_TOPIC    = "/robot/tool_index"
 
 # Colors for Lights
 COLOR_OFF = "#d0d0d0"
@@ -84,10 +87,13 @@ class SessionLogger:
     Creates ~/project_teleop_ws/session_logs/YYYYMMDD_HHMMSS/ per session.
     Logs all 4 joint streams (Unity, Predicted, Sent, Actual) + XYZ to CSV.
     Timestamp = real wall-clock time (UTC+7 or system local time), accurate.
+    Runs on a precise background thread independent of Tkinter GUI.
     """
     BASE_DIR = os.path.expanduser("~/project_teleop_ws/session_logs")
 
-    def __init__(self):
+    def __init__(self, node, gui):
+        self.node = node
+        self.gui = gui
         # Create session folder e.g. session_logs/20260225_032100/
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir = os.path.join(self.BASE_DIR, ts)
@@ -117,9 +123,55 @@ class SessionLogger:
 
         self._start_time = time.time()
         self._lock = threading.Lock()
+        self._log_flush_counter = 0
+        self._is_running = True
         print(f"[SessionLogger] Logging to: {self.session_dir}")
 
-    def log_joints(self, unity, predicted, sent, actual):
+        # Start precise background thread for 20Hz logging
+        self._log_thread = threading.Thread(target=self._logging_loop, daemon=True)
+        self._log_thread.start()
+
+    def _logging_loop(self):
+        target_hz = 20.0
+        period = 1.0 / target_hz
+        next_time = time.time() + period
+
+        while self._is_running:
+            try:
+                # Thread-safe copy of latest values
+                # Grab EXACT raw unity values straight from the /unity/joint_cmd topic
+                unity = list(self.node.latest_raw_unity_joints)
+                predicted = list(self.node.latest_predicted_joints)
+                # Read directly from node instead of GUI proxy to avoid GUI lag
+                sent = list(self.node.latest_sent_joints)
+                actual = list(self.node.latest_actual_joints)
+
+                # XYZ calculations
+                xyz_tgt = self.node.latest_unity_xyz[:3] if any(v != 0 for v in self.node.latest_unity_xyz) \
+                          else self.node.latest_tool_target[:3]
+                xyz_act = list(self.node.latest_tool_actual[:3])
+
+                self._log_joints(unity, predicted, sent, actual)
+                self._log_xyz(xyz_tgt, xyz_act)
+
+                self._log_flush_counter += 1
+                if self._log_flush_counter >= 100:
+                    self.flush()
+                    self._log_flush_counter = 0
+            except Exception as e:
+                print(f"[SessionLogger] Error in logging loop: {e}")
+
+            now = time.time()
+            sleep_time = next_time - now
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            
+            next_time += period
+            if time.time() > next_time + period:
+                # Catch up if severely delayed
+                next_time = time.time() + period
+
+    def _log_joints(self, unity, predicted, sent, actual):
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         elapsed = round(time.time() - self._start_time, 3)
         row = [ts, elapsed] + \
@@ -130,7 +182,7 @@ class SessionLogger:
         with self._lock:
             self._jt_writer.writerow(row)
 
-    def log_xyz(self, target, actual):
+    def _log_xyz(self, target, actual):
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         elapsed = round(time.time() - self._start_time, 3)
         diff = [round(actual[i] - target[i], 3) for i in range(3)]
@@ -146,6 +198,9 @@ class SessionLogger:
             self._xyz_file.flush()
 
     def close(self):
+        self._is_running = False
+        if hasattr(self, '_log_thread'):
+            self._log_thread.join(timeout=1.0)
         with self._lock:
             self._jt_file.close()
             self._xyz_file.close()
@@ -194,9 +249,12 @@ class JointMonitorNode(Node):
         self.latest_target_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_predicted_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_sent_joints = [0.0, 0.0, 0.0, 0.0]
+        self.latest_raw_unity_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_unity_xyz   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of Unity input
+        self.latest_flange_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of actual joints (no tool offset)
+        self.latest_tool_index = -1  # active tool index from GetTool()
         self.latest_do_status = 0
         self.latest_robot_mode = 0
         self.latest_error_status = 0
@@ -208,9 +266,12 @@ class JointMonitorNode(Node):
         self.sub_target = self.create_subscription(JointState, TARGET_TOPIC_NAME, self.listener_callback_target, 10)
         self.sub_predicted = self.create_subscription(JointState, PREDICTED_TOPIC, self.listener_callback_predicted, 10)
         self.sub_sent = self.create_subscription(JointState, SENT_CMD_TOPIC, self.listener_callback_sent, 10)
+        self.sub_raw_unity = self.create_subscription(JointState, UNITY_TOPIC, self.listener_callback_raw_unity, 10)
         self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
         self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
-        self.sub_unity_xyz = self.create_subscription(Float64MultiArray, "/teleop/unity_xyz", self.listener_callback_unity_xyz, 10)
+        self.sub_unity_xyz = self.create_subscription(Float64MultiArray, UNITY_XYZ_TOPIC, self.listener_callback_unity_xyz, 10)
+        self.sub_flange_actual = self.create_subscription(Float64MultiArray, FLANGE_ACTUAL_TOPIC, self.listener_callback_flange_actual, 10)
+        self.sub_tool_index = self.create_subscription(Int32, TOOL_INDEX_TOPIC, self.listener_callback_tool_index, 10)
         self.sub_do_status = self.create_subscription(Int64, DO_STATUS_TOPIC, self.listener_callback_do_status, 10)
         self.sub_robot_mode = self.create_subscription(Int32, ROBOT_MODE_TOPIC, self.listener_callback_robot_mode, 10)
         self.sub_error_status = self.create_subscription(Int32, ERROR_STATUS_TOPIC, self.listener_callback_error_status, 10)
@@ -236,6 +297,10 @@ class JointMonitorNode(Node):
             self.latest_target_joints = list(np.degrees(msg.position[:4]))
             self.last_target_time = time.time()
 
+    def listener_callback_raw_unity(self, msg):
+        if len(msg.position) >= 4:
+            self.latest_raw_unity_joints = list(np.degrees(msg.position[:4]))
+
     def listener_callback_predicted(self, msg):
         if len(msg.position) >= 4:
             self.latest_predicted_joints = list(np.degrees(msg.position[:4]))
@@ -252,7 +317,13 @@ class JointMonitorNode(Node):
 
     def listener_callback_unity_xyz(self, msg):
         if len(msg.data) >= 6: self.latest_unity_xyz = list(msg.data)
-        
+
+    def listener_callback_flange_actual(self, msg):
+        if len(msg.data) >= 6: self.latest_flange_actual = list(msg.data)
+
+    def listener_callback_tool_index(self, msg):
+        self.latest_tool_index = int(msg.data)
+
     def listener_callback_do_status(self, msg):
         self.latest_do_status = int(msg.data)
         
@@ -300,7 +371,7 @@ class MonitorGUI:
         # Logging Button
         self.is_logging = False
         self.log_start_time = 0.0
-        self.btn_log = ttk.Button(title_frame, text="▶ Start Logging", command=self.toggle_logging)
+        self.btn_log = tk.Button(title_frame, text="▶ Start Logging", command=self.toggle_logging, bg="#f0f0f0")
         self.btn_log.pack(side=tk.RIGHT)
 
         # --- JOINT TABLE ---
@@ -346,34 +417,50 @@ class MonitorGUI:
 
         header_xyz = ttk.Frame(main_frame)
         header_xyz.pack(fill=tk.X, pady=2)
-        ttk.Label(header_xyz, text="Axis", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Unity FK (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Actual (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Diff (mm)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="Axis",          font=FONT_LABEL, width=6).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="Unity FK (mm)", font=FONT_LABEL, foreground="darkorange",  width=13).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="Flange (mm)",   font=FONT_LABEL, foreground="royalblue",   width=13).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="TCP (mm)",      font=FONT_LABEL, foreground="green4",      width=13).pack(side=tk.LEFT)
+        ttk.Label(header_xyz, text="ToolΔ (mm)",   font=FONT_LABEL, foreground="gray40",      width=12).pack(side=tk.LEFT)
 
-        self.vars_xyz_tgt = []
-        self.vars_xyz_act = []
-        self.vars_xyz_diff = []
-        self.lbls_xyz_diff = []
+        self.vars_xyz_tgt    = []
+        self.vars_xyz_flange = []
+        self.vars_xyz_act    = []
+        self.vars_xyz_tool   = []
+        self.vars_xyz_diff   = []   # compat alias
+        self.lbls_xyz_diff   = []
 
         for i, name in enumerate(["X", "Y", "Z"]):
             frame = ttk.Frame(main_frame)
             frame.pack(fill=tk.X, pady=2)
-            ttk.Label(frame, text=name, font=FONT_LABEL, width=12).pack(side=tk.LEFT)
-            
-            v_tgt = tk.StringVar(value="0.00")
-            ttk.Label(frame, textvariable=v_tgt, font=FONT_VALUE, foreground="darkgreen", width=12).pack(side=tk.LEFT)
+            ttk.Label(frame, text=name, font=FONT_LABEL, width=7).pack(side=tk.LEFT)
+
+            v_tgt = tk.StringVar(value="0.0")
+            ttk.Label(frame, textvariable=v_tgt, font=FONT_VALUE, foreground="darkorange", width=12).pack(side=tk.LEFT)
             self.vars_xyz_tgt.append(v_tgt)
-            
-            v_act = tk.StringVar(value="0.00")
-            ttk.Label(frame, textvariable=v_act, font=FONT_VALUE, foreground="blue", width=12).pack(side=tk.LEFT)
+
+            v_flange = tk.StringVar(value="0.0")
+            ttk.Label(frame, textvariable=v_flange, font=FONT_VALUE, foreground="royalblue", width=12).pack(side=tk.LEFT)
+            self.vars_xyz_flange.append(v_flange)
+
+            v_act = tk.StringVar(value="0.0")
+            ttk.Label(frame, textvariable=v_act, font=FONT_VALUE, foreground="green4", width=12).pack(side=tk.LEFT)
             self.vars_xyz_act.append(v_act)
-            
-            v_diff = tk.StringVar(value="0.00")
-            lbl_diff = ttk.Label(frame, textvariable=v_diff, font=FONT_VALUE, foreground="black", width=12)
-            lbl_diff.pack(side=tk.LEFT)
-            self.vars_xyz_diff.append(v_diff)
-            self.lbls_xyz_diff.append(lbl_diff)
+
+            v_tool = tk.StringVar(value="0.0")
+            lbl_tool = ttk.Label(frame, textvariable=v_tool, font=FONT_VALUE, foreground="gray40", width=11)
+            lbl_tool.pack(side=tk.LEFT)
+            self.vars_xyz_tool.append(v_tool)
+            # compat aliases for session logger
+            self.vars_xyz_diff.append(v_tool)
+            self.lbls_xyz_diff.append(lbl_tool)
+
+        # Tool Index label row (below XYZ table)
+        tool_idx_row = ttk.Frame(main_frame)
+        tool_idx_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(tool_idx_row, text="Active Tool:", font=FONT_LABEL, width=14).pack(side=tk.LEFT)
+        self.var_tool_index = tk.StringVar(value="— (querying...)")
+        ttk.Label(tool_idx_row, textvariable=self.var_tool_index, font=FONT_VALUE, foreground="gray40").pack(side=tk.LEFT)
 
         ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
 
@@ -438,9 +525,7 @@ class MonitorGUI:
         self.var_do_hex = tk.StringVar(value="DO: 0x0000")
         ttk.Label(status_frame, textvariable=self.var_do_hex, font=FONT_LATENCY, foreground="gray").pack(anchor=tk.W)
 
-        self.is_logging = False
-        self.btn_log = tk.Button(status_frame, text="▶ Start Logging", command=self.toggle_logging, bg="#f0f0f0")
-        self.btn_log.pack(side=tk.RIGHT, padx=5)
+        # Button moved to top title_frame
 
         # ===== RIGHT PANEL: REAL-TIME GRAPHS =====
         self._setup_graphs(right_frame)
@@ -488,9 +573,8 @@ class MonitorGUI:
         self.last_sent_values = [0.0] * 4  # Hold-last for staircase sent line
         self.graph_start_time = time.time()
         
-        # ✅ Auto-start session logger
-        self.session_logger = SessionLogger()
-        self._log_flush_counter = 0
+        # ✅ Auto-start precise session logger
+        self.session_logger = SessionLogger(self.node, self)
         
         for i in range(4):
             ax = self.fig.add_subplot(4, 1, i + 1)
@@ -655,21 +739,23 @@ class MonitorGUI:
                 self.btns_light[name].config(bg=bg_color, fg=fg_color, text=name)
 
         # --- Update Cartesian Data ---
-        # Use Unity FK XYZ if available, fall back to firmware target
-        xyz_tgt = self.node.latest_unity_xyz[:3] if any(v != 0 for v in self.node.latest_unity_xyz) \
-                  else self.node.latest_tool_target[:3]
-        xyz_act = self.node.latest_tool_actual[:3]
+        xyz_unity  = self.node.latest_unity_xyz[:3]       # FK of Unity input joints (orange)
+        xyz_flange = self.node.latest_flange_actual[:3]    # FK of actual joints, no tool offset (blue)
+        xyz_tcp    = self.node.latest_tool_actual[:3]       # firmware TCP with tool offset (green)
         for i in range(3):
-            self.vars_xyz_tgt[i].set(f"{xyz_tgt[i]:.1f}")
-            self.vars_xyz_act[i].set(f"{xyz_act[i]:.1f}")
-            diff = xyz_act[i] - xyz_tgt[i]
-            self.vars_xyz_diff[i].set(f"{diff:+.1f}")
-            if abs(diff) > 10.0:
-                self.lbls_xyz_diff[i].configure(foreground="red")
-            elif abs(diff) > 2.0:
-                self.lbls_xyz_diff[i].configure(foreground="orange")
-            else:
-                self.lbls_xyz_diff[i].configure(foreground="green")
+            self.vars_xyz_tgt[i].set(f"{xyz_unity[i]:.1f}")
+            self.vars_xyz_flange[i].set(f"{xyz_flange[i]:.1f}")
+            self.vars_xyz_act[i].set(f"{xyz_tcp[i]:.1f}")
+            # Tool offset = TCP - Flange (live, no preconfig needed)
+            tool_delta = xyz_tcp[i] - xyz_flange[i]
+            self.vars_xyz_tool[i].set(f"{tool_delta:+.1f}")
+
+        # Tool index label
+        tidx = self.node.latest_tool_index
+        if tidx >= 0:
+            self.var_tool_index.set(f"Tool {tidx}")
+        else:
+            self.var_tool_index.set("— (querying...)")
 
         # --- Execution Monitor ---
         status = self.monitor.update(total_diff)
@@ -711,24 +797,7 @@ class MonitorGUI:
             with open(self.fn_actual, 'a', newline='') as f:
                 csv.writer(f).writerow([f"{t:.3f}", f"{xyz_act[0]:.3f}", f"{xyz_act[1]:.3f}", f"{xyz_act[2]:.3f}", f"{reach_act:.3f}", f"{act[0]:.3f}", f"{act[1]:.3f}", f"{act[2]:.3f}", f"{act[3]:.3f}"])
 
-        # ✅ Session Logger: runs from Tkinter loop - never stops even if graph freezes
-        try:
-            self.session_logger.log_joints(
-                unity=list(self.node.latest_target_joints),
-                predicted=list(self.node.latest_predicted_joints),
-                sent=list(self.last_sent_values),
-                actual=list(self.node.latest_actual_joints),
-            )
-            self.session_logger.log_xyz(
-                target=list(xyz_tgt),
-                actual=list(xyz_act),
-            )
-            self._log_flush_counter += 1
-            if self._log_flush_counter >= 100:
-                self.session_logger.flush()
-                self._log_flush_counter = 0
-        except Exception:
-            pass
+        # ✅ Session Logger runs in its own background thread internally
 
         # Schedule next update at 20Hz
         self.root.after(50, self.update_gui)

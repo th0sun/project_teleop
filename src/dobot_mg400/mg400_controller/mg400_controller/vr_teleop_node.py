@@ -529,6 +529,23 @@ class TeleopNode(Node):
             err_msg.data = int(err_info['error_status'])
             self.pub_error_status.publish(err_msg)
 
+            # === PERIODIC TOOL INDEX QUERY (every ~5s at 50Hz = 250 cycles) ===
+            self._tool_query_counter += 1
+            if self._tool_query_counter >= 250:
+                self._tool_query_counter = 0
+                try:
+                    resp = self.connection.send_and_wait("GetTool()", timeout=1.0)
+                    if resp:
+                        import re
+                        m = re.search(r'\{(\d+)\}', resp)
+                        if m:
+                            tidx = int(m.group(1))
+                            ti_msg = Int32()
+                            ti_msg.data = tidx
+                            self.pub_tool_index.publish(ti_msg)
+                except Exception:
+                    pass
+
             # === AUTO-RECOVERY (Clear Error) ===
             # If the robot actually hits a hardware limit or another error, it enters Mode 9.
             # We auto-clear it so it doesn't stay permanently frozen.
