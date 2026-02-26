@@ -60,10 +60,10 @@ COLOR_RED = "#e74c3c"
 COLOR_VACUUM = "#3498db"
 
 # Graph colors
-COL_UNITY = "#f39c12"      # Orange
-COL_PREDICTED = "#9b59b6"  # Purple
-COL_SENT = "#27ae60"       # Green
-COL_ACTUAL = "#2980b9"     # Blue
+COL_UNITY = "#ff7f0e"      # Matplotlib standard orange
+COL_PREDICTED = "#9467bd"  # Matplotlib standard purple
+COL_SENT = "#d62728"       # Matplotlib standard red
+COL_ACTUAL = "#1f77b4"     # Matplotlib standard blue
 
 # Fonts
 FONT_HEADER = ("Helvetica", 14, "bold")
@@ -349,11 +349,11 @@ class MonitorGUI:
         outer = tk.Frame(root, bg="#1a1a2e")
         outer.pack(fill=tk.BOTH, expand=True)
 
-        left_frame = tk.Frame(outer, bg="#f0f0f0", width=600)
+        left_frame = tk.Frame(outer, bg="#f0f0f0", width=680)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH)
         left_frame.pack_propagate(False)
 
-        right_frame = tk.Frame(outer, bg="#1a1a2e")
+        right_frame = tk.Frame(outer, bg="white")
         right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ===== LEFT PANEL (existing UI) =====
@@ -533,13 +533,13 @@ class MonitorGUI:
     def _setup_graphs(self, parent):
         """Create the matplotlib figure with 4 subplots for J1-J4."""
         # Legend label strip at top
-        legend_frame = tk.Frame(parent, bg="#1a1a2e")
+        legend_frame = tk.Frame(parent, bg="white")
         legend_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
         
         tk.Label(legend_frame, text="📊 Joint Tracking Graphs", font=("Helvetica", 13, "bold"),
-                 bg="#1a1a2e", fg="white").pack(side=tk.LEFT)
+                 bg="white", fg="black").pack(side=tk.LEFT)
         
-        legend_right = tk.Frame(legend_frame, bg="#1a1a2e")
+        legend_right = tk.Frame(legend_frame, bg="white")
         legend_right.pack(side=tk.RIGHT)
         
         legends = [
@@ -550,10 +550,10 @@ class MonitorGUI:
         ]
         for lname, lcolor in legends:
             tk.Label(legend_right, text=f"─ {lname}", font=("Helvetica", 10, "bold"),
-                     bg="#1a1a2e", fg=lcolor).pack(side=tk.LEFT, padx=8)
+                     bg="white", fg=lcolor).pack(side=tk.LEFT, padx=8)
 
-        # Matplotlib Figure
-        self.fig = Figure(figsize=(8, 8), dpi=96, facecolor="#1a1a2e")
+        # Matplotlib Figure - Standard Mode
+        self.fig = Figure(figsize=(8, 8), dpi=96, facecolor="white")
         self.fig.subplots_adjust(hspace=0.4, left=0.12, right=0.97, top=0.97, bottom=0.07)
         
         joint_labels = ["J1 (°)", "J2 (°)", "J3 (°)", "J4 (°)"]
@@ -575,14 +575,14 @@ class MonitorGUI:
         
         for i in range(4):
             ax = self.fig.add_subplot(4, 1, i + 1)
-            ax.set_facecolor("#0d0d1a")
-            ax.set_ylabel(joint_labels[i], color="white", fontsize=9)
-            ax.tick_params(colors="gray", labelsize=8)
-            ax.spines['bottom'].set_color('#444')
-            ax.spines['left'].set_color('#444')
+            ax.set_facecolor("white")
+            ax.set_ylabel(joint_labels[i], color="black", fontsize=9)
+            ax.tick_params(colors="black", labelsize=8)
+            ax.spines['bottom'].set_color('black')
+            ax.spines['left'].set_color('black')
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
-            ax.grid(True, color="#2a2a3e", linewidth=0.5, linestyle="--")
+            ax.grid(True, color="#e0e0e0", linewidth=0.5, linestyle="--")
 
             l_unity,  = ax.plot([], [], color=COL_UNITY, lw=1.2, linestyle="--", alpha=0.8, label="Unity")
             l_pred,   = ax.plot([], [], color=COL_PREDICTED, lw=1.0, alpha=0.85, label="Predicted")
