@@ -108,7 +108,10 @@ class MotionPlanner:
         if self.should_skip_motion(q_target, q_current):
             return None, None, None
             
-        q_start = self.last_command if self.last_command is not None else q_current
+        # 🐛 BUG FIX: Always interpolate from the robot's CURRENT position (q_current)
+        # Using last_command can cause the robot to physically move backwards if 
+        # last_command is stale and far behind the robot's actual position.
+        q_start = q_current
         
         # คำนวณความเร็ว
         distance = np.linalg.norm(q_target - q_current)
