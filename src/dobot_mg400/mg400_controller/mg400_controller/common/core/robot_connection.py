@@ -61,10 +61,17 @@ class RobotConnection:
                 self.dashboard.send(b"ClearError()\n")
                 time.sleep(0.1)
                 self.dashboard.send(b"EnableRobot()\n")
-                self.logger.info("🟢 Robot Enabled")
+                time.sleep(0.1)
+                
+                # 🚀 UNLOCK MAX ROBOT SPEED LIMITS
+                self.dashboard.send(b"SpeedFactor(100)\n")
+                self.dashboard.send(b"AccJ(100)\n")
+                self.dashboard.send(b"SpeedJ(100)\n")
+                
+                self.logger.info("🟢 Robot Enabled and Speed Limits Unlocked")
                 return True
             except Exception as e:
-                self.logger.error(f"❌ Reconnect failed: {retry_e}")
+                self.logger.error(f"❌ Reconnect failed: {e}")
                 return False
         return False
 
