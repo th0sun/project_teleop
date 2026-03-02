@@ -252,6 +252,7 @@ class JointMonitorNode(Node):
         self.latest_target_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_predicted_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_sent_joints = [0.0, 0.0, 0.0, 0.0]
+        self.sent_fresh = [False, False, False, False]
         self.latest_raw_unity_joints = [0.0, 0.0, 0.0, 0.0]
         self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -311,6 +312,7 @@ class JointMonitorNode(Node):
     def listener_callback_sent(self, msg):
         if len(msg.position) >= 4:
             self.latest_sent_joints = list(np.degrees(msg.position[:4]))
+            self.sent_fresh = [True, True, True, True]
             
     def listener_callback_tool_actual(self, msg):
         if len(msg.data) >= 6: self.latest_tool_actual = list(msg.data)
@@ -596,7 +598,8 @@ class MonitorGUI:
 
             l_unity,  = ax.plot([], [], color=COL_UNITY, lw=1.2, linestyle="--", alpha=0.8, label="Unity")
             l_pred,   = ax.plot([], [], color=COL_PREDICTED, lw=1.0, alpha=0.85, label="Predicted")
-            l_sent,   = ax.plot([], [], color=COL_SENT, lw=2.0, drawstyle="steps-post", alpha=0.9, label="Sent")
+            # Changed from continuous line to discrete dots for Sent commands
+            l_sent,   = ax.plot([], [], color=COL_SENT, marker='o', markersize=4, linestyle='None', alpha=0.9, label="Sent")
             l_actual, = ax.plot([], [], color=COL_ACTUAL, lw=1.5, label="Actual")
 
             if i == 3:
@@ -628,10 +631,15 @@ class MonitorGUI:
         for i in range(4):
             self.unity_buffers[i].append(self.node.latest_target_joints[i])
             self.pred_buffers[i].append(self.node.latest_predicted_joints[i])
-            # Command Sent: hold last value (staircase) until a new one arrives
-            if self.node.latest_sent_joints[i] != self.last_sent_values[i]:
-                self.last_sent_values[i] = self.node.latest_sent_joints[i]
-            self.sent_buffers[i].append(self.last_sent_values[i])
+            
+            # For "Sent" commands, we only want to plot dots exactly when a command was sent.
+            # If no new command was sent, append NaN so no dot is drawn.
+            if self.node.sent_fresh[i]:
+                self.sent_buffers[i].append(self.node.latest_sent_joints[i])
+                self.node.sent_fresh[i] = False
+            else:
+                self.sent_buffers[i].append(np.nan)
+                
             self.actual_buffers[i].append(self.node.latest_actual_joints[i])
 
         t_arr = np.array(self.time_buffer)
