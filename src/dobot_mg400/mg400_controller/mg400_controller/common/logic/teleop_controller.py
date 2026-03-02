@@ -20,9 +20,8 @@ import numpy as np
 import math
 from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import (
-    STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
-    TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC,
-    RATE_FLOOR_SEC
+    PROXIMITY_THRESHOLD, STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
+    TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC
 )
 
 class TeleopController:
@@ -52,7 +51,6 @@ class TeleopController:
         self.stuck_start_time = 0.0
         self.is_stuck = False
         self.last_stuck_check_time = 0.0
-        self.last_stuck_trigger_time = 0.0  # Cooldown: prevent firing more than once per 2s
         
     def update_robot_state(self, q_current, now):
         """
@@ -80,7 +78,7 @@ class TeleopController:
         Internal method to check if robot is stuck
         """
         # If moving slow AND far from target -> Potential Stuck
-        if velocity_mag < STUCK_VELOCITY_THRESHOLD and dist_to_target > DYNAMIC_PROXIMITY_BASE_RAD:
+        if velocity_mag < STUCK_VELOCITY_THRESHOLD and dist_to_target > PROXIMITY_THRESHOLD:
             if self.stuck_start_time == 0:
                 self.stuck_start_time = now
             elif (now - self.stuck_start_time) > STUCK_TIME_THRESHOLD:
@@ -127,18 +125,7 @@ class TeleopController:
                 self.last_sent_time = now
                 self.stuck_start_time = 0 # Reset stuck timer
                 return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
-
-        # ── RATE FLOOR (M10 migration) ──────────────────────────
-        # Guarantees ≥10 Hz even when proximity never triggers.
-        # Fixes step/zigzag stall (was 0.5 Hz, now 10 Hz floor).
-        # Does not affect smooth patterns where proximity fires at 39 Hz naturally.
-        if (now - self.last_sent_time) >= RATE_FLOOR_SEC:
-            if change_in_target > SPATIAL_THRESHOLD:
-                self.last_sent_target = latest_target
-                self.last_sent_time = now
-                self.stuck_start_time = 0
-                return True, "RateFloor"
-
+        
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!
         
@@ -150,25 +137,20 @@ class TeleopController:
             
             if self.check_stuck_condition(velocity_mag, error_to_last_target, now):
                 # Only trigger if user REALLY moved their hand OR if the robot is far from the current target
-                if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > DYNAMIC_PROXIMITY_BASE_RAD:
-                    # 🛡️ Cooldown: prevent stuck from firing more than once per 2s
-                    if (now - self.last_stuck_trigger_time) < 0.5:  # reduced from 2.0s
-                        return False, "StuckCooldown"
+                if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > PROXIMITY_THRESHOLD:
                     self.logger.warn(f"⚠️ Stuck Detected (Vel: {velocity_mag:.4f}) - Retriggering")
                     self.last_sent_target = latest_target
                     self.last_sent_time = now
                     self.stuck_start_time = 0
-                    self.last_stuck_trigger_time = now  # Start cooldown
                     return True, f"Stuck_Vel{velocity_mag:.4f}_Delta{change_in_target:.3f}"
 
         return False, "Wait"
 
-    def format_command_string(self, q_target, q_current=None, force_send=False):
+    def format_command_string(self, q_target, q_current=None):
         """
         Validate, Clamp, and Format Command String
         
         If moving slowly, use Batch Interpolation for higher stability.
-        force_send=True bypasses skip logic (used for Stuck recovery).
         """
         # Validate & Clamp
         q_safe, is_clamped = self.validator.validate_and_clamp(q_target)
@@ -176,18 +158,15 @@ class TeleopController:
             self.logger.warn("⚠️ Joint command exceeded limits - clamped to safe range")
             
         # Calculate speed
-        speed_percent = 100
+        speed_percent = 100 
         
         # Determine if we should use BATCH mode (Precision Mode)
-        # Use batching if velocity is low < 0.1 rad/s AND distance is small < 0.1 rad
+        # Use batching if velocity is low < 0.1 rad/s
         velocity_mag = np.max(self.robot_velocity)
-        dist_to_target = np.max(np.abs(q_safe - q_current)) if q_current is not None else 0
         
-        if force_send:
-            # 🛡️ Force single-point command (bypasses should_skip_motion in batch planner)
-            # Always update last_command so next batch won't skip
-            self.planner.last_command = q_safe.copy()
-            cmd_str = self.planner.format_command(q_safe, speed_percent)
+        if q_current is not None and velocity_mag < 0.1:
+            # ใช้ 3 จุดย่อยสำหรับจังหวะเล็งละเอียด
+            cmd_str, _, _ = self.planner.plan_batch_motion(q_safe, q_current, num_steps=3)
             return cmd_str, q_safe
         else:
             # โหมดปกติ (Single Point)

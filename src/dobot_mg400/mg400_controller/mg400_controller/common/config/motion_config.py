@@ -29,12 +29,12 @@ SPEED_NEAR = 100     # %
 #  Real-Time Control Parameters (Velocity-Based Stuck Detection)
 # ปรับค่านี้เพื่อควบคุมความไวและความเร็วในการตอบสนอง
 STUCK_VELOCITY_THRESHOLD = 0.005 # rad/s - ความเร็วต่ำกว่านี้ถือว่า "นิ่ง"
-STUCK_TIME_THRESHOLD = 0.2       # seconds [TUNED: 0.3→0.2] ตอบสนอง stuck เร็วขึ้น
-TARGET_CHANGE_THRESHOLD = 0.002  # rad [TUNED: 0.005→0.002] ไว้ขึ้น = ตอบสนอง micro-move
+STUCK_TIME_THRESHOLD = 0.3       # seconds
+TARGET_CHANGE_THRESHOLD = 0.005  # rad
 # กำหนดค่าสำหรับ Dynamic Proximity
-DYNAMIC_PROXIMITY_BASE_RAD = 0.015     # rad (was 0.050)
-DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.30 # seconds
-RATE_FLOOR_SEC = 0.02                  # seconds (50Hz floor, was 0.10)
+DYNAMIC_PROXIMITY_BASE_RAD = 0.005     # rad (~0.3°) - ระยะพื้นฐานขั้นต่ำ
+DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำหรับคำนวณระยะเพิ่มตามความเร็ว
+RATE_FLOOR_SEC = 0.02                  # seconds (Not used by restored 24 Feb logic)
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection
