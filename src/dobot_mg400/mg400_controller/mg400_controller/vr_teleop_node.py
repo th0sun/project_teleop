@@ -26,7 +26,8 @@ from mg400_controller.common.config.robot_config import (
     CONTROL_MODE, 
     ENABLE_GET_ERROR,
     JOINT_LIMITS,
-    ELBOW_ANGLE_LIMIT
+    ELBOW_ANGLE_LIMIT,
+    LOGIC_MODE
 )
 from mg400_controller.common.config.motion_config import (
     UNITY_TOPIC, RVIZ_TOPIC, DEBUG_TOPIC, SAFETY_TOPIC, HAPTIC_TOPIC, 
@@ -85,6 +86,31 @@ def select_control_mode():
     import mg400_controller.common.config.robot_config as cfg
     cfg.CONTROL_MODE = selected
     
+    # ── 🧪 Experimental Logic Mode Selection (TEMPORARY) ──
+    print("\n" + "-"*50)
+    print("🧪 Select Teleop Logic Mode:")
+    print("0 = Default (current production logic)")
+    print("1 = M11_Stable  (เสถียรสุด ทนทานทุกแพตเทิร์น)")
+    print("2 = M14_Smooth  (ลื่นไหว ดีที่สุดสำหรับ circle/sine)")
+    print("3 = M15_Sharp   (คมกริบ ดีที่สุดสำหรับ square/zigzag)")
+    print("-"*50)
+    
+    logic_in = input("Logic> ").strip()
+    
+    logic_modes = {
+        "0": "default",
+        "1": "m11",
+        "2": "m14",
+        "3": "m15"
+    }
+    
+    selected_logic = logic_modes.get(logic_in, "default")
+    cfg.LOGIC_MODE = selected_logic
+    
+    logic_names = {"default": "Default (Production)", "m11": "M11_Stable",
+                   "m14": "M14_Smooth", "m15": "M15_Sharp"}
+    print(f"[INFO] Logic Mode = {logic_names.get(selected_logic, selected_logic)}")
+    
     return selected
 
 # =========================
@@ -106,6 +132,15 @@ class TeleopNode(Node):
         # Teleop Controller (The Brain)
         self.controller = TeleopController(self.validator, self.planner, self.get_logger())
         self.predictor = TargetPredictor(default_dt=0.02, prediction_horizon_sec=0.08, logger=self.get_logger())
+        
+        # 🧪 Experimental Logic (TEMPORARY — if LOGIC_MODE != "default")
+        self._experimental_strategy = None
+        if LOGIC_MODE != "default":
+            from mg400_controller.common.logic.experimental_logic import ExperimentalStrategy
+            self._experimental_strategy = ExperimentalStrategy(
+                LOGIC_MODE, self.planner, self.get_logger()
+            )
+            self.get_logger().info(f"🧪 EXPERIMENTAL MODE: {self._experimental_strategy.mode_name}")
         
         self.latest_target = np.zeros(4)
         self.current_cmd_target = np.zeros(4)
@@ -595,6 +630,34 @@ class TeleopNode(Node):
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION
             # ---------------------------------------------------------
+            
+            # 🧪 EXPERIMENTAL PATH (only active if user selected m11/m14/m15)
+            if self._experimental_strategy is not None:
+                should_send, cmd_str, q_safe, exp_reason = self._experimental_strategy.process(
+                    self.latest_target, q_current, now
+                )
+                if should_send and cmd_str:
+                    t3_cmd_send = time.time()
+                    if self.sender.send(cmd_str):
+                        self.latency_analyzer.start_tracking(
+                            self.unity_send_time, self.target_recv_time,
+                            t3_cmd_send, q_safe, current_q=q_current
+                        )
+                        self.get_logger().info(f"🧪 {exp_reason}")
+                        
+                        sent_msg = JointState()
+                        sent_msg.header.stamp = self.get_clock().now().to_msg()
+                        sent_msg.position = q_safe.tolist()
+                        self.pub_sent_command.publish(sent_msg)
+                        
+                        # Keep default controller state updated for monitors
+                        self.controller.last_sent_target = q_safe
+                        self.controller.last_sent_time = t3_cmd_send
+                return  # ← Skip default logic entirely when in experimental mode
+            
+            # ──────────────────────────────────────────────────────
+            # DEFAULT PRODUCTION LOGIC (unchanged)
+            # ──────────────────────────────────────────────────────
             
             should_send, send_reason = self.controller.should_send_command(
                 self.latest_target, 
