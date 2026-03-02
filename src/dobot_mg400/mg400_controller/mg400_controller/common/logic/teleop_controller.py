@@ -21,7 +21,8 @@ import math
 from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import (
     STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
-    TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC
+    TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC,
+    RATE_FLOOR_SEC
 )
 
 class TeleopController:
@@ -126,7 +127,18 @@ class TeleopController:
                 self.last_sent_time = now
                 self.stuck_start_time = 0 # Reset stuck timer
                 return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
-        
+
+        # ── RATE FLOOR (M10 migration) ──────────────────────────
+        # Guarantees ≥10 Hz even when proximity never triggers.
+        # Fixes step/zigzag stall (was 0.5 Hz, now 10 Hz floor).
+        # Does not affect smooth patterns where proximity fires at 39 Hz naturally.
+        if (now - self.last_sent_time) >= RATE_FLOOR_SEC:
+            if change_in_target > SPATIAL_THRESHOLD:
+                self.last_sent_target = latest_target
+                self.last_sent_time = now
+                self.stuck_start_time = 0
+                return True, "RateFloor"
+
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!
         
@@ -140,7 +152,7 @@ class TeleopController:
                 # Only trigger if user REALLY moved their hand OR if the robot is far from the current target
                 if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > DYNAMIC_PROXIMITY_BASE_RAD:
                     # 🛡️ Cooldown: prevent stuck from firing more than once per 2s
-                    if (now - self.last_stuck_trigger_time) < 2.0:
+                    if (now - self.last_stuck_trigger_time) < 0.5:  # reduced from 2.0s
                         return False, "StuckCooldown"
                     self.logger.warn(f"⚠️ Stuck Detected (Vel: {velocity_mag:.4f}) - Retriggering")
                     self.last_sent_target = latest_target
@@ -176,10 +188,6 @@ class TeleopController:
             # Always update last_command so next batch won't skip
             self.planner.last_command = q_safe.copy()
             cmd_str = self.planner.format_command(q_safe, speed_percent)
-            return cmd_str, q_safe
-        elif q_current is not None and velocity_mag < 0.1 and dist_to_target < 0.1:
-            # ใช้ 3 จุดย่อยสำหรับจังหวะเล็งละเอียด (เฉพาะใกล้เป้าหมาย)
-            cmd_str, _, _ = self.planner.plan_batch_motion(q_safe, q_current, num_steps=3)
             return cmd_str, q_safe
         else:
             # โหมดปกติ (Single Point)

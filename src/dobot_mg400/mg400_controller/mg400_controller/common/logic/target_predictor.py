@@ -113,23 +113,7 @@ class TargetPredictor:
         if position_error > 0.3: # ~17 degrees
             return raw_target_q
             
-        # --- 🌊 DAMPENED DYNAMIC HORIZON ---
-        # Scale the horizon based on how far the robot is from the target.
-        # If the robot is close (low tracking error), reduce prediction to gain precision.
-        # If the robot is far (high tracking error), use full prediction to gain speed.
         final_horizon = self.horizon
-        
-        if q_actual is not None and np.any(q_actual != 0.0):
-            # Tracking Error = Distance between current hand position and robot actual position
-            tracking_error = np.max(np.abs(raw_target_q - q_actual))
-            
-            # Scaling Logic:
-            # 0.03 rad (~1.7 deg) -> Start dampening
-            # 0.005 rad (~0.3 deg) -> Minimum prediction
-            if tracking_error < 0.03:
-                # Calculate scale from 0.0 (error=0.005) to 1.0 (error=0.03)
-                scale = np.clip((tracking_error - 0.005) / (0.03 - 0.005), 0.0, 1.0)
-                final_horizon = self.horizon * scale
         
         # If moving, project the physical state forward by `final_horizon` seconds
         future_q = self.x[:, 0, 0] + (velocities * final_horizon)

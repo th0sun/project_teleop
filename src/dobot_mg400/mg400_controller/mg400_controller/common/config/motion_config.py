@@ -32,8 +32,9 @@ STUCK_VELOCITY_THRESHOLD = 0.005 # rad/s - ความเร็วต่ำก�
 STUCK_TIME_THRESHOLD = 0.2       # seconds [TUNED: 0.3→0.2] ตอบสนอง stuck เร็วขึ้น
 TARGET_CHANGE_THRESHOLD = 0.002  # rad [TUNED: 0.005→0.002] ไว้ขึ้น = ตอบสนอง micro-move
 # กำหนดค่าสำหรับ Dynamic Proximity
-DYNAMIC_PROXIMITY_BASE_RAD = 0.050    # rad [TUNED: 0.012→0.050] ขยายโซนกว้างมาก หุ่นเข้าโซนนิดเดียวก็ส่งเป้าหมายต่อไปเลย (เพิ่ม Send Rate มหาศาล)
-DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.30 # seconds [TUNED: 0.20→0.30] มองการณ์ไกลขึ้น ยิ่งวิ่งเร็วยิ่งส่งถี่
+DYNAMIC_PROXIMITY_BASE_RAD = 0.015     # rad (was 0.050)
+DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.30 # seconds
+RATE_FLOOR_SEC = 0.02                  # seconds (50Hz floor, was 0.10)
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection
