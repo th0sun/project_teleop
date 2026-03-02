@@ -26,13 +26,14 @@ SPEED_FAR = 100      # %
 SPEED_MEDIUM = 100   # %
 SPEED_NEAR = 100     # %
 
-#  Real-Time Control Parameters (Velocity-Based Stuck Detection)
+#  Real-Time Control Parameters (Proximity + Velocity-Based Stuck Detection)
 # ปรับค่านี้เพื่อควบคุมความไวและความเร็วในการตอบสนอง
+PROXIMITY_THRESHOLD = 0.08       # rad (~4.5°) - Increased to allow coarser updates (drain queue)
 STUCK_VELOCITY_THRESHOLD = 0.005 # rad/s - ความเร็วต่ำกว่านี้ถือว่า "นิ่ง"
-STUCK_TIME_THRESHOLD = 0.3       # seconds
-TARGET_CHANGE_THRESHOLD = 0.005  # rad
+STUCK_TIME_THRESHOLD = 0.15      # seconds - ต้องนิ่งนานเท่านี้ถึงจะ trigger stuck recovery
+TARGET_CHANGE_THRESHOLD = 0.02   # rad (~1.1°) - Target ต้องเปลี่ยนอย่างน้อยเท่านี้
 # กำหนดค่าสำหรับ Dynamic Proximity
-DYNAMIC_PROXIMITY_BASE_RAD = 0.005     # rad (~0.3°) - ระยะพื้นฐานขั้นต่ำ
+DYNAMIC_PROXIMITY_BASE_RAD = 0.02    # rad (~1.1°) - ระยะพื้นฐานขั้นต่ำ
 DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำหรับคำนวณระยะเพิ่มตามความเร็ว
 RATE_FLOOR_SEC = 0.02                  # seconds (Not used by restored 24 Feb logic)
 

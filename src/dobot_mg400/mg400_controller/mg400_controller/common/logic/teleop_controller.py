@@ -19,8 +19,8 @@ import time
 import numpy as np
 import math
 from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
-from mg400_controller.common.config.motion_config import (
-    PROXIMITY_THRESHOLD, STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
+from mg400_controller.common.config.motion_config import ( PROXIMITY_THRESHOLD,
+     STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
     TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC
 )
 
@@ -146,11 +146,9 @@ class TeleopController:
 
         return False, "Wait"
 
-    def format_command_string(self, q_target, q_current=None):
+    def format_command_string(self, q_target, q_current=None, force_send=False):
         """
         Validate, Clamp, and Format Command String
-        
-        If moving slowly, use Batch Interpolation for higher stability.
         """
         # Validate & Clamp
         q_safe, is_clamped = self.validator.validate_and_clamp(q_target)
@@ -160,15 +158,7 @@ class TeleopController:
         # Calculate speed
         speed_percent = 100 
         
-        # Determine if we should use BATCH mode (Precision Mode)
-        # Use batching if velocity is low < 0.1 rad/s
-        velocity_mag = np.max(self.robot_velocity)
+        # โหมดปกติ (Single Point) เพื่อความลื่นไหลที่สุด
+        cmd_str = self.planner.format_command(q_safe, speed_percent)
         
-        if q_current is not None and velocity_mag < 0.1:
-            # ใช้ 3 จุดย่อยสำหรับจังหวะเล็งละเอียด
-            cmd_str, _, _ = self.planner.plan_batch_motion(q_safe, q_current, num_steps=3)
-            return cmd_str, q_safe
-        else:
-            # โหมดปกติ (Single Point)
-            cmd_str = self.planner.format_command(q_safe, speed_percent)
-            return cmd_str, q_safe
+        return cmd_str, q_safe
