@@ -113,6 +113,34 @@ class _CurvatureTracker:
 
 
 # ═══════════════════════════════════════════════════════════════
+# M8 Raw — Blind interval-based sending (No logic, adjustable Hz)
+# ═══════════════════════════════════════════════════════════════
+
+class _RawLogic:
+    """
+    Fixed-rate raw stream without clamping, prediction, or proximity gating.
+    Reads frequency dynamically from robot_config.RAW_HZ.
+    """
+    def __init__(self):
+        self._last_send_t: float = 0.0
+
+    def reset(self):
+        self._last_send_t = 0.0
+
+    def process(self, q_target: np.ndarray, q_current: np.ndarray,
+                now: float) -> Tuple[bool, Optional[np.ndarray], str]:
+        import mg400_controller.common.config.robot_config as cfg
+        
+        interval = 1.0 / max(cfg.RAW_HZ, 1)
+
+        if self._last_send_t == 0.0 or (now - self._last_send_t) >= interval:
+            self._last_send_t = now
+            return True, q_target[:4].copy(), "Raw_Timer"
+
+        return False, None, "Wait"
+
+
+# ═══════════════════════════════════════════════════════════════
 # M11 Stable — Velocity-Clamped Integrator + Adaptive Rate Floor
 # ═══════════════════════════════════════════════════════════════
 
@@ -490,6 +518,7 @@ class ExperimentalStrategy:
     """
 
     MODE_MAP = {
+        "m8_raw": ("M8_RawData", _RawLogic),
         "m11": ("M11_Stable", _M11Logic),
         "m14": ("M14_Smooth", _M14Logic),
         "m15": ("M15_Sharp", _M15Logic),

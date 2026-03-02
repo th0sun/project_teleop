@@ -40,7 +40,9 @@ SPATIAL_THRESHOLD = 0.0005  # ~0.03 degrees
 # "m11"     = M11_Stable  — velocity-clamped integrator, most consistent
 # "m14"     = M14_Smooth  — feedforward + curvature gate, best for curves
 # "m15"     = M15_Sharp   — strict velocity clamp, best for sharp corners
+# "m8_raw"  = M8_RawData  — sends raw target at fixed frequency (adjustable via terminal)
 LOGIC_MODE = "default"
+RAW_HZ = 10  # Default frequency for M8_RawData mode
 
 # ⚙️ Feature Flags
 # Enable GetError() API for detailed error reporting
