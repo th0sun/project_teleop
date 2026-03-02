@@ -264,6 +264,52 @@
             "fields": {
                 "data": "string — human-readable debug message"
             }
+        },
+        {
+            "topic": "/vr/dashboard_cmd",
+            "direction": "Unity → ROS",
+            "ros_msg_type": "std_msgs/String",
+            "unity_msg_class": "StdMsgs.String",
+            "description": "VR Dashboard command. Send one of the known command strings to control the robot state.",
+            "fields": {
+                "data": "string — one of the valid command keys (case-insensitive)"
+            },
+            "valid_commands": {
+                "enable": "EnableRobot()  — Enable motors and arm",
+                "disable": "DisableRobot() — Disable motors (safe park)",
+                "clear_error": "ClearError()   — Clear alarm/error state",
+                "reset": "ResetRobot()   — Full software reset",
+                "estop": "EmergencyStop()— ⚠️ Immediate stop, all motion halted",
+                "pause": "Pause()        — Pause current motion queue",
+                "continue": "Continue()     — Resume paused motion queue"
+            },
+            "notes": "Check /mg400/dashboard_response for acknowledgement. Use /mg400/robot_mode to confirm state change."
+        },
+        {
+            "topic": "/vr/set_speed",
+            "direction": "Unity → ROS",
+            "ros_msg_type": "std_msgs/Int32",
+            "unity_msg_class": "StdMsgs.Int32",
+            "description": "Set global robot SpeedFactor (0–100%). Affects all motion commands. In VR, expose as a slider in the UI.",
+            "fields": {
+                "data": "int32 — speed percentage, 0 (slowest) to 100 (fastest)"
+            },
+            "notes": "Default is 100%. Recommended range for real robot testing: 10–30% initially. Check /mg400/dashboard_response for ack."
+        },
+        {
+            "topic": "/mg400/dashboard_response",
+            "direction": "ROS → Unity",
+            "ros_msg_type": "std_msgs/String",
+            "unity_msg_class": "StdMsgs.String",
+            "description": "Acknowledgement feedback for /vr/dashboard_cmd and /vr/set_speed.",
+            "fields": {
+                "data": "string — 'OK:<cmd>' on success, 'ERROR:<reason>' on failure"
+            },
+            "examples": [
+                "OK:enable  → robot enabled successfully",
+                "OK:speed=50 → speed factor set to 50%",
+                "ERROR:Robot disconnected — cannot execute: enable"
+            ]
         }
     ],
     "unity_setup": {
@@ -280,7 +326,9 @@
             "/unity/joint_cmd",
             "/vr/suction_cmd",
             "/mg400/light_cmd",
-            "/teleop/unity_pong"
+            "/teleop/unity_pong",
+            "/vr/dashboard_cmd",
+            "/vr/set_speed"
         ],
         "unity_subscriber_topics": [
             "/joint_states",
@@ -294,7 +342,8 @@
             "/mg400/error_status",
             "/mg400/do_status",
             "/mg400/haptic_feedback",
-            "/teleop/ros_ping"
+            "/teleop/ros_ping",
+            "/mg400/dashboard_response"
         ]
     },
     "ros_launch": {

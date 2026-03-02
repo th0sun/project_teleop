@@ -201,6 +201,9 @@ class TeleopNode(Node):
         self.pub_robot_mode = self.create_publisher(Int32, motion_config.ROBOT_MODE_TOPIC, 10)
         self.pub_error_status = self.create_publisher(Int32, motion_config.ERROR_STATUS_TOPIC, 10)
         
+        # Dashboard Response (VR confirmation feedback)
+        self.pub_dashboard_resp = self.create_publisher(String, "/mg400/dashboard_response", 10)
+
         # Tool Vector Publishers (XYZ Reading)
         self.pub_tool_actual = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_actual", 10)
         self.pub_tool_target = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_target", 10)
@@ -227,6 +230,16 @@ class TeleopNode(Node):
             Int32MultiArray, LIGHT_TOPIC, self._light_callback, 10
         )
         
+        # === VR Dashboard Control (Unity → ROS) ===
+        # Allows Unity/VR headset to trigger all dashboard commands the way
+        # the keyboard interactive handler does. Command strings are the same.
+        self.sub_dashboard_cmd = self.create_subscription(
+            String, "/vr/dashboard_cmd", self._dashboard_cmd_callback, 10
+        )
+        self.sub_set_speed = self.create_subscription(
+            Int32, "/vr/set_speed", self._set_speed_callback, 10
+        )
+
         # 3. Connect to Robot
         if not self.connection.connect():
             self.get_logger().error("Failed to connect to robot")
@@ -489,6 +502,95 @@ class TeleopNode(Node):
                 self.sender.set_digital_output(port, state)
             else:
                 self.get_logger().warn(f"⚠️ Cannot set light port {port}; Robot disconnected.")
+    
+    # ────────────────────────────────────────────────────
+    # 🎮 VR DASHBOARD CONTROL CALLBACKS
+    # ────────────────────────────────────────────────────
+    
+    # Maps Unity string commands to robot TCP command strings
+    _DASHBOARD_CMD_MAP = {
+        "enable":       "EnableRobot()",
+        "disable":      "DisableRobot()",
+        "clear_error":  "ClearError()",
+        "reset":        "ResetRobot()",
+        "estop":        "EmergencyStop()",
+        "pause":        "Pause()",
+        "continue":     "Continue()",
+    }
+
+    def _dashboard_cmd_callback(self, msg):
+        """
+        Unity/VR Dashboard Command Handler.
+        Accepts: enable | disable | clear_error | reset | estop | pause | continue
+        Topic: /vr/dashboard_cmd  (std_msgs/String)
+        Feedback: /mg400/dashboard_response  (std_msgs/String)
+        """
+        cmd_key = msg.data.strip().lower()
+        
+        robot_cmd = self._DASHBOARD_CMD_MAP.get(cmd_key)
+        if robot_cmd is None:
+            err = f"Unknown dashboard command from VR: '{cmd_key}'. Valid: {list(self._DASHBOARD_CMD_MAP.keys())}"
+            self.get_logger().warn(err)
+            resp = String()
+            resp.data = f"ERROR:{err}"
+            self.pub_dashboard_resp.publish(resp)
+            return
+
+        if not self.connection.connected:
+            err = f"Robot disconnected — cannot execute: {cmd_key}"
+            self.get_logger().warn(f"⚠️ {err}")
+            resp = String()
+            resp.data = f"ERROR:{err}"
+            self.pub_dashboard_resp.publish(resp)
+            return
+
+        # Emergency stop is a special case — warn loudly
+        if cmd_key == "estop":
+            self.get_logger().warn(f"🚨 EMERGENCY STOP triggered from VR!")
+        
+        success = self.connection.send_dashboard_cmd(robot_cmd)
+        
+        resp = String()
+        if success:
+            self.get_logger().info(f"✅ [VR] {cmd_key} → {robot_cmd} OK")
+            resp.data = f"OK:{cmd_key}"
+        else:
+            self.get_logger().error(f"❌ [VR] {cmd_key} → {robot_cmd} FAILED")
+            resp.data = f"ERROR:{cmd_key} failed"
+        self.pub_dashboard_resp.publish(resp)
+
+    def _set_speed_callback(self, msg):
+        """
+        Unity/VR Speed Factor Control.
+        Sets SpeedFactor globally (0–100). All subsequent JointMovJ commands use this.
+        Topic: /vr/set_speed  (std_msgs/Int32)
+        Feedback: /mg400/dashboard_response  (std_msgs/String)
+        """
+        speed = int(msg.data)
+        if not (0 <= speed <= 100):
+            err = f"Speed out of range: {speed} (must be 0-100)"
+            self.get_logger().warn(f"⚠️ {err}")
+            resp = String()
+            resp.data = f"ERROR:{err}"
+            self.pub_dashboard_resp.publish(resp)
+            return
+
+        if not self.connection.connected:
+            self.get_logger().warn("⚠️ Robot disconnected — cannot set speed.")
+            return
+
+        robot_cmd = f"SpeedFactor({speed})"
+        success = self.connection.send_dashboard_cmd(robot_cmd)
+        
+        resp = String()
+        if success:
+            self.get_logger().info(f"🚀 [VR] SpeedFactor set to {speed}%")
+            resp.data = f"OK:speed={speed}"
+        else:
+            self.get_logger().error(f"❌ [VR] Failed to set SpeedFactor({speed})")
+            resp.data = f"ERROR:speed_set failed"
+        self.pub_dashboard_resp.publish(resp)
+
     
     def _control_loop(self):
         """
