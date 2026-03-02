@@ -664,9 +664,11 @@ class MonitorGUI:
             
             if len(a) > 0:
                 all_vals = np.concatenate([u, p, s, a])
-                mn, mx = np.min(all_vals), np.max(all_vals)
-                pad = max(2.0, (mx - mn) * 0.15)
-                ax.set_ylim(mn - pad, mx + pad)
+                # Use nanmin/nanmax because 's' (sent) contains np.nan
+                mn, mx = np.nanmin(all_vals), np.nanmax(all_vals)
+                if not np.isnan(mn) and not np.isnan(mx):
+                    pad = max(2.0, (mx - mn) * 0.15)
+                    ax.set_ylim(mn - pad, mx + pad)
             
             all_lines.extend([l_unity, l_pred, l_sent, l_actual])
         
