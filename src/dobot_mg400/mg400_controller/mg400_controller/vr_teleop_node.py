@@ -127,9 +127,11 @@ class TeleopNode(Node):
         self.stop_event = threading.Event()
         
         self.connection = RobotConnection(self.get_logger())
+        import mg400_controller.common.config.robot_config as cfg
+        
         # 1. Initialize logic modules
         self.validator = JointValidator(JOINT_LIMITS, ELBOW_ANGLE_LIMIT, self.get_logger())
-        self.planner = MotionPlanner(CONTROL_MODE, self.get_logger())
+        self.planner = MotionPlanner(cfg.CONTROL_MODE, self.get_logger())
         
         # Teleop Controller (The Brain)
         self.controller = TeleopController(self.validator, self.planner, self.get_logger())
@@ -139,10 +141,10 @@ class TeleopNode(Node):
         # ⚠️ Experimental modes BYPASS TeleopController + MotionPlanner + TargetPredictor.
         #    They receive raw validated targets and format commands directly.
         self._experimental_strategy = None
-        if LOGIC_MODE != "default":
+        if cfg.LOGIC_MODE != "default":
             from mg400_controller.common.logic.experimental_logic import ExperimentalStrategy
             self._experimental_strategy = ExperimentalStrategy(
-                LOGIC_MODE, CONTROL_MODE, self.get_logger()
+                cfg.LOGIC_MODE, cfg.CONTROL_MODE, self.get_logger()
             )
             self.get_logger().info(f"🧪 EXPERIMENTAL MODE: {self._experimental_strategy.mode_name} (bypasses Controller/Planner/Predictor)")
         
