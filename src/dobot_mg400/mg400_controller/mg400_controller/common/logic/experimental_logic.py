@@ -13,9 +13,9 @@ TeleopController and MotionPlanner are NOT modified.
 
 Usage from vr_teleop_node.py:
     if LOGIC_MODE != "default":
-        strategy = ExperimentalStrategy(LOGIC_MODE, planner, logger)
+        strategy = ExperimentalStrategy(LOGIC_MODE, CONTROL_MODE, logger)
         ...
-        should_send, cmd_str, q_safe, info = strategy.process(latest_target, q_current, now)
+        should_send, cmd_str, q_safe, info = strategy.process(raw_target, q_current, now)
 
 After A/B testing, the winning strategy should be merged into
 TeleopController and this file DELETED.
@@ -507,11 +507,15 @@ class _M15Logic:
 
 class ExperimentalStrategy:
     """
-    Wraps M11/M14/M15 logic into a single interface compatible
+    Wraps M8/M11/M14/M15 logic into a single interface compatible
     with the main control loop in vr_teleop_node.py.
 
+    ⚠️ BYPASS MODE: This class formats commands DIRECTLY without
+    going through TeleopController or MotionPlanner.  The only
+    shared utility is JointValidator (called upstream in the node).
+
     Usage:
-        strategy = ExperimentalStrategy("m11", planner, logger)
+        strategy = ExperimentalStrategy("m11", control_mode, logger)
         should_send, cmd_str, q_rad, info = strategy.process(
             q_target_rad, q_current_rad, now
         )
@@ -524,18 +528,32 @@ class ExperimentalStrategy:
         "m15": ("M15_Sharp", _M15Logic),
     }
 
-    def __init__(self, mode_key: str, planner, logger):
+    def __init__(self, mode_key: str, control_mode: str, logger):
         if mode_key not in self.MODE_MAP:
             raise ValueError(f"Unknown experimental mode: {mode_key!r}. "
                              f"Use one of: {list(self.MODE_MAP.keys())}")
         self.mode_name, logic_cls = self.MODE_MAP[mode_key]
         self._logic = logic_cls()
-        self._planner = planner   # MotionPlanner — for format_command()
+        self._control_mode = control_mode  # "jointmovj" / "movj" / "movl"
         self._logger = logger
         self._cmd_times: deque = deque(maxlen=60)
 
     def reset(self):
         self._logic.reset()
+
+    @staticmethod
+    def _format_cmd(q_rad: np.ndarray, control_mode: str,
+                    speed: int = 100, acc: int = 100, cp: int = 100) -> str:
+        """Build TCP command string directly — no MotionPlanner needed."""
+        q_deg = np.degrees(q_rad[:4])
+        args = (f"{q_deg[0]:.4f},{q_deg[1]:.4f},"
+                f"{q_deg[2]:.4f},{q_deg[3]:.4f},"
+                f"SpeedJ={speed},AccJ={acc},CP={cp}")
+        if control_mode == "movj":
+            return f"MovJ({args})"
+        elif control_mode == "movl":
+            return f"MovL({args})"
+        return f"JointMovJ({args})"  # default: jointmovj
 
     def process(self, q_target_rad: np.ndarray, q_current_rad: np.ndarray,
                 now: float) -> Tuple[bool, Optional[str], Optional[np.ndarray], str]:
@@ -543,22 +561,23 @@ class ExperimentalStrategy:
         Run one cycle of the experimental logic.
 
         Args:
-            q_target_rad: Latest target joints in radians (4,)
+            q_target_rad: Latest RAW validated target in radians (4,)
+                          (NOT Kalman-predicted — bypasses TargetPredictor)
             q_current_rad: Current robot joints in radians (4,)
             now: Current time (seconds)
 
         Returns:
             (should_send, cmd_string, q_safe_rad, reason)
-            cmd_string is a ready-to-send TCP command string (e.g. "JointMovJ(...)")
-            q_safe_rad is the actual joint target that was sent (may differ from input due to clamping)
+            cmd_string is a ready-to-send TCP command string
+            q_safe_rad is the actual joint target (may differ due to clamping)
         """
         should_send, cmd_rad, reason = self._logic.process(q_target_rad, q_current_rad, now)
 
         if not should_send or cmd_rad is None:
             return False, None, None, reason
 
-        # Format using the existing planner (preserves control_mode setting)
-        cmd_str = self._planner.format_command(cmd_rad, speed_percent=100)
+        # Format command DIRECTLY (bypass MotionPlanner entirely)
+        cmd_str = self._format_cmd(cmd_rad, self._control_mode)
 
         # Hz tracking
         self._cmd_times.append(now)

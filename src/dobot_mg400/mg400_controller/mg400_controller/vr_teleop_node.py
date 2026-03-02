@@ -136,15 +136,18 @@ class TeleopNode(Node):
         self.predictor = TargetPredictor(default_dt=0.02, prediction_horizon_sec=0.08, logger=self.get_logger())
         
         # 🧪 Experimental Logic (TEMPORARY — if LOGIC_MODE != "default")
+        # ⚠️ Experimental modes BYPASS TeleopController + MotionPlanner + TargetPredictor.
+        #    They receive raw validated targets and format commands directly.
         self._experimental_strategy = None
         if LOGIC_MODE != "default":
             from mg400_controller.common.logic.experimental_logic import ExperimentalStrategy
             self._experimental_strategy = ExperimentalStrategy(
-                LOGIC_MODE, self.planner, self.get_logger()
+                LOGIC_MODE, CONTROL_MODE, self.get_logger()
             )
-            self.get_logger().info(f"🧪 EXPERIMENTAL MODE: {self._experimental_strategy.mode_name}")
+            self.get_logger().info(f"🧪 EXPERIMENTAL MODE: {self._experimental_strategy.mode_name} (bypasses Controller/Planner/Predictor)")
         
         self.latest_target = np.zeros(4)
+        self.latest_raw_target = np.zeros(4)  # Raw validated (no Kalman prediction)
         self.current_cmd_target = np.zeros(4)
         
         # 1. Initialize logic modules
@@ -430,6 +433,7 @@ class TeleopNode(Node):
             ]))
                 
             # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
+            self.latest_raw_target = q_safe              # Raw validated (before prediction)
             self.latest_target = predicted_q
             self.target_recv_time = now_ros_sec          # T2: ROS receive time
             self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
@@ -633,10 +637,11 @@ class TeleopNode(Node):
             # 🧠 TELEOP CONTROLLER DECISION
             # ---------------------------------------------------------
             
-            # 🧪 EXPERIMENTAL PATH (only active if user selected m11/m14/m15)
+            # 🧪 EXPERIMENTAL PATH (only active if user selected m11/m14/m15/m8_raw)
+            # Uses RAW validated target — bypasses Kalman predictor entirely
             if self._experimental_strategy is not None:
                 should_send, cmd_str, q_safe, exp_reason = self._experimental_strategy.process(
-                    self.latest_target, q_current, now
+                    self.latest_raw_target, q_current, now
                 )
                 if should_send and cmd_str:
                     t3_cmd_send = time.time()
