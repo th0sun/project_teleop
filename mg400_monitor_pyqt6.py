@@ -18,9 +18,9 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
     QSplitter, QScrollArea, QTextEdit, QGridLayout, QTabWidget,
-    QHBoxLayout, QVBoxLayout, QSizePolicy,
+    QHBoxLayout, QVBoxLayout, QSizePolicy, QLineEdit,
 )
-from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QThread, QPointF
+from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QThread, QPointF, QSize
 from PyQt6.QtGui     import (
     QFont, QFontDatabase, QColor, QPalette, QTextCursor, QIcon,
     QPainter, QPainterPath, QPen, QBrush
@@ -343,6 +343,11 @@ class RobotData:
         self.last_tgt_t   = 0.0
         self.last_act_t   = 0.0
         self.bridge_latency_ms = 0.0
+        # real-time log queue (thread-safe)
+        self.log_queue  = []
+        self.log_lock   = threading.Lock()
+        self._prev_mode = -1
+        self._prev_err  = -1
         # sim
         self._sim_t       = 0.0
 
@@ -353,6 +358,12 @@ class RobotData:
             "ROBOT MODE": 0, "ROBOT ERROR": 0, "DIGITAL IO": 0
         }
         self.flow_hz = {k: 0.0 for k in self.msg_counts}
+
+    def push_log(self, tag: str, msg: str):
+        with self.log_lock:
+            self.log_queue.append((tag, msg))
+            if len(self.log_queue) > 400:
+                self.log_queue = self.log_queue[-300:]
 
     def tick_sim(self):
         """No longer simulating. Only true ROS data is used."""
@@ -481,6 +492,9 @@ class UdpBridgeNode:
                 if self._bridge_ip is None:
                     self._bridge_ip = addr[0]
                     print(f"[UDP Bridge] Bridge auto-discovered at {self._bridge_ip}")
+                    self.data.push_log("SYS", f"UDP Bridge connected — {self._bridge_ip}")
+                if not self._connected:
+                    self.data.push_log("INFO", f"UDP stream resumed from {addr[0]}")
 
                 pkt = json.loads(raw.decode())
                 d   = self.data
@@ -507,8 +521,16 @@ class UdpBridgeNode:
                 d.flange     = pkt.get("flange",     d.flange)
                 d.tool_idx   = pkt.get("tool_idx",   d.tool_idx)
                 d.do_status  = pkt.get("do_status",  d.do_status)
-                d.robot_mode = pkt.get("robot_mode", d.robot_mode)
-                d.error_stat = pkt.get("error_stat", d.error_stat)
+                new_mode = pkt.get("robot_mode", d.robot_mode)
+                new_err  = pkt.get("error_stat",  d.error_stat)
+                if new_mode != d.robot_mode:
+                    d.push_log("INFO", f"Robot mode \u2192 {MODE_NAMES.get(new_mode, str(new_mode))}")
+                if new_err != d.error_stat and new_err != 0:
+                    d.push_log("WARN", f"Error code changed: 0x{new_err:02X}")
+                elif new_err != d.error_stat and new_err == 0:
+                    d.push_log("INFO", "Error cleared")
+                d.robot_mode = new_mode
+                d.error_stat = new_err
                 d.last_act_t = self._last_rx
                 d.last_tgt_t = self._last_rx
 
@@ -520,6 +542,7 @@ class UdpBridgeNode:
             except socket.timeout:
                 if self._connected and time.time() - self._last_rx > 3.0:
                     self._connected = False
+                    self.data.push_log("WARN", "UDP Bridge lost — no data for 3 s")
                     print("[UDP Bridge] Connection lost (no data for 3 s)")
             except Exception as e:
                 print(f"[UDP Bridge] RX error: {e}")
@@ -658,125 +681,181 @@ def _set_prop(widget, prop, val):
     widget.setProperty(prop, val)
     widget.style().unpolish(widget)
     widget.style().polish(widget)
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  MAIN WINDOW
 # ══════════════════════════════════════════════════════════════════════════════
 class FlowCanvas(QWidget):
+    _ARROW_SPACING = 28.0   # px between arrowheads
+    _ARROW_LEN     = 7.0
+    _ARROW_WID     = 3.8
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.nodes = {}
-        self.edges = []
-        self.anim_offset = 0.0
+        self.nodes      = {}
+        self.edges      = []
+        self.anim_offset= 0.0
+        self._pcache    = {}   # edge_idx → (pts, arc, p0,c1,c2,p3, ex,ey,etx,ety)
+        self.frequencies= {}
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self._animate)
+        self.timer.timeout.connect(self._tick)
         self.timer.start(30)
-        self.frequencies = {}
+        self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
 
-    def _animate(self):
+    def _tick(self):
         self.anim_offset -= 1.5
         self.update()
 
+    # ── Bezier math ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _sample(p0, c1, c2, p3, n=70):
+        pts = []
+        for i in range(n + 1):
+            t = i / n; mt = 1 - t
+            pts.append((
+                mt**3*p0.x() + 3*mt**2*t*c1.x() + 3*mt*t**2*c2.x() + t**3*p3.x(),
+                mt**3*p0.y() + 3*mt**2*t*c1.y() + 3*mt*t**2*c2.y() + t**3*p3.y(),
+            ))
+        arc = [0.0]
+        for i in range(1, len(pts)):
+            dx = pts[i][0]-pts[i-1][0]; dy = pts[i][1]-pts[i-1][1]
+            arc.append(arc[-1] + math.sqrt(dx*dx + dy*dy))
+        return pts, arc
+
+    @staticmethod
+    def _at(pts, arc, s):
+        total = arc[-1]
+        if total < 1: return pts[0][0], pts[0][1], 0.0, 1.0
+        s = s % total
+        for i in range(1, len(arc)):
+            if arc[i] >= s:
+                f  = (s - arc[i-1]) / max(1e-9, arc[i] - arc[i-1])
+                x  = pts[i-1][0] + f*(pts[i][0]-pts[i-1][0])
+                y  = pts[i-1][1] + f*(pts[i][1]-pts[i-1][1])
+                dx = pts[i][0]-pts[i-1][0]; dy = pts[i][1]-pts[i-1][1]
+                tl = math.sqrt(dx*dx+dy*dy) or 1
+                return x, y, dx/tl, dy/tl
+        p = pts[-1]; return p[0], p[1], 0.0, 1.0
+
+    def _build_cache(self, idx, p1_id, p2_id):
+        n1, n2 = self.nodes[p1_id], self.nodes[p2_id]
+        w, h   = self.width(), self.height()
+        x1, y1 = n1["rx"]*w, n1["ry"]*h
+        x2, y2 = n2["rx"]*w, n2["ry"]*h
+        dx, dy = x2-x1, y2-y1
+        if abs(dx) > abs(dy):
+            sx = x1+n1["w"]/2 if dx>0 else x1-n1["w"]/2
+            ex = x2-n2["w"]/2 if dx>0 else x2+n2["w"]/2
+            sy, ey = y1, y2
+            c1 = QPointF(sx+dx/2.5, sy); c2 = QPointF(ex-dx/2.5, ey)
+        else:
+            sy = y1+n1["h"]/2 if dy>0 else y1-n1["h"]/2
+            ey = y2-n2["h"]/2 if dy>0 else y2+n2["h"]/2
+            sx, ex = x1, x2
+            c1 = QPointF(sx, sy+dy/2.5); c2 = QPointF(ex, ey-dy/2.5)
+        p0 = QPointF(sx, sy); p3 = QPointF(ex, ey)
+        pts, arc = self._sample(p0, c1, c2, p3)
+        etx = ex-c2.x(); ety = ey-c2.y()
+        el  = math.sqrt(etx*etx+ety*ety) or 1
+        self._pcache[idx] = (pts, arc, p0, c1, c2, p3, ex, ey, etx/el, ety/el)
+
+    # ── Node/edge management ───────────────────────────────────────────────────
     def add_node(self, id_str, widget, rel_x, rel_y, w, h):
         widget.setParent(self)
-        self.nodes[id_str] = {
-            "widget": widget, "rx": rel_x, "ry": rel_y, "w": w, "h": h
-        }
+        self.nodes[id_str] = {"widget": widget, "rx": rel_x, "ry": rel_y, "w": w, "h": h}
+        self._pcache.clear()
 
     def add_edge(self, p1_id, p2_id, color="#ffffff", key=None):
         self.edges.append((p1_id, p2_id, color, key))
+        self._pcache.clear()
 
     def set_freq(self, key, hz):
         self.frequencies[key] = hz
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        self._pcache.clear()
         w, h = self.width(), self.height()
-        for nid, n in self.nodes.items():
-            nx = max(4, min(int(n["rx"] * w - n["w"]/2), w - n["w"] - 4))
-            ny = max(4, min(int(n["ry"] * h - n["h"]/2), h - n["h"] - 4))
+        for n in self.nodes.values():
+            nx = max(4, min(int(n["rx"]*w - n["w"]/2), w-n["w"]-4))
+            ny = max(4, min(int(n["ry"]*h - n["h"]/2), h-n["h"]-4))
             n["widget"].setGeometry(nx, ny, n["w"], n["h"])
+
+    def wheelEvent(self, e):
+        """Ctrl+scroll = zoom (resize canvas); plain scroll = pass to QScrollArea."""
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            factor  = 1.12 if e.angleDelta().y() > 0 else (1/1.12)
+            new_w   = max(900,  min(3200, int(self.width()  * factor)))
+            new_h   = max(600,  min(2200, int(self.height() * factor)))
+            self.setFixedSize(QSize(new_w, new_h))
+            e.accept()
+        else:
+            e.ignore()   # let scroll area handle plain scroll
+
+    # ── Drawing helpers ────────────────────────────────────────────────────────
+    def _arrowhead(self, painter, ax, ay, atx, aty, al, aw):
+        px = -aty; py = atx
+        tip = QPointF(ax + atx*al*0.5, ay + aty*al*0.5)
+        bl  = QPointF(ax - atx*al*0.5 - px*aw, ay - aty*al*0.5 - py*aw)
+        br  = QPointF(ax - atx*al*0.5 + px*aw, ay - aty*al*0.5 + py*aw)
+        p   = QPainterPath()
+        p.moveTo(tip); p.lineTo(bl); p.lineTo(br); p.closeSubpath()
+        painter.drawPath(p)
 
     def paintEvent(self, e):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
+        AL = self._ARROW_LEN; AW = self._ARROW_WID; SP = self._ARROW_SPACING
 
-        paths = []
-        for p1_id, p2_id, color, key in self.edges:
+        for idx, (p1_id, p2_id, color, key) in enumerate(self.edges):
             if p1_id not in self.nodes or p2_id not in self.nodes:
                 continue
-            n1, n2 = self.nodes[p1_id], self.nodes[p2_id]
-            x1, y1 = n1["rx"] * w, n1["ry"] * h
-            x2, y2 = n2["rx"] * w, n2["ry"] * h
-            dx, dy = x2 - x1, y2 - y1
-
-            if abs(dx) > abs(dy):
-                start_x = x1 + n1["w"]/2 if dx > 0 else x1 - n1["w"]/2
-                end_x   = x2 - n2["w"]/2 if dx > 0 else x2 + n2["w"]/2
-                start_y, end_y = y1, y2
-                c1 = QPointF(start_x + dx/2.5, start_y)
-                c2 = QPointF(end_x   - dx/2.5, end_y)
-            else:
-                start_y = y1 + n1["h"]/2 if dy > 0 else y1 - n1["h"]/2
-                end_y   = y2 - n2["h"]/2 if dy > 0 else y2 + n2["h"]/2
-                start_x, end_x = x1, x2
-                c1 = QPointF(start_x, start_y + dy/2.5)
-                c2 = QPointF(end_x,   end_y   - dy/2.5)
-
-            # Tangent at endpoint for arrowhead orientation
-            tx = end_x - c2.x(); ty = end_y - c2.y()
-            tlen = math.sqrt(tx*tx + ty*ty) or 1.0
-            tx /= tlen; ty /= tlen
-
-            path = QPainterPath()
-            path.moveTo(start_x, start_y)
-            path.cubicTo(c1, c2, QPointF(end_x, end_y))
-            paths.append((path, color, key, end_x, end_y, tx, ty))
-
-        for path, color, key, ex, ey, tx, ty in paths:
+            if idx not in self._pcache:
+                self._build_cache(idx, p1_id, p2_id)
+            pts, arc, p0, c1, c2, p3, ex, ey, etx, ety = self._pcache[idx]
+            total  = arc[-1]
             freq   = self.frequencies.get(key, 0.0)
             active = freq > 0.3
 
-            # ── Base line: thin solid when active, thin dashed when idle ─────
+            # ── Base Bezier curve ──────────────────────────────────────────────
+            bpath = QPainterPath()
+            bpath.moveTo(p0); bpath.cubicTo(c1, c2, p3)
             c_base = QColor(color)
-            c_base.setAlpha(50 if active else 30)
-            pen_base = QPen(c_base, 1.5)
+            c_base.setAlpha(50 if active else 28)
+            pen = QPen(c_base, 1.5)
             if not active:
-                pen_base.setStyle(Qt.PenStyle.CustomDashLine)
-                pen_base.setDashPattern([4.0, 6.0])
-            painter.setPen(pen_base)
+                pen.setStyle(Qt.PenStyle.CustomDashLine)
+                pen.setDashPattern([4.0, 6.0])
+            painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
+            painter.drawPath(bpath)
 
-            # ── Animated chevrons (‹ ‹ ‹) when data flows ────────────────────
-            if active:
-                speed = min(freq / 8.0, 5.0) + 1.5
-                c_flow = QColor(color)
-                c_flow.setAlpha(215)
-                pen_flow = QPen(c_flow, 2.2)
-                pen_flow.setStyle(Qt.PenStyle.CustomDashLine)
-                pen_flow.setDashPattern([3.5, 11.0])
-                pen_flow.setDashOffset(self.anim_offset * speed)
-                painter.setPen(pen_flow)
-                painter.drawPath(path)
-
-            # ── Filled arrowhead at endpoint ──────────────────────────────────
-            alen = 9.0; awid = 4.5
-            px = -ty; py = tx
-            tip    = QPointF(ex, ey)
-            base_l = QPointF(ex - tx*alen - px*awid, ey - ty*alen - py*awid)
-            base_r = QPointF(ex - tx*alen + px*awid, ey - ty*alen + py*awid)
-            arrow = QPainterPath()
-            arrow.moveTo(tip)
-            arrow.lineTo(base_l)
-            arrow.lineTo(base_r)
-            arrow.closeSubpath()
-            c_arr = QColor(color)
-            c_arr.setAlpha(200 if active else 70)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(c_arr))
-            painter.drawPath(arrow)
+
+            # ── Animated arrowheads along path ─────────────────────────────────
+            if active and total > 5:
+                speed   = min(freq / 8.0, 5.0) + 1.5
+                c_flow  = QColor(color); c_flow.setAlpha(230)
+                painter.setBrush(QBrush(c_flow))
+                offset  = (-self.anim_offset * speed) % SP
+                n_arr   = int(total / SP) + 2
+                for ni in range(n_arr):
+                    s = offset + ni * SP
+                    if s > total + SP: break
+                    ax, ay, atx, aty = self._at(pts, arc, s)
+                    self._arrowhead(painter, ax, ay, atx, aty, AL, AW)
+            else:
+                # Static dim arrows to show direction even on idle lines
+                c_dim = QColor(color); c_dim.setAlpha(55)
+                painter.setBrush(QBrush(c_dim))
+                n_s = max(1, int(total / 55))
+                for ni in range(n_s):
+                    s = total * (ni + 0.5) / n_s
+                    ax, ay, atx, aty = self._at(pts, arc, s)
+                    self._arrowhead(painter, ax, ay, atx, aty, AL*0.8, AW*0.8)
+
+            # ── Terminal arrowhead at endpoint ─────────────────────────────────
+            c_tip = QColor(color); c_tip.setAlpha(220 if active else 70)
+            painter.setBrush(QBrush(c_tip))
+            self._arrowhead(painter, ex, ey, etx, ety, 11.0, 5.5)
 
 
 class MonitorWindow(QMainWindow):
@@ -887,7 +966,19 @@ class MonitorWindow(QMainWindow):
         self._lbl_ros.setObjectName("status_pill")
         self._lbl_ros.setFont(font(FONT_MONO, 10))
         self._lbl_ros.setStyleSheet(f"color:{MUTED}; background:rgba(100,116,139,0.1); border:1px solid rgba(100,116,139,0.3); border-radius:4px; padding:3px 10px;")
-        lay.addWidget(self._lbl_ros); lay.addSpacing(8)
+        lay.addWidget(self._lbl_ros); lay.addSpacing(6)
+
+        # UDP Bridge IP input (visible only in UDP mode)
+        self._ip_edit = QLineEdit()
+        self._ip_edit.setPlaceholderText("Bridge IP…")
+        self._ip_edit.setFixedWidth(110)
+        self._ip_edit.setFont(font(FONT_MONO, 9))
+        self._ip_edit.setStyleSheet(
+            f"color:{TEXT}; background:#1e293b; border:1px solid {BORDER}; "
+            f"border-radius:4px; padding:2px 6px;"
+        )
+        self._ip_edit.editingFinished.connect(self._on_ip_edited)
+        lay.addWidget(self._ip_edit); lay.addSpacing(8)
 
         # Uptime
         self._lbl_uptime = QLabel("⏱ 00:00:00")
@@ -956,13 +1047,13 @@ class MonitorWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet(f"background:{BG}; border:none;")
-        scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         self.flow_canvas = FlowCanvas()
         self.flow_canvas.setStyleSheet(f"background:{BG};")
-        self.flow_canvas.setMinimumSize(1200, 750)
+        self.flow_canvas.setFixedSize(QSize(1480, 920))   # fixed canvas; Ctrl+scroll to zoom
+        scroll.setWidgetResizable(False)
         scroll.setWidget(self.flow_canvas)
         parent_lay.addWidget(scroll)
         
@@ -1412,7 +1503,7 @@ class MonitorWindow(QMainWindow):
             
             lu, = ax.plot([], [], color=COL_UNITY,  lw=2.0, ls="-", alpha=0.85)
             lp, = ax.plot([], [], color=COL_PRED,   lw=2.0, ls="--", alpha=0.85)
-            ls, = ax.plot([], [], color=COL_SENT,   lw=0, marker='o', ms=4.5, alpha=0.9)
+            ls, = ax.plot([], [], color=COL_SENT,   lw=0, marker='o', ms=2.5, alpha=0.85)
             la, = ax.plot([], [], color=COL_ACTUAL, lw=2.0)
             
             self._axes_j.append(ax)
@@ -1516,6 +1607,9 @@ class MonitorWindow(QMainWindow):
         now = time.time()
         rel = now - self.g_start
 
+        # Capture fresh flag BEFORE the loop resets it (also used for 3D snt_trail)
+        had_fresh = any(d.sent_fresh)
+
         self.t_buf.append(rel)
         for i in range(4):
             self.u_buf[i].append(d.unity[i])
@@ -1552,7 +1646,7 @@ class MonitorWindow(QMainWindow):
         # 3D
         tgt = d.unity_xyz[:3]; act = d.tool_act[:3]
         self.tgt_trail.append(tuple(tgt)); self.act_trail.append(tuple(act))
-        if any(d.sent_fresh):
+        if had_fresh:
             self.snt_trail.append(tuple(d.tool_tgt[:3]))
         if len(self.tgt_trail) >= 2:
             trail_t = list(self.tgt_trail); trail_a = list(self.act_trail)
@@ -1746,47 +1840,55 @@ class MonitorWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     #  LOG TERMINAL
     # ──────────────────────────────────────────────────────────────────────────
-    _LOG_MSGS = [
-        lambda a,u,t,e: ("DATA",  f"J1=<b>{a[0]:+.3f}°</b>  J2=<b>{a[1]:+.3f}°</b>  J3=<b>{a[2]:+.3f}°</b>  J4=<b>{a[3]:+.3f}°</b>"),
-        lambda a,u,t,e: ("DATA",  f"Target X=<b>{u[0]:.1f}</b>  Y=<b>{u[1]:.1f}</b>  Z=<b>{u[2]:.1f}</b> mm"),
-        lambda a,u,t,e: ("DATA",  f"TCP    X=<b>{t[0]:.1f}</b>  Y=<b>{t[1]:.1f}</b>  Z=<b>{t[2]:.1f}</b> mm"),
-        lambda a,u,t,e: ("INFO",  "Teleop command received from <b>Unity</b> controller"),
-        lambda a,u,t,e: ("SYS",   "Session logger flush — <b>joints_tracking.csv</b>"),
-        lambda a,u,t,e: ("DATA",  f"Total |Δ| joints: <b>{e:.3f}°</b>"),
-        lambda a,u,t,e: ("INFO",  "FK solved — flange position updated"),
-        lambda a,u,t,e: ("SYS",   "ROS2 spin tick — <b>/joint_states</b> callback"),
-        lambda a,u,t,e: ("DATA",  f"3D dist err: <b>{math.sqrt(sum((t[i]-u[i])**2 for i in range(3))):.2f} mm</b>"),
-        lambda a,u,t,e: ("WARN",  "High latency detected: cmd age > <b>80ms</b>"),
-        lambda a,u,t,e: ("INFO",  "Execution state: <b>ARRIVED</b> — motion complete"),
-        lambda a,u,t,e: ("SYS",   "xyz_tracking.csv — <b>row appended</b>"),
-    ]
-
     _TAG_COLORS = {"INFO":"#4ade80","WARN":"#fbbf24","ERR":"#f87171","DATA":"#38bdf8","SYS":"#c084fc"}
+    _last_telem_log = 0.0   # throttle periodic telemetry rows to 1 Hz
 
     def _append_log(self, act, xyz_u, xyz_t, total_err):
-        try:
-            tag, msg = self._LOG_MSGS[self._log_idx % len(self._LOG_MSGS)](act, xyz_u, xyz_t, total_err)
-        except Exception:
-            tag, msg = "SYS", "…"
-        self._log_idx += 1
+        """Drain real log_queue events; append periodic telemetry row at 1 Hz."""
+        d    = self.data
+        now  = time.time()
+        rows = []
+
+        # 1. Drain queued real events (mode changes, errors, connect/disconnect)
+        with d.log_lock:
+            if d.log_queue:
+                rows = d.log_queue[:]
+                d.log_queue.clear()
+
+        # 2. Periodic telemetry summary at ~1 Hz
+        if now - self._last_telem_log >= 1.0:
+            self._last_telem_log = now
+            dist = math.sqrt(sum((xyz_t[i]-xyz_u[i])**2 for i in range(3)))
+            lat  = d.bridge_latency_ms
+            hz_a = d.flow_hz.get("ACTUAL FEEDBACK", 0.0)
+            hz_s = d.flow_hz.get("SENT COMMAND", 0.0)
+            rows.append(("DATA",
+                f"J=[<b>{act[0]:+.1f} {act[1]:+.1f} {act[2]:+.1f} {act[3]:+.1f}</b>]° "
+                f"3D_err=<b>{dist:.1f}mm</b> "
+                f"lat=<b>{lat:.0f}ms</b> "
+                f"act=<b>{hz_a:.0f}Hz</b> snt=<b>{hz_s:.0f}Hz</b>"
+            ))
+
+        if not rows:
+            return
 
         ts   = datetime.datetime.now().strftime("%H:%M:%S.%f")[:11]
-        tclr = self._TAG_COLORS.get(tag, LOG_GRN)
-
-        html = (
-            f'<span style="color:#2d6a4f;">{ts}</span> '
-            f'<span style="color:{tclr}; font-weight:bold;">[{tag}]</span> '
-            f'<span style="color:#86efac;">{msg}</span><br>'
-        )
+        html_parts = []
+        for tag, msg in rows:
+            tclr = self._TAG_COLORS.get(tag, LOG_GRN)
+            html_parts.append(
+                f'<span style="color:#2d6a4f;">{ts}</span> '
+                f'<span style="color:{tclr}; font-weight:bold;">[{tag}]</span> '
+                f'<span style="color:#86efac;">{msg}</span><br>'
+            )
 
         cur = self._log.textCursor()
         cur.movePosition(QTextCursor.MoveOperation.End)
         self._log.setTextCursor(cur)
-        self._log.insertHtml(html)
+        self._log.insertHtml("".join(html_parts))
 
-        # Trim to 200 lines
         doc = self._log.document()
-        if doc.blockCount() > 210:
+        while doc.blockCount() > 220:
             cur2 = QTextCursor(doc.begin())
             cur2.select(QTextCursor.SelectionType.BlockUnderCursor)
             cur2.removeSelectedText()
@@ -1797,6 +1899,13 @@ class MonitorWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     #  CONTROL CALLBACKS
     # ──────────────────────────────────────────────────────────────────────────
+    def _on_ip_edited(self):
+        """Allow user to override UDP bridge IP from the topbar text field."""
+        ip = self._ip_edit.text().strip()
+        if ip and isinstance(self.ros_node, UdpBridgeNode):
+            self.ros_node._bridge_ip = ip
+            self.data.push_log("SYS", f"Bridge IP manually set to {ip}")
+
     def _toggle_vac(self):
         self.vac_on = not self.vac_on
         if self.ros_node: self.ros_node.send_suction(self.vac_on)

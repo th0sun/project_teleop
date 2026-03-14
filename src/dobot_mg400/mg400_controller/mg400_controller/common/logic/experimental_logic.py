@@ -697,6 +697,16 @@ class _CleanFFLogic:
                 now: float) -> Tuple[bool, Optional[np.ndarray], str]:
 
         # 1. LPF on raw target
+        # Large sudden jump (e.g. Home button → 0,0,0,0): reset filter instantly
+        # so only ONE command is sent, not 2-3 overshooting ones from EMA velocity
+        _JUMP_RESET_RAD = np.radians(15.0)
+        if self._lpf is not None:
+            jump = float(np.max(np.abs(q_target[:4] - self._lpf)))
+            if jump > _JUMP_RESET_RAD:
+                self._lpf    = q_target[:4].copy()
+                self._ema_vel = np.zeros(4)
+                self._prev_tgt = q_target[:4].copy()
+                self._prev_tgt_t = now
         if self._lpf is None:
             self._lpf = q_target[:4].copy()
         else:
