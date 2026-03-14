@@ -35,6 +35,8 @@ class RobotConnection:
             
             # Command Socket (สำหรับส่งคำสั่งเคลื่อนที่)
             self.cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # ปิด Nagle's Algorithm เพื่อไม่ให้ OS ดองแพ็กเกจเล็กๆ แล้วส่งรวบยอด (ลด Jitter)
+            self.cmd_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.cmd_sock.settimeout(SOCKET_TIMEOUT)
             self.cmd_sock.connect((ROBOT_IP, CMD_PORT))
             
@@ -82,6 +84,8 @@ class RobotConnection:
         try:
             self.logger.warn(f"🔄 Reconnecting {port_name.upper()} Socket ({target_port})...")
             new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if port_name == 'cmd':
+                new_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             new_sock.settimeout(SOCKET_TIMEOUT)
             new_sock.connect((ROBOT_IP, target_port))
             
