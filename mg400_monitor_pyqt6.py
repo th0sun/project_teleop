@@ -20,9 +20,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QScrollArea, QTextEdit, QGridLayout, QTabWidget,
     QHBoxLayout, QVBoxLayout, QSizePolicy,
 )
-from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QThread
+from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QThread, QPointF
 from PyQt6.QtGui     import (
     QFont, QFontDatabase, QColor, QPalette, QTextCursor, QIcon,
+    QPainter, QPainterPath, QPen
 )
 from PyQt6.QtWidgets import QScrollBar  # explicit import for log scrollbar
 
@@ -543,6 +544,102 @@ def _set_prop(widget, prop, val):
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN WINDOW
 # ══════════════════════════════════════════════════════════════════════════════
+class FlowCanvas(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.nodes = {}
+        self.edges = []
+        self.anim_offset = 0.0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._animate)
+        self.timer.start(30)
+        self.frequencies = {}
+
+    def _animate(self):
+        self.anim_offset -= 1.5
+        self.update()
+
+    def add_node(self, id_str, widget, rel_x, rel_y, w, h):
+        widget.setParent(self)
+        self.nodes[id_str] = {
+            "widget": widget, "rx": rel_x, "ry": rel_y, "w": w, "h": h
+        }
+
+    def add_edge(self, p1_id, p2_id, color="#ffffff", key=None):
+        self.edges.append((p1_id, p2_id, color, key))
+
+    def set_freq(self, key, hz):
+        self.frequencies[key] = hz
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        w, h = self.width(), self.height()
+        for nid, n in self.nodes.items():
+            nx = int(n["rx"] * w - n["w"]/2)
+            ny = int(n["ry"] * h - n["h"]/2)
+            n["widget"].setGeometry(nx, ny, n["w"], n["h"])
+
+    def paintEvent(self, e):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        
+        paths = []
+        for p1_id, p2_id, color, key in self.edges:
+            if p1_id not in self.nodes or p2_id not in self.nodes:
+                continue
+            n1, n2 = self.nodes[p1_id], self.nodes[p2_id]
+            x1, y1 = n1["rx"] * w, n1["ry"] * h
+            x2, y2 = n2["rx"] * w, n2["ry"] * h
+            
+            dx, dy = x2 - x1, y2 - y1
+            
+            if abs(dx) > abs(dy):
+                start_x = x1 + n1["w"]/2 if dx > 0 else x1 - n1["w"]/2
+                end_x   = x2 - n2["w"]/2 if dx > 0 else x2 + n2["w"]/2
+                start_y, end_y = y1, y2
+                c1 = QPointF(start_x + dx/2.5, start_y)
+                c2 = QPointF(end_x - dx/2.5, end_y)
+            else:
+                start_y = y1 + n1["h"]/2 if dy > 0 else y1 - n1["h"]/2
+                end_y   = y2 - n2["h"]/2 if dy > 0 else y2 + n2["h"]/2
+                start_x, end_x = x1, x2
+                c1 = QPointF(start_x, start_y + dy/2.5)
+                c2 = QPointF(end_x, end_y - dy/2.5)
+
+            path = QPainterPath()
+            path.moveTo(start_x, start_y)
+            path.cubicTo(c1, c2, QPointF(end_x, end_y))
+            paths.append((path, color, key, end_x, end_y))
+            
+        # Draw base lines
+        for path, color, key, ex, ey in paths:
+            c_base = QColor(color)
+            c_base.setAlpha(50)
+            pen_base = QPen(c_base)
+            pen_base.setWidth(2)
+            painter.setPen(pen_base)
+            painter.drawPath(path)
+            
+        # Draw animated flow
+        for path, color, key, ex, ey in paths:
+            freq = self.frequencies.get(key, 0.0)
+            if freq > 0:
+                speed = min(freq / 10.0, 5.0) + 1.0
+                c_anim = QColor(color)
+                pen_anim = QPen(c_anim)
+                pen_anim.setWidth(2)
+                pen_anim.setStyle(Qt.PenStyle.DashLine)
+                pen_anim.setDashPattern([4, 15])
+                pen_anim.setDashOffset(self.anim_offset * speed)
+                painter.setPen(pen_anim)
+                painter.drawPath(path)
+                
+            painter.setBrush(QColor(color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QPointF(ex, ey), 4, 4)
+
+
 class MonitorWindow(QMainWindow):
 
     # Qt signal to safely update UI from non-GUI threads
@@ -716,168 +813,92 @@ class MonitorWindow(QMainWindow):
         parent_lay = QVBoxLayout(parent)
         parent_lay.setContentsMargins(0,0,0,0)
         
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("background: transparent;")
-        parent_lay.addWidget(scroll)
+        self.flow_canvas = FlowCanvas()
+        self.flow_canvas.setStyleSheet(f"background:{BG};")
+        parent_lay.addWidget(self.flow_canvas)
         
-        container = QWidget()
-        container.setStyleSheet(f"background:{BG};")
-        scroll.setWidget(container)
-        
-        lay = QVBoxLayout(container)
-        lay.setContentsMargins(30,30,30,30)
-        lay.setSpacing(10)
-        
-        title = QLabel("System Architecture & Data Flow")
-        title.setFont(font(FONT_SANS, 18, bold=True))
-        title.setStyleSheet(f"color:{TEXT};")
-        lay.addWidget(title)
-        
-        desc = QLabel("Real-time telemetry pipeline reflecting User Input → ROS 2 → Robot Hardware → Feedback Loop")
-        desc.setFont(font(FONT_SANS, 11))
-        desc.setStyleSheet(f"color:{MUTED};")
-        lay.addWidget(desc)
-        lay.addSpacing(20)
-        
-        # Helpers
-        def _box(title_text, bg, border, layout_type='V'):
-            b = QFrame()
-            b.setStyleSheet(f"background:{bg}; border: 2px solid {border}; border-radius: 8px;")
-            l = QVBoxLayout(b) if layout_type == 'V' else QHBoxLayout(b)
-            l.setContentsMargins(20, 20, 20, 20)
-            l.setSpacing(12)
-            if title_text:
-                t = QLabel(title_text)
-                t.setFont(font(FONT_SANS, 12, bold=True))
-                t.setStyleSheet(f"color:{border}; border:none;")
-                l.addWidget(t)
-            return b, l
-
-        def _label(text, bg="#ffffff", fg="#000000", border="none", bold=False, mono=False):
-            lbl = QLabel(text)
-            f = font(FONT_MONO if mono else FONT_SANS, 11, bold=bold)
-            lbl.setFont(f)
-            lbl.setStyleSheet(f"background:{bg}; color:{fg}; border:{border}; border-radius:6px; padding:10px;")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            return lbl
-
-        def _arrow(down=False, up=False, right=False, left=False):
-            char = "↓" if down else "↑" if up else "→" if right else "←"
-            lbl = QLabel(char)
-            lbl.setFont(font(FONT_MONO, 24, bold=True))
-            lbl.setStyleSheet(f"color:{MUTED}; font-weight:bold; background:transparent; border:none;")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            return lbl
-
         self._flow_cards = {}
-        def _topic_card(name, topic, fg_color):
+        
+        def _topic(id_str, name, topic, fg_color, rx, ry, w=220, h=85):
             c = QFrame()
-            c.setStyleSheet(f"background:{PANEL}; border: 1px solid {BORDER}; border-radius: 6px;")
-            cl = QVBoxLayout(c)
-            cl.setContentsMargins(12, 10, 12, 10)
-            cl.setSpacing(4)
+            c.setStyleSheet(f"background:{PANEL}; border: 1px solid {fg_color}; border-radius: 8px;")
+            cl = QVBoxLayout(c); cl.setContentsMargins(10, 8, 10, 8); cl.setSpacing(2)
             
-            hl = QHBoxLayout()
-            hl.setContentsMargins(0,0,0,0)
-            n = QLabel(name)
-            n.setFont(font(FONT_SANS, 10, bold=True))
+            hl = QHBoxLayout(); hl.setContentsMargins(0,0,0,0)
+            n = QLabel(name); n.setFont(font(FONT_SANS, 10, bold=True))
             n.setStyleSheet(f"color:{fg_color}; border:none;")
-            hz = QLabel("0.0 Hz")
-            hz.setFont(font(FONT_MONO, 12, bold=True))
+            hz = QLabel("0.0 Hz"); hz.setFont(font(FONT_MONO, 11, bold=True))
             hz.setStyleSheet(f"color:{TEXT}; border:none;")
             hl.addWidget(n); hl.addStretch(); hl.addWidget(hz)
             cl.addLayout(hl)
             
-            tl = QLabel(topic)
-            tl.setFont(font(FONT_MONO, 9))
+            tl = QLabel(topic); tl.setFont(font(FONT_MONO, 8))
             tl.setStyleSheet(f"color:{MUTED}; border:none;")
             cl.addWidget(tl)
             
-            val = QLabel("Waiting for data...")
-            val.setFont(font(FONT_MONO, 10))
+            val = QLabel("-"); val.setFont(font(FONT_MONO, 10))
             val.setStyleSheet(f"color:{TEXT}; border:none;")
             cl.addWidget(val)
             
+            self.flow_canvas.add_node(id_str, c, rx, ry, w, h)
             self._flow_cards[name] = {"hz": hz, "val": val}
-            return c
 
-        # Main Grid Layout
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 0)
-        grid.setColumnStretch(2, 1)
+        def _comp(id_str, name, desc, rx, ry, w=180, h=70, bg="#1e293b", border="#475569"):
+            c = QFrame()
+            c.setStyleSheet(f"background:{bg}; border: 2px solid {border}; border-radius: 10px;")
+            cl = QVBoxLayout(c); cl.setContentsMargins(10,10,10,10); cl.setSpacing(2)
+            n = QLabel(name); n.setFont(font(FONT_SANS, 11, bold=True))
+            n.setStyleSheet(f"color:white; border:none;"); n.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            d = QLabel(desc); d.setFont(font(FONT_SANS, 9))
+            d.setStyleSheet(f"color:#cbd5e1; border:none;"); d.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.addWidget(n); cl.addWidget(d)
+            self.flow_canvas.add_node(id_str, c, rx, ry, w, h)
 
-        # ── 1. User Input & Viz Layer (Row 0)
-        user_b, user_l = _box("USER INPUT LAYER", "#f0f9ff", "#0284c7", 'V')
-        user_l.addWidget(_label("Keyboard Teleop / VR Controller", "#0ea5e9", "white", bold=True))
-        grid.addWidget(user_b, 0, 0)
+        # Components
+        _comp("INPUT", "User / Unity Input", "VR Controller & Target Gen", 0.08, 0.50, bg="#6366f1", border="#4f46e5", w=180, h=70)
+        _comp("ROS", "ROS 2 Teleop Node", "Core Bridge Logic", 0.50, 0.50, w=190, h=80, bg="#10b981", border="#059669")
+        _comp("TCP", "TCP Socket", "Port 30003 (Cmd)", 0.85, 0.25, bg="#f59e0b", border="#d97706", w=150, h=65)
+        _comp("FB_TCP", "TCP Feedback", "Port 30004 (Data)", 0.85, 0.75, bg="#f59e0b", border="#d97706", w=150, h=65)
+        _comp("ROBOT", "Dobot MG400", "Hardware Controller", 0.95, 0.50, bg="#ef4444", border="#dc2626", w=150, h=65)
 
-        viz_b, viz_l = _box("VISUALIZATION TOOLS", "#f8fafc", "#475569", 'V')
-        viz_l.addWidget(_label("Foxglove / rqt_graph / ros2_tracing", "#64748b", "white", bold=True))
-        grid.addWidget(viz_b, 0, 2)
-
-        grid.addWidget(_arrow(down=True), 1, 0)
-        grid.addWidget(_arrow(up=True), 1, 2)
-
-        # ── 2. ROS 2 Layer (Row 2)
-        ros_b, ros_l = _box("ROS 2 LAYER", "#f0fdf4", "#16a34a", 'V')
-        ros_grid = QGridLayout()
-        ros_grid.setColumnStretch(0, 1); ros_grid.setColumnStretch(1, 0); ros_grid.setColumnStretch(2, 1)
+        # Topics
+        _topic("T_UNI", "UNITY TARGET", "/unity/joint_cmd", COL_UNITY, 0.28, 0.25)
+        _topic("T_PRD", "PREDICTED TGT", "Internal Trajectory", COL_PRED, 0.28, 0.50)
+        _topic("T_ACT", "ACTUAL FEEDBACK", "/joint_states", COL_ACTUAL, 0.28, 0.75)
         
-        cmd_l = QVBoxLayout()
-        cmd_l.addWidget(_label("Teleop Node", "#22c55e", "white", bold=True))
-        cmd_l.addWidget(_arrow(down=True))
-        cmd_l.addWidget(_topic_card("UNITY TARGET", UNITY_TOPIC, COL_UNITY))
-        cmd_l.addWidget(_arrow(down=True))
-        cmd_l.addWidget(_topic_card("PREDICTED TGT", PREDICTED_TOPIC, COL_PRED))
-        cmd_l.addWidget(_arrow(down=True))
-        cmd_l.addWidget(_topic_card("SENT COMMAND", SENT_TOPIC, COL_SENT))
-        cmd_l.addWidget(_arrow(down=True))
+        _topic("T_SNT", "SENT COMMAND", "TCP Packet", COL_SENT, 0.68, 0.20)
+        _topic("T_TOL", "TOOL VECTOR", "/mg400/tool_vector", GREEN, 0.68, 0.38)
+        _topic("T_MOD", "ROBOT MODE", "/mg400/robot_mode", PURPLE, 0.68, 0.56)
+        _topic("T_ERR", "ROBOT ERROR", "/mg400/error_status", RED, 0.68, 0.74)
+        _topic("T_IO",  "DIGITAL IO", "/mg400/do_status", ORANGE, 0.68, 0.92)
+
+        # Edges (p1, p2, color, topic_key for freq)
+        # Input to ROS
+        self.flow_canvas.add_edge("INPUT", "T_UNI", COL_UNITY, "UNITY TARGET")
+        self.flow_canvas.add_edge("T_UNI", "ROS", COL_UNITY, "UNITY TARGET")
         
-        fb_l = QVBoxLayout()
-        fb_l.addWidget(_arrow(up=True))
-        fb_l.addWidget(_topic_card("ACTUAL FEEDBACK", ACTUAL_TOPIC, COL_ACTUAL))
-        fb_l.addWidget(_topic_card("TOOL VECTOR", TOOL_ACT_TOPIC, GREEN))
-        fb_l.addWidget(_topic_card("ROBOT MODE", ROBOT_MODE_TOPIC, PURPLE))
-        fb_l.addWidget(_topic_card("ROBOT ERROR", ERROR_STATUS_TOPIC, RED))
-        fb_l.addWidget(_topic_card("DIGITAL IO", DO_STATUS_TOPIC, ORANGE))
+        # ROS Pred to Input
+        self.flow_canvas.add_edge("ROS", "T_PRD", COL_PRED, "PREDICTED TGT")
+        self.flow_canvas.add_edge("T_PRD", "INPUT", COL_PRED, "PREDICTED TGT")
         
-        ros_grid.addLayout(cmd_l, 0, 0)
-        ros_grid.addLayout(fb_l, 0, 2)
-        ros_l.addLayout(ros_grid)
+        # ROS Feedback to Input
+        self.flow_canvas.add_edge("ROS", "T_ACT", COL_ACTUAL, "ACTUAL FEEDBACK")
+        self.flow_canvas.add_edge("T_ACT", "INPUT", COL_ACTUAL, "ACTUAL FEEDBACK")
         
-        ros_l.addWidget(_label("MG400 ROS 2 Driver", "#15803d", "white", bold=True))
-        grid.addWidget(ros_b, 2, 0, 1, 3)
-
-        grid.addWidget(_arrow(down=True), 3, 0)
-        grid.addWidget(_arrow(up=True), 3, 2)
-
-        # ── 3. Comm Layer (Row 4)
-        comm_b, comm_l = _box("COMMUNICATION LAYER", "#fffbeb", "#eab308", 'H')
-        comm_l.addWidget(_label("TCP Socket (Port 30003/29999)\nCommands", "#eab308", "white", bold=True))
-        comm_l.addStretch()
-        comm_l.addWidget(_label("UDP Socket (Port 30004)\nFeedback Packet", "#ca8a04", "white", bold=True))
-        grid.addWidget(comm_b, 4, 0, 1, 3)
-
-        grid.addWidget(_arrow(down=True), 5, 0)
-        grid.addWidget(_arrow(up=True), 5, 2)
-
-        # ── 4. Robot Layer (Row 6)
-        rob_b, rob_l = _box("ROBOT HARDWARE LAYER", "#fef2f2", "#dc2626", 'H')
-        rob_l.addWidget(_label("Robot Controller", "#ef4444", "white", bold=True))
-        rob_l.addWidget(_arrow(right=True))
-        rob_l.addWidget(_label("Firmware Queue", "#dc2626", "white", bold=True))
-        rob_l.addWidget(_arrow(right=True))
-        rob_l.addWidget(_label("Motion Execution", "#b91c1c", "white", bold=True))
-        rob_l.addWidget(_arrow(right=True))
-        rob_l.addWidget(_label("Joint Encoders", "#991b1b", "white", bold=True))
-        grid.addWidget(rob_b, 6, 0, 1, 3)
-
-        lay.addLayout(grid)
-        lay.addStretch()
+        # ROS -> Sent -> TCP -> Robot
+        self.flow_canvas.add_edge("ROS", "T_SNT", COL_SENT, "SENT COMMAND")
+        self.flow_canvas.add_edge("T_SNT", "TCP", COL_SENT, "SENT COMMAND")
+        self.flow_canvas.add_edge("TCP", "ROBOT", COL_SENT, "SENT COMMAND")
+        
+        # Robot -> FB_TCP -> ROS
+        self.flow_canvas.add_edge("ROBOT", "FB_TCP", COL_ACTUAL, "ACTUAL FEEDBACK")
+        self.flow_canvas.add_edge("FB_TCP", "ROS", COL_ACTUAL, "ACTUAL FEEDBACK")
+        
+        # ROS -> Topics -> Output
+        self.flow_canvas.add_edge("ROS", "T_TOL", GREEN, "TOOL VECTOR")
+        self.flow_canvas.add_edge("ROS", "T_MOD", PURPLE, "ROBOT MODE")
+        self.flow_canvas.add_edge("ROS", "T_ERR", RED, "ROBOT ERROR")
+        self.flow_canvas.add_edge("ROS", "T_IO", ORANGE, "DIGITAL IO")
 
     def _build_left(self, parent):
         lay = QVBoxLayout(parent); lay.setContentsMargins(0,0,8,0); lay.setSpacing(0)
@@ -1517,6 +1538,8 @@ class MonitorWindow(QMainWindow):
                     lbl = self._flow_cards[k]["hz"]
                     lbl.setText(f"{hz:.1f} Hz")
                     lbl.setStyleSheet(f"color:{GREEN if hz > 0.5 else MUTED}; border:none;")
+                if hasattr(self, 'flow_canvas'):
+                    self.flow_canvas.set_freq(k, hz)
 
         # Update real-time values in Data Flow cards
         if self._flow_cards:
