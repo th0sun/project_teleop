@@ -624,7 +624,8 @@ class TeleopNode(Node):
             if tr.is_playing:
                 return  # sequencer thread is sending commands
             if tr.is_recording:
-                tr.record_tick()
+                # We record the *TARGET* from VR/Simulator, not the actual robot pos
+                tr.record_tick(self.latest_target)
             
             # === UPDATE VELOCITY ===
             # Delegate velocity tracking to controller

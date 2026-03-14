@@ -87,14 +87,15 @@ class TrajectoryRecorder:
         self._rec_t0 = time.time()
         self._log.info("🔴 Recording started")
 
-    def record_tick(self):
-        """Call at ~50 Hz from the control loop while recording."""
-        if not self.is_recording or self._get_pos is None:
+    def record_tick(self, target_q_rad):
+        """Call at ~50 Hz from the control loop while recording.
+        Records the intended target from Unity/VR rather than the actual robot position
+        to ensure playback matches the intended VR trajectory perfectly.
+        """
+        if not self.is_recording or target_q_rad is None:
             return
-        q_rad = self._get_pos()
-        if q_rad is None:
-            return
-        q_deg = np.degrees(q_rad[:4])
+        
+        q_deg = np.degrees(target_q_rad[:4])
         self._frames.append({
             "timeStamp": time.time() - self._rec_t0,
             "j1": float(q_deg[0]),
