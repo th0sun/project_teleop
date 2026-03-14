@@ -143,6 +143,18 @@ class UnitySimulator(Node):
         if self.mode == 'manual_step':
             btn = tk.Button(self.tk_root, text="SEND CMD", font=("Arial", 12, "bold"), bg="#4CAF50", fg="black", command=self.on_send_click)
             btn.pack(pady=20, ipadx=20, ipady=10)
+            
+        # Update distance labels periodically
+        self.tk_root.after(100, self.gui_update_loop)
+    
+    def gui_update_loop(self):
+        if self.mode in ['manual', 'manual_step']:
+            positions = [math.radians(s.get()) for s in self.sliders]
+            self.update_distance_display(positions)
+        elif self.mode == 'mouse_3d':
+            self.update_joint_display()
+            self.update_j3_j4_from_keyboard()
+        self.tk_root.after(30, self.gui_update_loop)
     
     def init_mouse_3d_gui(self):
         """Initialize Direct Joint Control GUI"""
@@ -544,19 +556,13 @@ class UnitySimulator(Node):
 
         if self.mode == 'manual':
             if self.tk_root:
-                self.tk_root.update()
                 positions = [math.radians(s.get()) for s in self.sliders]
-                self.update_distance_display(positions)
                 
         elif self.mode == 'manual_step':
             if self.tk_root:
-                self.tk_root.update()
                 positions = [math.radians(s.get()) for s in self.sliders]
-                self.update_distance_display(positions)
-                
                 if not self.trigger_send:
                     return
-                
                 self.trigger_send = False
 
         elif self.mode == 'sine':
@@ -567,11 +573,6 @@ class UnitySimulator(Node):
             positions = self.generate_random()
         elif self.mode == 'mouse_3d':
             if self.tk_root:
-                self.tk_root.update()
-                
-                # Update J3/J4 from keyboard
-                self.update_j3_j4_from_keyboard()
-                
                 # Use all 4 joint angles directly (no IK)
                 positions = [
                     math.radians(self.j1_angle),  # J1 from mouse
@@ -579,8 +580,6 @@ class UnitySimulator(Node):
                     math.radians(self.j3_angle),  # J3 from keyboard
                     math.radians(self.j4_angle)   # J4 from keyboard
                 ]
-                
-                self.update_joint_display()
         
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -617,8 +616,18 @@ class UnitySimulator(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = UnitySimulator()
+    
+    # Run ROS 2 spin in a separate thread so it doesn't block or get blocked by Tkinter
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
+    
     try:
-        rclpy.spin(node)
+        if node.tk_root:
+            node.tk_root.mainloop()
+        else:
+            # If no GUI (e.g. sine/circle mode), just wait on the main thread
+            while rclpy.ok():
+                time.sleep(0.1)
     except KeyboardInterrupt:
         pass
     except tk.TclError:

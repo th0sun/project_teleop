@@ -817,8 +817,14 @@ def main():
     rclpy.init()
     node = TeleopNode()
     
+    # Use MultiThreadedExecutor to prevent the 50Hz control loop 
+    # from blocking the Unity subscriber callbacks and vice versa.
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
