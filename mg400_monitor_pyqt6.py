@@ -63,16 +63,16 @@ try:
     )
     from mg400_controller.common.utils.error_decoder import RobotErrorDecoder
 except ImportError:
-    UNITY_TOPIC          = "/teleop/unity_joints"
+    UNITY_TOPIC          = "/unity/joint_cmd"
     VACUUM_DO_PORT       = 1
     GREEN_LIGHT_DO_PORT  = 5
     YELLOW_LIGHT_DO_PORT = 6
     RED_LIGHT_DO_PORT    = 7
-    SUCTION_TOPIC        = "/robot/suction"
-    LIGHT_TOPIC          = "/robot/light"
-    DO_STATUS_TOPIC      = "/robot/do_status"
-    ROBOT_MODE_TOPIC     = "/robot/mode"
-    ERROR_STATUS_TOPIC   = "/robot/error"
+    SUCTION_TOPIC        = "/vr/suction_cmd"
+    LIGHT_TOPIC          = "/mg400/light_cmd"
+    DO_STATUS_TOPIC      = "/mg400/do_status"
+    ROBOT_MODE_TOPIC     = "/mg400/robot_mode"
+    ERROR_STATUS_TOPIC   = "/mg400/error_status"
     class RobotErrorDecoder:
         def decode_error(self, code): return f"ERR_{code:02X}", None, None
 
@@ -685,22 +685,22 @@ class MonitorWindow(QMainWindow):
         wrap = QWidget(); wrap.setStyleSheet(f"background:{BG};")
         lay  = QHBoxLayout(wrap); lay.setContentsMargins(10,8,10,10); lay.setSpacing(0)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(7)
-        splitter.setStyleSheet(QSS)   # apply globally here
+        hsplit = QSplitter(Qt.Orientation.Horizontal)
+        hsplit.setHandleWidth(1)
+        hsplit.setStyleSheet(QSS)   # apply globally here
 
         left_w  = QWidget(); left_w.setStyleSheet(f"background:{BG};")
         right_w = QWidget(); right_w.setStyleSheet(f"background:{BG};")
 
-        splitter.addWidget(left_w)
-        splitter.addWidget(right_w)
+        hsplit.addWidget(left_w)
+        hsplit.addWidget(right_w)
         
         # Optimize split widths: Make left side 440px to fit well, right side takes rest
-        splitter.setSizes([440, 1000])
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
+        hsplit.setSizes([440, 1000])
+        hsplit.setCollapsible(0, False)
+        hsplit.setCollapsible(1, False)
 
-        lay.addWidget(splitter)
+        lay.addWidget(hsplit)
         parent_layout.addWidget(wrap)
 
         self._build_left(left_w)
@@ -723,64 +723,100 @@ class MonitorWindow(QMainWindow):
         desc.setStyleSheet(f"color:{MUTED};")
         lay.addWidget(desc)
         
-        lay.addSpacing(20)
+        lay.addSpacing(30)
         
-        # Grid for cards
-        grid = QGridLayout()
-        grid.setSpacing(16)
+        # We will build a flowchart-like pipeline:
+        # User/Unity Layer -> ROS Layer -> Robot Layer
+        
+        flow_lay = QVBoxLayout()
+        flow_lay.setSpacing(10)
         
         self._flow_cards = {}
         
-        topics = [
-            ("UNITY TARGET", UNITY_TOPIC, "JointState (4 DOF)", COL_UNITY),
-            ("ACTUAL FEEDBACK", ACTUAL_TOPIC, "JointState (4 DOF)", COL_ACTUAL),
-            ("TOOL VECTOR", TOOL_ACT_TOPIC, "Float64MultiArray (6 DOF)", GREEN),
-            ("ROBOT MODE", ROBOT_MODE_TOPIC, "Int32", PURPLE),
-            ("ROBOT ERROR", ERROR_STATUS_TOPIC, "Int32", RED),
-            ("DIGITAL IO", DO_STATUS_TOPIC, "Int64", ORANGE),
-        ]
-        
-        for i, (name, topic, t_type, clr) in enumerate(topics):
+        def _create_node(name, topic, t_type, clr):
             card = QFrame()
-            card.setStyleSheet(f"background:{PANEL}; border: 1px solid {BORDER}; border-radius: 10px;")
+            card.setStyleSheet(f"background:{PANEL}; border: 2px solid {clr}; border-radius: 12px;")
+            card.setFixedSize(280, 90)
             cl = QVBoxLayout(card)
+            cl.setContentsMargins(12, 10, 12, 10)
             
             # Header
             hl = QHBoxLayout()
+            hl.setContentsMargins(0,0,0,0)
             n = QLabel(name)
             n.setFont(font(FONT_SANS, 11, bold=True))
             n.setStyleSheet(f"color:{clr}; border:none;")
             hl.addWidget(n)
             hl.addStretch()
             
-            hz = QLabel("0 Hz")
+            hz = QLabel("0.0 Hz")
             hz.setFont(font(FONT_MONO, 12, bold=True))
             hz.setStyleSheet(f"color:{TEXT}; border:none;")
             hl.addWidget(hz)
             cl.addLayout(hl)
             
             # Details
-            tl = QLabel(f"Topic: {topic}")
+            tl = QLabel(topic)
             tl.setFont(font(FONT_MONO, 9))
-            tl.setStyleSheet(f"color:{MUTED}; border:none;")
+            tl.setStyleSheet(f"color:{TEXT}; border:none;")
             cl.addWidget(tl)
             
-            ty = QLabel(f"Type: {t_type}")
+            ty = QLabel(t_type)
             ty.setFont(font(FONT_MONO, 9))
             ty.setStyleSheet(f"color:{MUTED}; border:none;")
             cl.addWidget(ty)
             
-            grid.addWidget(card, i // 2, i % 2)
-            
             self._flow_cards[name] = {"hz": hz, "count": 0, "last_t": time.time()}
-            
-        lay.addLayout(grid)
+            return card
+
+        def _arrow(down=False, up=False):
+            lbl = QLabel("↓" if down else ("↑" if up else "→"))
+            lbl.setFont(font(FONT_MONO, 24, bold=True))
+            lbl.setStyleSheet(f"color:{MUTED}; font-weight:bold;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if not down and not up:
+                lbl.setFixedWidth(40)
+            return lbl
+
+        # Top Row: Command Flow (Unity -> ROS -> Robot)
+        cmd_lay = QHBoxLayout()
+        cmd_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        cmd_lay.addWidget(_create_node("UNITY TARGET", UNITY_TOPIC, "JointState", COL_UNITY))
+        cmd_lay.addWidget(_arrow())
+        cmd_lay.addWidget(_create_node("PREDICTED TGT", PREDICTED_TOPIC, "JointState", COL_PRED))
+        cmd_lay.addWidget(_arrow())
+        cmd_lay.addWidget(_create_node("SENT COMMAND", SENT_TOPIC, "JointState", COL_SENT))
+        
+        flow_lay.addLayout(cmd_lay)
+        
+        # Arrows pointing down to feedback
+        arr_lay = QHBoxLayout()
+        arr_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        arr_lay.addSpacing(200) # push arrow to right side
+        arr_lay.addWidget(_arrow(down=True))
+        flow_lay.addLayout(arr_lay)
+
+        # Bottom Row: Feedback Flow (Robot -> ROS -> Unity)
+        fb_lay = QHBoxLayout()
+        fb_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        fb_lay.addWidget(_create_node("ROBOT ERROR", ERROR_STATUS_TOPIC, "Int32", RED))
+        fb_lay.addWidget(_create_node("ROBOT MODE", ROBOT_MODE_TOPIC, "Int32", PURPLE))
+        fb_lay.addWidget(_arrow(up=False)) # Just a spacer or left arrow
+        lbl_left = QLabel("←"); lbl_left.setFont(font(FONT_MONO, 24, bold=True)); lbl_left.setStyleSheet(f"color:{MUTED};"); lbl_left.setFixedWidth(40); lbl_left.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fb_lay.addWidget(lbl_left)
+        fb_lay.addWidget(_create_node("ACTUAL FEEDBACK", ACTUAL_TOPIC, "JointState", COL_ACTUAL))
+        
+        flow_lay.addLayout(fb_lay)
+        
+        lay.addLayout(flow_lay)
         lay.addStretch()
     def _build_left(self, parent):
         lay = QVBoxLayout(parent); lay.setContentsMargins(0,0,8,0); lay.setSpacing(0)
 
         vsplit = QSplitter(Qt.Orientation.Vertical)
-        vsplit.setHandleWidth(7)
+        vsplit.setHandleWidth(1)
 
         data_panel = self._build_data_panel()
         log_panel  = self._build_log_panel()
@@ -1061,7 +1097,7 @@ class MonitorWindow(QMainWindow):
         lay = QVBoxLayout(parent); lay.setContentsMargins(4,0,0,0); lay.setSpacing(0)
 
         vsplit = QSplitter(Qt.Orientation.Vertical)
-        vsplit.setHandleWidth(7)
+        vsplit.setHandleWidth(1)
 
         graphs_w = self._build_joint_graphs()
         graph3d_w = self._build_3d_graph()
