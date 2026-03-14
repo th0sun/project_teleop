@@ -6,14 +6,16 @@ Trajectory Recorder & Sequencer — Teach-and-Repeat for MG400
 =============================================================
 Handles the full lifecycle:
 
-1. **Record**  — capture robot joint positions while user teleoperates.
-2. **Save**    — persist recorded data as Unity-compatible JSON
-                 (frames: [{timeStamp, j1..j4}]).
+1. **Record**  — smart-sample at ~8-10 Hz: only frames with significant
+                 movement (>RECORD_MIN_DELTA degrees) and at least
+                 RECORD_MIN_DT apart.  Produces compact JSON identical
+                 to the Unity money.json format.
+2. **Save**    — persist as ``{"frames": [{timeStamp, j1..j4}, ...]}``.
 3. **Load**    — read a saved JSON trajectory (Unity or native format).
-4. **Preview** — temporal sequencer that replays a trajectory on the real
-                 robot, computing per-segment SpeedJ to match the original
-                 timing.  Uses CP=100 for smooth continuous-path motion and
-                 gates live teleop commands during playback.
+4. **Preview** — temporal sequencer that replays each frame with the
+                 EXACT joint values from the JSON, computing SpeedJ to
+                 match original timing.  No decimation needed because
+                 recording already produces clean 8-10 Hz data.
 5. **Stop**    — abort any operation and send the robot Home (0,0,0,0).
 
 Topic integration (managed by vr_teleop_node.py):
@@ -36,11 +38,12 @@ HOME_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0]
 # ── Trajectory storage directory ─────────────────────────────────────────────
 TRAJ_DIR = os.path.expanduser("~/project_teleop_ws/trajectories")
 
-# ── Playback decimation ───────────────────────────────────────────────────────
-# Recording is done at 50 Hz (20ms per frame).  Sending every raw frame gives
-# tiny per-segment deltas → very low SpeedJ → robot crawls.  We decimate to
-# PLAYBACK_HZ target rate so each segment has enough motion for a real speed.
-PLAYBACK_MIN_DT = 1.0 / 30  # seconds — minimum gap between sent waypoints (≈30 Hz)
+# ── Smart recording parameters ───────────────────────────────────────────────
+# Inspired by money.json: ~8 Hz, 118 frames for 14.7 s, every frame has >1°
+# movement.  This keeps files compact and eliminates the need for decimation
+# during playback.
+RECORD_MIN_DT    = 0.10   # seconds — max ~10 Hz recording rate
+RECORD_MIN_DELTA = 0.5    # degrees — minimum joint movement to store a frame
 
 
 class TrajectoryRecorder:
@@ -57,6 +60,8 @@ class TrajectoryRecorder:
     get_position_fn : callable() -> np.ndarray | None, optional
         Returns current joint angles in *radians* (4,).
         Required for recording mode.
+    waypoint_callback : callable(np.ndarray) -> None, optional
+        Called with radians (4,) for each played-back waypoint.
     """
 
     def __init__(self, command_send_fn: Callable, logger,
@@ -65,18 +70,20 @@ class TrajectoryRecorder:
         self._send = command_send_fn
         self._log  = logger
         self._get_pos = get_position_fn
-        self._waypoint_cb = waypoint_callback  # called with np.array(4,) radians each played waypoint
+        self._waypoint_cb = waypoint_callback
 
         # ── State ────────────────────────────────────────────────────────────
         self.is_recording  = False
         self.is_playing    = False
         self._stop_flag    = threading.Event()
         self._play_thread: Optional[threading.Thread] = None
-        self._block_until  = 0.0  # perf_counter: suppress teleop until this time (after go_home)
+        self._block_until  = 0.0  # perf_counter: suppress teleop until this time
 
-        # ── Recorded data (native format) ────────────────────────────────────
+        # ── Recorded data ────────────────────────────────────────────────────
         self._frames: List[Dict] = []   # [{timeStamp, j1..j4}] degrees
         self._rec_t0 = 0.0
+        self._last_rec_t = 0.0          # timestamp of last stored frame
+        self._last_rec_q = np.zeros(4)   # joint values of last stored frame
 
         # ── Loaded trajectory (ready for playback) ───────────────────────────
         self.loaded_frames: List[Dict] = []
@@ -85,39 +92,77 @@ class TrajectoryRecorder:
         os.makedirs(TRAJ_DIR, exist_ok=True)
 
     # ═════════════════════════════════════════════════════════════════════════
-    #  RECORD
+    #  RECORD  (smart-sampled at ~8-10 Hz)
     # ═════════════════════════════════════════════════════════════════════════
     def start_recording(self):
         if self.is_playing:
             self._log.warn("⚠️  Cannot record while playing")
             return
         self.is_recording = True
-        self._block_until = 0.0  # cancel any pending homing suppression
+        self._block_until = 0.0
         self._frames = []
         self._rec_t0 = time.time()
-        self._log.info("🔴 Recording started")
+        self._last_rec_t = -999.0
+        self._last_rec_q = np.full(4, np.nan)
+        self._log.info("🔴 Recording started (smart-sample ≤10 Hz, Δ≥0.5°)")
 
     def record_tick(self, target_q_rad):
-        """Call at ~50 Hz from the control loop while recording.
-        Records the intended target from Unity/VR rather than the actual robot position
-        to ensure playback matches the intended VR trajectory perfectly.
+        """Called at ~50 Hz from the control loop.
+        Only stores a frame when:
+          1. At least RECORD_MIN_DT (100 ms) since last stored frame, AND
+          2. At least one joint moved ≥ RECORD_MIN_DELTA (0.5°) since last frame.
+        Always stores the very first frame unconditionally.
         """
         if not self.is_recording or target_q_rad is None:
             return
-        
+
         q_deg = np.degrees(target_q_rad[:4])
+        now = time.time() - self._rec_t0
+
+        # Always store the first frame
+        if not self._frames:
+            self._append_frame(now, q_deg)
+            return
+
+        # Rate-limit
+        if now - self._last_rec_t < RECORD_MIN_DT:
+            return
+
+        # Movement threshold
+        max_delta = float(np.max(np.abs(q_deg - self._last_rec_q)))
+        if max_delta < RECORD_MIN_DELTA:
+            return
+
+        self._append_frame(now, q_deg)
+
+    def _append_frame(self, t: float, q_deg):
         self._frames.append({
-            "timeStamp": time.time() - self._rec_t0,
-            "j1": float(q_deg[0]),
-            "j2": float(q_deg[1]),
-            "j3": float(q_deg[2]),
-            "j4": float(q_deg[3]),
+            "timeStamp": round(t, 6),
+            "j1": round(float(q_deg[0]), 6),
+            "j2": round(float(q_deg[1]), 6),
+            "j3": round(float(q_deg[2]), 6),
+            "j4": round(float(q_deg[3]), 6),
         })
+        self._last_rec_t = t
+        self._last_rec_q = q_deg.copy()
 
     def stop_recording(self) -> List[Dict]:
+        """Stop recording.  Appends a final frame if the last stored frame
+        is older than 50 ms (captures the resting position)."""
+        if self.is_recording and self._frames and self._get_pos is not None:
+            try:
+                q = self._get_pos()
+                if q is not None:
+                    now = time.time() - self._rec_t0
+                    if now - self._last_rec_t > 0.05:
+                        self._append_frame(now, np.degrees(q[:4]))
+            except Exception:
+                pass
+
         self.is_recording = False
-        self._log.info(f"⏹️  Recording stopped — {len(self._frames)} frames, "
-                       f"{self._frames[-1]['timeStamp']:.1f}s" if self._frames else "⏹️  Recording stopped — 0 frames")
+        n = len(self._frames)
+        dur = self._frames[-1]["timeStamp"] if n else 0.0
+        self._log.info(f"⏹️  Recording stopped — {n} frames, {dur:.1f}s")
         return self._frames
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -178,7 +223,7 @@ class TrajectoryRecorder:
             return []
 
     # ═════════════════════════════════════════════════════════════════════════
-    #  PREVIEW (Temporal Sequencer)
+    #  PREVIEW (Temporal Sequencer — NO decimation, uses frames directly)
     # ═════════════════════════════════════════════════════════════════════════
     def start_preview(self):
         """Begin playing back loaded trajectory in a background thread."""
@@ -194,24 +239,15 @@ class TrajectoryRecorder:
         self._play_thread.start()
 
     def _play_worker(self):
-        """Sequencer thread: sends JointMovJ commands with computed SpeedJ."""
-        raw = self.loaded_frames
-
-        # ── Decimate: keep only frames >= PLAYBACK_MIN_DT apart ──────────────
-        # Recording at 50 Hz gives tiny per-segment deltas → SpeedJ=1-2% →
-        # robot crawls even though timing math is correct.  Merging to ~10 Hz
-        # gives ~5x larger deltas per segment → SpeedJ 5x higher → correct speed.
-        frames = [raw[0]]
-        for f in raw[1:]:
-            if f["timeStamp"] - frames[-1]["timeStamp"] >= PLAYBACK_MIN_DT:
-                frames.append(f)
-        if frames[-1] is not raw[-1]:
-            frames.append(raw[-1])  # always include final pose
-
+        """Sequencer thread: sends EXACT frame joint values with computed SpeedJ.
+        No decimation — frames are already clean ~8-10 Hz from smart recording.
+        """
+        frames = self.loaded_frames
         n = len(frames)
         t0_traj = frames[0]["timeStamp"]
         t_wall_start = time.perf_counter()
-        self._log.info(f"▶️  Preview start — {n} waypoints (decimated from {len(raw)})")
+        self._log.info(f"▶️  Preview start — {n} waypoints, "
+                       f"{frames[-1]['timeStamp'] - t0_traj:.1f}s")
 
         for i, fr in enumerate(frames):
             if self._stop_flag.is_set():
@@ -225,24 +261,23 @@ class TrajectoryRecorder:
                 dt = max(fr_next["timeStamp"] - fr["timeStamp"], 0.001)
                 j_next = [fr_next["j1"], fr_next["j2"], fr_next["j3"], fr_next["j4"]]
                 max_delta = max(abs(j_next[k] - j[k]) for k in range(4))
-                required_dps = max_delta / dt
+                required_dps = max_delta / dt          # degrees per second needed
                 speed_pct = max(5, min(100, int(math.ceil(required_dps / 200.0 * 100))))
             else:
-                speed_pct = 20
+                speed_pct = 20  # final frame: coast to a gentle stop
 
             # ── Build and send command ───────────────────────────────────────
             cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
                    f"SpeedJ={speed_pct},AccJ=100,CP=100)")
             self._send(cmd)
 
-            # ── Notify waypoint observers (e.g. ROS graph publishers) ────────
+            # ── Notify waypoint observers (graph publishers) ─────────────────
             if self._waypoint_cb is not None:
                 try:
                     self._waypoint_cb(np.radians(j))
                 except Exception:
                     pass
 
-            # ── Check stop immediately after send ────────────────────────────
             if self._stop_flag.is_set():
                 break
 
@@ -261,7 +296,7 @@ class TrajectoryRecorder:
 
         self.is_playing = False
         if self._stop_flag.is_set():
-            self._log.info("⏹️  Playback stopped — returning to real-time teleop")
+            self._log.info("⏹️  Playback stopped")
         else:
             self._log.info("✅ Preview complete")
 
@@ -285,11 +320,11 @@ class TrajectoryRecorder:
         if was_recording:
             self._log.info("⏹️  Recording stopped")
         if was_playing:
-            self._log.info("⏹️  Playback stopped — live teleop resumed")
+            self._log.info("⏹️  Playback stopped")
 
         if go_home:
             self._go_home()
-            self._block_until = time.perf_counter() + 5.0  # 5 s for robot to reach home
+            self._block_until = time.perf_counter() + 5.0
 
     def _go_home(self):
         """Send robot to Home position (0, 0, 0, 0)."""
@@ -322,7 +357,7 @@ class TrajectoryRecorder:
             return ""
         try:
             with open(path, "w") as f:
-                json.dump({"frames": frames}, f, indent=2)
+                json.dump({"frames": frames}, f, indent=4)
             self._log.info(f"💾 Saved {len(frames)} frames → {path}")
             return path
         except Exception as e:

@@ -751,6 +751,17 @@ class UnitySimulator(Node):
     def _tr_stop(self):
         self._tr_is_playing = False
         self._tr_is_recording = False
+        # Reset joint angles to Home (0,0,0,0) so teleop doesn't
+        # drive robot away from home after the homing command finishes
+        self.j1_angle = 0.0
+        self.j2_angle = 0.0
+        self.j3_angle = 0.0
+        self.j4_angle = 0.0
+        if hasattr(self, 'position_dot'):
+            cx, cy = 150, 150
+            self.canvas.coords(self.position_dot, cx-5, cy-5, cx+5, cy+5)
+        if hasattr(self, 'joint_label'):
+            self.joint_label.config(text="J1: 0.0°  J2: 0.0°\nJ3: 0.0°  J4: 0.0°")
         self._tr_publish('Stop')
 
     def _tr_save(self):
