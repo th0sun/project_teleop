@@ -161,8 +161,8 @@ class TeleopNode(Node):
             )
             self.get_logger().info(f"🧪 EXPERIMENTAL MODE: {self._experimental_strategy.mode_name} (bypasses Controller/Planner/Predictor)")
         
-        self.latest_target = np.zeros(4)
-        self.latest_raw_target = np.zeros(4)  # Raw validated (no Kalman prediction)
+        self.latest_target = None
+        self.latest_raw_target = None  # Raw validated (no Kalman prediction)
         self.current_cmd_target = np.zeros(4)
         
         # 1. Initialize logic modules

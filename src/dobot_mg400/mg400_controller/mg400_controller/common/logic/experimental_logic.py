@@ -133,9 +133,10 @@ class _RawLogic:
         
         interval = 1.0 / max(cfg.RAW_HZ, 1)
 
-        if self._last_send_t == 0.0 or (now - self._last_send_t) >= interval:
+        # Use a small tolerance (e.g. 5ms) to prevent timer aliasing with the 50Hz main loop
+        if self._last_send_t == 0.0 or (now - self._last_send_t) >= (interval - 0.005):
             self._last_send_t = now
-            return True, q_target[:4].copy(), "Raw_Timer"
+            return True, q_target[:4].copy(), f"Raw_Timer ({cfg.RAW_HZ}Hz)"
 
         return False, None, "Wait"
 
