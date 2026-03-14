@@ -401,7 +401,7 @@ class TeleopNode(Node):
             
             # 2. Extract Unity timestamp (T1) and ROS timestamp (T2)
             unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            now_ros_sec = self.get_clock().now().nanoseconds * 1e-9
+            now_ros_sec = time.time()  # Use absolute time for sync and logging
             
             # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION (Triple-Lock) ---
             # Level 2 & 3: Filtered Min-Window + Drift Compensation
@@ -515,9 +515,10 @@ class TeleopNode(Node):
     def _high_precision_control_loop(self):
         """
         Runs the control loop in a dedicated thread to avoid ROS executor jitter.
-        Ensures strict 50Hz (20ms) timing regardless of computer load.
+        Runs at 200Hz (5ms) so that experimental logic timers (e.g., 25Hz or 50Hz)
+        can trigger precisely when they are due without beat-frequency aliasing.
         """
-        target_hz = 50.0
+        target_hz = 200.0
         period = 1.0 / target_hz
         next_time = time.perf_counter() + period
         
@@ -640,8 +641,11 @@ class TeleopNode(Node):
             # Update Analyzer Stats
             self.latency_analyzer.update_tracking(velocity_mag)
             
+            # Use absolute time for Latency Analyzer since T1/T2 are absolute
+            now_abs = time.time()
+            
             if velocity_mag > motion_config.MOTION_START_THRESHOLD:
-                if self.latency_analyzer.mark_motion_start(now):
+                if self.latency_analyzer.mark_motion_start(now_abs):
                      self.get_logger().debug(f"Motion started: velocity={velocity_mag:.6f} rad/s")
             
             # T5: Target Reached
@@ -650,7 +654,7 @@ class TeleopNode(Node):
             is_stopped = velocity_mag < 0.005
             
             if dist < 0.01 and is_stopped:
-                if self.latency_analyzer.mark_target_reached(now):
+                if self.latency_analyzer.mark_target_reached(now_abs):
                     # Get Full Report
                     metrics, report = self.latency_analyzer.analyze_arrival(q_current, velocity_mag)
                     if metrics:
@@ -659,14 +663,13 @@ class TeleopNode(Node):
                         
                         # CSV Log (Async)
                         self.log_queue.put(('TELEOP_LATENCY', [
-                            now, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
+                            now_abs, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
                             metrics['network_ms'], metrics['decision_ms'], metrics['command_ms'],
                             metrics['response_ms'], metrics['motion_time_ms'], metrics['execution_ms'],
                             metrics['e2e_ms'],
                             metrics['target'], metrics['final_q'],
                             metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
                         ]))
-
             
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION
@@ -674,12 +677,13 @@ class TeleopNode(Node):
             
             # 🧪 EXPERIMENTAL PATH (only active if user selected m11/m14/m15/m8_raw)
             # Uses RAW validated target — bypasses Kalman predictor entirely
+            # Pass 'now' (perf_counter) for high-precision loop timing, not 'now_abs'
             if self._experimental_strategy is not None:
                 should_send, cmd_str, q_safe, exp_reason = self._experimental_strategy.process(
                     self.latest_raw_target, q_current, now, robot_mode=current_mode
                 )
                 if should_send and cmd_str:
-                    t3_cmd_send = time.time()
+                    t3_cmd_send = time.time()  # Absolute time for Latency Analyzer T3
                     if self.sender.send(cmd_str):
                         self.latency_analyzer.start_tracking(
                             self.unity_send_time, self.target_recv_time,
