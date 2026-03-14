@@ -39,7 +39,7 @@ _ip="export ROBOT_IP=$ROBOT_IP"
 # note: exec bash ทำให้ pane ค้างไว้หลัง node หยุด, กด ↑ Enter รันใหม่ได้
 CMD_NODE="$_ip && $_src && ros2 run mg400_controller vr_teleop_node; exec bash"
 CMD_RVIZ="$_src && ros2 launch mg400_bringup main.launch.py; exec bash"
-CMD_BRIDGE="$_src && python3 $WS/project_teleop/monitor_bridge.py; exec bash"
+CMD_BRIDGE="$_src && python3 $WS/monitor_bridge.py; exec bash"
 
 if [ "$MODE" = "3" ] || [ "$MODE" = "4" ]; then
     CMD_EXTRA="$_src && ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0; exec bash"
