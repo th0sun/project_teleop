@@ -587,12 +587,21 @@ class TeleopNode(Node):
         """Called by TrajectoryRecorder for each played waypoint (radians, 4-element).
         Publishes to /teleop/playback_unity and /teleop/sent_command so the monitor
         bridge shows the live trajectory values in the Unity and Sent graphs.
+        Also publishes FK of waypoint to /teleop/unity_xyz so the 3D graph target
+        trail updates during playback.
         """
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.position = list(q_rad)
         self.pub_playback_unity.publish(js)
         self.pub_sent_command.publish(js)
+        try:
+            xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_rad))
+            xyz_msg = Float64MultiArray()
+            xyz_msg.data = xyz.tolist()
+            self.pub_unity_xyz.publish(xyz_msg)
+        except Exception:
+            pass
 
     def _high_precision_control_loop(self):
         """
@@ -636,12 +645,10 @@ class TeleopNode(Node):
             now = time.perf_counter()
             
             # === TEACH & REPEAT GATING ===
-            # During playback, the sequencer owns the command stream — skip teleop.
-            # During recording, capture waypoints but still allow live teleop.
+            # is_blocked: during playback OR during post-stop homing (5 s window)
             tr = self.trajectory_recorder
-            if tr.is_playing:
-                return  # sequencer thread is sending commands
-            if tr.is_recording:
+            is_blocked = tr.is_playing or (time.perf_counter() < tr._block_until)
+            if tr.is_recording and not is_blocked:
                 # We record the *TARGET* from VR/Simulator, not the actual robot pos
                 tr.record_tick(self.latest_target)
             
@@ -763,6 +770,10 @@ class TeleopNode(Node):
                             metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
                         ]))
             
+            # === SKIP TELEOP COMMANDS DURING PLAYBACK / POST-STOP HOMING ===
+            if is_blocked:
+                return  # monitoring data already published above; sequencer owns commands
+
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION
             # ---------------------------------------------------------

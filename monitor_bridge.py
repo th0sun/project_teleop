@@ -73,6 +73,7 @@ class MonitorBridge(Node):
         # ── Shared telemetry state ────────────────────────────────────────────
         self.actual     = [0.0] * 4
         self.unity      = [0.0] * 4
+        self._last_playback_t = 0.0  # perf_counter of last /teleop/playback_unity msg
         self.sent       = [0.0] * 4
         self.tool_act   = [0.0] * 6
         self.tool_tgt   = [0.0] * 6
@@ -121,9 +122,9 @@ class MonitorBridge(Node):
             return self.create_subscription(typ, topic, cb, qos)
 
         sub(ACTUAL_TOPIC,     JointState,        self._cb_actual)
-        sub(UNITY_TOPIC,      JointState,        self._cb_unity, qos_be)
+        sub(UNITY_TOPIC,      JointState,        self._cb_unity_vr, qos_be)
         sub(SENT_TOPIC,       JointState,        self._cb_sent)
-        sub("/teleop/playback_unity", JointState, self._cb_unity)  # T&R playback overrides unity graph
+        sub("/teleop/playback_unity", JointState, self._cb_unity_playback)
         sub(TOOL_ACT_TOPIC,   Float64MultiArray, lambda m: self._f64(m, 'tool_act'))
         sub(TOOL_TGT_TOPIC,   Float64MultiArray, lambda m: self._f64(m, 'tool_tgt'))
         sub(UNITY_XYZ_TOPIC,  Float64MultiArray, lambda m: self._f64(m, 'unity_xyz'))
@@ -148,7 +149,18 @@ class MonitorBridge(Node):
         if len(msg.position) >= 9:
             self.actual = list(np.degrees([msg.position[i] for i in (0, 1, 3, 8)]))
 
-    def _cb_unity(self, msg):
+    def _cb_unity_vr(self, msg):
+        """VR/keyboard unity target — ignored for 0.5 s after receiving a playback message
+        so that stale queued VR messages cannot overwrite the current playback waypoint."""
+        if time.perf_counter() - self._last_playback_t < 0.5:
+            return
+        self._counts["UNITY TARGET"] += 1
+        if len(msg.position) >= 4:
+            self.unity = list(np.degrees(msg.position[:4]))
+
+    def _cb_unity_playback(self, msg):
+        """T&R playback waypoint — always accepted; stamps _last_playback_t."""
+        self._last_playback_t = time.perf_counter()
         self._counts["UNITY TARGET"] += 1
         if len(msg.position) >= 4:
             self.unity = list(np.degrees(msg.position[:4]))

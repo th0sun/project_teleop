@@ -72,6 +72,7 @@ class TrajectoryRecorder:
         self.is_playing    = False
         self._stop_flag    = threading.Event()
         self._play_thread: Optional[threading.Thread] = None
+        self._block_until  = 0.0  # perf_counter: suppress teleop until this time (after go_home)
 
         # ── Recorded data (native format) ────────────────────────────────────
         self._frames: List[Dict] = []   # [{timeStamp, j1..j4}] degrees
@@ -91,6 +92,7 @@ class TrajectoryRecorder:
             self._log.warn("⚠️  Cannot record while playing")
             return
         self.is_recording = True
+        self._block_until = 0.0  # cancel any pending homing suppression
         self._frames = []
         self._rec_t0 = time.time()
         self._log.info("🔴 Recording started")
@@ -287,6 +289,7 @@ class TrajectoryRecorder:
 
         if go_home:
             self._go_home()
+            self._block_until = time.perf_counter() + 5.0  # 5 s for robot to reach home
 
     def _go_home(self):
         """Send robot to Home position (0, 0, 0, 0)."""
