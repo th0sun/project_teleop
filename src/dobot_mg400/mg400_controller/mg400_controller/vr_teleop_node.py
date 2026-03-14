@@ -647,8 +647,24 @@ class TeleopNode(Node):
             # === TEACH & REPEAT GATING ===
             # is_blocked: during playback OR during post-stop homing (5 s window)
             tr = self.trajectory_recorder
-            is_blocked = tr.is_playing or (time.perf_counter() < tr._block_until)
-            if tr.is_recording and not is_blocked:
+            is_blocked = False
+            
+            if time.perf_counter() < tr._block_until:
+                is_blocked = True
+            
+            # If playing, override the user's latest_target with the interpolated playback target
+            if tr.is_playing:
+                playback_target = tr.get_playback_target(now)
+                if playback_target is not None:
+                    # Update target so the default control logic tracks it
+                    self.latest_target = playback_target
+                    self.latest_raw_target = playback_target
+                    # Also notify the waypoint callback so Unity/Sent graphs update immediately
+                    tr._waypoint_cb(playback_target)
+                else:
+                    is_blocked = True  # Stop sending if playback just finished or errored
+            
+            if tr.is_recording and not tr.is_playing and not is_blocked:
                 # We record the *TARGET* from VR/Simulator, not the actual robot pos
                 tr.record_tick(self.latest_target)
             

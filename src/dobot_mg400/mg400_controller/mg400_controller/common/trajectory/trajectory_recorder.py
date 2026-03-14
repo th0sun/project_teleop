@@ -223,98 +223,70 @@ class TrajectoryRecorder:
             return []
 
     # ═════════════════════════════════════════════════════════════════════════
-    #  PREVIEW (Temporal Sequencer — NO decimation, uses frames directly)
+    #  PREVIEW (Temporal Sequencer via Interpolation)
     # ═════════════════════════════════════════════════════════════════════════
     def start_preview(self):
-        """Begin playing back loaded trajectory in a background thread."""
+        """Begin playing back loaded trajectory using the real-time control loop."""
         if not self.loaded_frames:
             self._log.error("No trajectory loaded for preview")
             return
         if self.is_playing:
             self._log.warn("Already playing")
             return
-        self._stop_flag.clear()
         self.is_playing = True
-        self._play_thread = threading.Thread(target=self._play_worker, daemon=True)
-        self._play_thread.start()
+        self._playback_t0 = time.perf_counter()
+        self._playback_idx = 0
+        n = len(self.loaded_frames)
+        t_traj = self.loaded_frames[0]["timeStamp"]
+        self._log.info(f"▶️  Preview start — {n} waypoints, "
+                       f"{self.loaded_frames[-1]['timeStamp'] - t_traj:.1f}s")
 
-    def _play_worker(self):
-        """Sequencer thread: sends EXACT frame joint values with computed SpeedJ.
-        No decimation — frames are already clean ~8-10 Hz from smart recording.
-        """
+    def get_playback_target(self, now_perf: float) -> Optional[np.ndarray]:
+        """Called at 50Hz from control loop. Returns interpolated target (radians)."""
+        if not self.is_playing or not self.loaded_frames:
+            return None
+        
         frames = self.loaded_frames
         n = len(frames)
-        t0_traj = frames[0]["timeStamp"]
-        t_wall_start = time.perf_counter()
-        self._log.info(f"▶️  Preview start — {n} waypoints, "
-                       f"{frames[-1]['timeStamp'] - t0_traj:.1f}s")
-
-        for i, fr in enumerate(frames):
-            if self._stop_flag.is_set():
-                break
-
-            j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
-
-            # ── Compute SpeedJ for this segment ──────────────────────────────
-            if i < n - 1:
-                fr_next = frames[i + 1]
-                dt = max(fr_next["timeStamp"] - fr["timeStamp"], 0.001)
-                j_next = [fr_next["j1"], fr_next["j2"], fr_next["j3"], fr_next["j4"]]
-                max_delta = max(abs(j_next[k] - j[k]) for k in range(4))
-                required_dps = max_delta / dt          # degrees per second needed
-                speed_pct = max(5, min(100, int(math.ceil(required_dps / 200.0 * 100))))
-            else:
-                speed_pct = 20  # final frame: coast to a gentle stop
-
-            # ── Build and send command ───────────────────────────────────────
-            cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
-                   f"SpeedJ={speed_pct},AccJ=100,CP=100)")
-            self._send(cmd)
-
-            # ── Notify waypoint observers (graph publishers) ─────────────────
-            if self._waypoint_cb is not None:
-                try:
-                    self._waypoint_cb(np.radians(j))
-                except Exception:
-                    pass
-
-            if self._stop_flag.is_set():
-                break
-
-            # ── Wait until the next frame's wall-clock time ──────────────────
-            if i < n - 1:
-                next_rel = frames[i + 1]["timeStamp"] - t0_traj
-                sleep_dur = (t_wall_start + next_rel) - time.perf_counter()
-                if sleep_dur > 0:
-                    if self._stop_flag.wait(timeout=sleep_dur):
-                        break
-
-            # Progress log every 25%
-            pct = int((i + 1) / n * 100)
-            if pct % 25 == 0 and pct > 0:
-                self._log.info(f"   Preview: {pct}%")
-
-        self.is_playing = False
-        if self._stop_flag.is_set():
-            self._log.info("⏹️  Playback stopped")
-        else:
+        t_traj = now_perf - self._playback_t0 + frames[0]["timeStamp"]
+        
+        # End of trajectory
+        if t_traj >= frames[-1]["timeStamp"]:
+            self.is_playing = False
             self._log.info("✅ Preview complete")
+            fr = frames[-1]
+            return np.radians([fr["j1"], fr["j2"], fr["j3"], fr["j4"]])
+
+        # Find current segment
+        while self._playback_idx < n - 2 and frames[self._playback_idx + 1]["timeStamp"] < t_traj:
+            self._playback_idx += 1
+            
+        fr0 = frames[self._playback_idx]
+        fr1 = frames[self._playback_idx + 1]
+        
+        dt = fr1["timeStamp"] - fr0["timeStamp"]
+        if dt <= 0:
+            return np.radians([fr0["j1"], fr0["j2"], fr0["j3"], fr0["j4"]])
+            
+        ratio = (t_traj - fr0["timeStamp"]) / dt
+        ratio = max(0.0, min(1.0, ratio))
+        
+        # Linear interpolate
+        j = []
+        for k in ["j1", "j2", "j3", "j4"]:
+            j.append(fr0[k] + ratio * (fr1[k] - fr0[k]))
+            
+        return np.radians(j)
 
     # ═════════════════════════════════════════════════════════════════════════
     #  STOP & HOME
     # ═════════════════════════════════════════════════════════════════════════
     def stop_all(self, go_home: bool = False):
-        """Stop any recording/playback.  When go_home=True also move to Home.
-        By default just aborts so live teleop resumes immediately.
-        """
+        """Stop any recording/playback.  When go_home=True also move to Home."""
         was_recording = self.is_recording
         was_playing   = self.is_playing
 
         self.is_recording = False
-        self._stop_flag.set()
-
-        if self._play_thread and self._play_thread.is_alive():
-            self._play_thread.join(timeout=2.0)
         self.is_playing = False
 
         if was_recording:
