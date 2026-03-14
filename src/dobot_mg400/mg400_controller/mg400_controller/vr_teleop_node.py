@@ -560,9 +560,13 @@ class TeleopNode(Node):
         if status == "Record":
             tr.start_recording()
         elif status == "Stop":
-            tr.stop_all()
+            tr.stop_all(go_home=True)
         elif status == "Save":
             tr.save_temp()
+        elif status.startswith("Save:"):
+            name = status.split(":", 1)[1].strip()
+            path = tr.save_as(name)
+            self.get_logger().info(f"💾 Trajectory saved as → {path}")
         elif status.startswith("Load:"):
             name = status.split(":", 1)[1].strip()
             tr.load(name)

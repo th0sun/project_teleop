@@ -224,7 +224,7 @@ class TrajectoryRecorder:
                 j_next = [fr_next["j1"], fr_next["j2"], fr_next["j3"], fr_next["j4"]]
                 max_delta = max(abs(j_next[k] - j[k]) for k in range(4))
                 required_dps = max_delta / dt
-                speed_pct = max(5, min(100, int(math.ceil(required_dps / 360.0 * 100))))
+                speed_pct = max(5, min(100, int(math.ceil(required_dps / 200.0 * 100))))
             else:
                 speed_pct = 20
 

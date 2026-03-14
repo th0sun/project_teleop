@@ -350,6 +350,8 @@ class UnitySimulator(Node):
     
     def update_keyboard_display(self, active_key=None):
         """Update keyboard state display"""
+        if not hasattr(self, 'keyboard_label'):
+            return
         if active_key:
             self.keyboard_label.config(text=f"W/S: J3 | A/D: J4\nActive: {active_key.upper()}", fg="green")
         else:
@@ -579,6 +581,8 @@ class UnitySimulator(Node):
             positions = self.generate_random()
         elif self.mode in ['mouse_3d', 'teach_repeat']:
             if self.tk_root:
+                if self.mode == 'teach_repeat' and getattr(self, '_tr_is_playing', False):
+                    return  # playback owns the command stream
                 # Use all 4 joint angles directly (no IK)
                 positions = [
                     math.radians(self.j1_angle),  # J1 from mouse
@@ -626,15 +630,17 @@ class UnitySimulator(Node):
 
     def init_teach_repeat_gui(self):
         os.makedirs(self.TRAJ_DIR, exist_ok=True)
+        self._tr_is_playing = False
+        self._tr_is_recording = False
         self.tk_root = tk.Tk()
         self.tk_root.title('\U0001F3AF Teach & Repeat — Simulator')
-        self.tk_root.geometry('650x550')
+        self.tk_root.geometry('650x580')
         self.tk_root.resizable(False, False)
 
         main_frame = tk.Frame(self.tk_root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # ── Left Panel: Joint Control Workspace (from mode 6) ─────────────
+        # ── Left Panel: Joint Control Workspace ───────────────────────────
         canvas_frame = tk.LabelFrame(main_frame, text="Joint Control Workspace", font=("Arial", 11, "bold"))
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
 
@@ -649,14 +655,16 @@ class UnitySimulator(Node):
 
         joint_frame = tk.Frame(canvas_frame)
         joint_frame.pack(fill=tk.X, pady=5)
-        self.joint_label = tk.Label(joint_frame, text="J1: 0.0°  J2: 0.0°\nJ3: 0.0°  J4: 0.0°",
-                                     font=("Courier", 11, "bold"), justify="center")
+        self.joint_label = tk.Label(joint_frame,
+                                    text="J1: 0.0\u00b0  J2: 0.0\u00b0\nJ3: 0.0\u00b0  J4: 0.0\u00b0",
+                                    font=("Courier", 11, "bold"), justify="center")
         self.joint_label.pack(pady=5)
+        self.keyboard_label = self.joint_label  # update_keyboard_display needs this attr
 
         self.tk_root.bind('<KeyPress>', self.on_key_press)
         self.tk_root.bind('<KeyRelease>', self.on_key_release)
 
-        inst_text = "Controls:\n• Mouse in box: J1 (X) & J2 (Y)\n• W/S keys: J3 | A/D keys: J4"
+        inst_text = "Controls:\n\u2022 Mouse in box: J1 (X) & J2 (Y)\n\u2022 W/S keys: J3 | A/D keys: J4"
         tk.Label(canvas_frame, text=inst_text, font=("Arial", 8), justify="center", fg="gray").pack(pady=5)
 
         # ── Right Panel: Teach & Repeat Controls ──────────────────────────
@@ -665,50 +673,47 @@ class UnitySimulator(Node):
 
         pad = dict(padx=10, pady=4, sticky='ew')
 
-        # ── Status label ─────────────────────────────────────────────────
+        # ── Status label ──────────────────────────────────────────────────
         self._tr_status = tk.StringVar(value='IDLE')
         tk.Label(control_frame, textvariable=self._tr_status,
                  font=('Courier', 14, 'bold'), fg='#0ea5e9',
                  anchor='center').grid(row=0, column=0, columnspan=2, pady=8)
 
-        # ── Buttons ──────────────────────────────────────────────────────
+        # ── Record / Stop / Preview buttons ───────────────────────────────
         btn_cfg = dict(font=('Arial', 11, 'bold'), width=14, height=2)
         tk.Button(control_frame, text='\U0001F534 Record', bg='#ef4444', fg='white',
                   command=self._tr_record, **btn_cfg).grid(row=1, column=0, **pad)
-        tk.Button(control_frame, text='\u23F9  Stop', bg='#64748b', fg='white',
+        tk.Button(control_frame, text='\u23f9  Stop', bg='#64748b', fg='white',
                   command=self._tr_stop, **btn_cfg).grid(row=1, column=1, **pad)
-        tk.Button(control_frame, text='\U0001F4BE Save', bg='#22c55e', fg='white',
-                  command=self._tr_save, **btn_cfg).grid(row=2, column=0, **pad)
-        tk.Button(control_frame, text='\u25B6  Preview', bg='#3b82f6', fg='white',
-                  command=self._tr_preview, **btn_cfg).grid(row=2, column=1, **pad)
+        tk.Button(control_frame, text='\u25b6  Preview', bg='#3b82f6', fg='white',
+                  command=self._tr_preview, **btn_cfg).grid(row=2, column=0, columnspan=2, **pad)
 
-        # ── File dropdown + Load ─────────────────────────────────────────
-        tk.Label(control_frame, text='Trajectory file:',
-                 font=('Arial', 10)).grid(row=3, column=0, padx=10, pady=(12,2), sticky='w')
+        # ── Save as filename ──────────────────────────────────────────────
+        tk.Label(control_frame, text='Save as filename:',
+                 font=('Arial', 9, 'bold')).grid(row=3, column=0, columnspan=2, padx=10, pady=(12, 2), sticky='w')
+        self._tr_name_entry = tk.Entry(control_frame, width=18, font=('Arial', 10))
+        self._tr_name_entry.grid(row=4, column=0, padx=10, pady=2, sticky='ew')
+        tk.Button(control_frame, text='\U0001F4BE Save As', font=('Arial', 9, 'bold'),
+                  bg='#22c55e', fg='white',
+                  command=self._tr_save_as).grid(row=4, column=1, padx=10, pady=2, sticky='ew')
 
+        # ── File dropdown + Load ──────────────────────────────────────────
+        tk.Label(control_frame, text='Load trajectory:',
+                 font=('Arial', 9, 'bold')).grid(row=5, column=0, columnspan=2, padx=10, pady=(10, 2), sticky='w')
         self._tr_file_var = tk.StringVar()
         self._tr_combo = ttk.Combobox(control_frame, textvariable=self._tr_file_var,
                                        state='readonly', width=22)
-        self._tr_combo.grid(row=4, column=0, padx=10, pady=2, sticky='ew')
+        self._tr_combo.grid(row=6, column=0, padx=10, pady=2, sticky='ew')
         self._tr_refresh_files()
-
-        tk.Button(control_frame, text='\U0001F4C2 Load', font=('Arial', 10, 'bold'),
-                  command=self._tr_load).grid(row=4, column=1, padx=10, pady=2, sticky='ew')
+        tk.Button(control_frame, text='\U0001F4c2 Load', font=('Arial', 10, 'bold'),
+                  command=self._tr_load).grid(row=6, column=1, padx=10, pady=2, sticky='ew')
         tk.Button(control_frame, text='\U0001F504 Refresh', font=('Arial', 9),
-                  command=self._tr_refresh_files).grid(row=5, column=1, padx=10, pady=2, sticky='ew')
-
-        # ── Manual JSON input ────────────────────────────────────────────
-        tk.Label(control_frame, text='Or paste JSON path to send:',
-                 font=('Arial', 9)).grid(row=6, column=0, columnspan=2, padx=10, pady=(10,2), sticky='w')
-        self._tr_json_entry = tk.Entry(control_frame, width=30)
-        self._tr_json_entry.grid(row=7, column=0, padx=10, pady=2, sticky='ew')
-        tk.Button(control_frame, text='Send JSON', font=('Arial', 9),
-                  command=self._tr_send_json).grid(row=7, column=1, padx=10, pady=2, sticky='ew')
+                  command=self._tr_refresh_files).grid(row=7, column=1, padx=10, pady=2, sticky='ew')
 
         control_frame.columnconfigure(0, weight=1)
         control_frame.columnconfigure(1, weight=1)
 
-        # Start GUI update loop for keyboard watchdog
+        # Start GUI keyboard-watchdog loop
         self.tk_root.after(30, self.gui_update_loop_teach_repeat)
 
     def draw_joint_workspace_teach_repeat(self):
@@ -739,10 +744,30 @@ class UnitySimulator(Node):
         self._tr_status.set(status_str)
         self.get_logger().info(f'\U0001F3AF Teach status → {status_str}')
 
-    def _tr_record(self):   self._tr_publish('Record')
-    def _tr_stop(self):     self._tr_publish('Stop')
-    def _tr_save(self):     self._tr_publish('Save')
-    def _tr_preview(self):  self._tr_publish('Preview')
+    def _tr_record(self):
+        self._tr_is_recording = True
+        self._tr_publish('Record')
+
+    def _tr_stop(self):
+        self._tr_is_playing = False
+        self._tr_is_recording = False
+        self._tr_publish('Stop')
+
+    def _tr_save(self):
+        self._tr_publish('Save')  # quick-save as temp_trajectory.json
+
+    def _tr_save_as(self):
+        name = getattr(self, '_tr_name_entry', None)
+        filename = name.get().strip() if name else ''
+        if not filename:
+            self._tr_status.set('Enter a filename first')
+            return
+        self._tr_publish(f'Save:{filename}')
+        self.tk_root.after(400, self._tr_refresh_files)  # refresh dropdown after save
+
+    def _tr_preview(self):
+        self._tr_is_playing = True
+        self._tr_publish('Preview')
 
     def _tr_load(self):
         name = self._tr_file_var.get()
@@ -759,20 +784,7 @@ class UnitySimulator(Node):
             self._tr_combo.current(0)
 
     def _tr_send_json(self):
-        path = self._tr_json_entry.get().strip()
-        if not path:
-            return
-        try:
-            with open(os.path.expanduser(path), 'r') as f:
-                data = f.read()
-            msg = String()
-            msg.data = data
-            self.pub_traj_data.publish(msg)
-            self._tr_status.set('JSON sent')
-            self.get_logger().info(f'\U0001F3AF Trajectory JSON sent ({len(data)} bytes)')
-        except Exception as e:
-            self._tr_status.set(f'Error: {e}')
-            self.get_logger().error(f'Failed to send JSON: {e}')
+        pass  # superseded by Save As filename workflow
 
 def main(args=None):
     rclpy.init(args=args)
