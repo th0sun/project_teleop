@@ -47,7 +47,7 @@ try:
     from rclpy.node          import Node
     from rclpy.qos           import QoSProfile, ReliabilityPolicy, HistoryPolicy
     from sensor_msgs.msg     import JointState
-    from std_msgs.msg        import Float64MultiArray, Bool, Int32MultiArray, Int64, Int32
+    from std_msgs.msg        import Float64MultiArray, Bool, Int32MultiArray, Int64, Int32, String
     ROS_AVAILABLE = True
 except ImportError:
     ROS_AVAILABLE = False
@@ -385,6 +385,7 @@ class RosNode(Node if ROS_AVAILABLE else object):
         d = self.data
         self.pub_suction = self.create_publisher(Bool, SUCTION_TOPIC, 10)
         self.pub_light   = self.create_publisher(Int32MultiArray, LIGHT_TOPIC, 10)
+        self.pub_dash    = self.create_publisher(String, "/robot/dashboard_cmd", 10)
         # Use BEST_EFFORT QoS (depth=1) for high-frequency topics to match the publisher
         qos_be = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -428,6 +429,9 @@ class RosNode(Node if ROS_AVAILABLE else object):
     def send_light(self, port, state):
         if self.pub_light:
             msg = Int32MultiArray(); msg.data=[port,int(state)]; self.pub_light.publish(msg)
+    def send_dashboard_cmd(self, cmd_str):
+        if hasattr(self, 'pub_dash') and self.pub_dash:
+            msg = String(); msg.data = cmd_str; self.pub_dash.publish(msg)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SESSION LOGGER
@@ -839,6 +843,27 @@ class MonitorWindow(QMainWindow):
             ll.addWidget(btn)
             self._btns_light[name] = (btn, port, on_clr, lit_prop)
         ll.addStretch(); lay.addWidget(lr)
+
+        # Dashboard Commands Row
+        dr = QWidget(); dr.setStyleSheet(f"background:{PANEL};")
+        dl = QHBoxLayout(dr); dl.setContentsMargins(10,4,10,4); dl.setSpacing(6)
+        lbl3 = QLabel("Robot"); lbl3.setFont(font(FONT_SANS,10,True))
+        lbl3.setStyleSheet(f"color:{MUTED}; background:transparent;"); lbl3.setFixedWidth(60)
+        dl.addWidget(lbl3)
+        
+        for name, cmd, bg_clr in [
+            ("ENABLE", "EnableRobot()", C_GREEN),
+            ("DISABLE", "DisableRobot()", ORANGE),
+            ("CLEAR ERR", "ClearError()", C_YELLOW),
+            ("RESET", "ResetRobot()", RED),
+        ]:
+            btn = QPushButton(name)
+            btn.setFont(font(FONT_SANS,9,True)); btn.setFixedWidth(80)
+            btn.setStyleSheet(f"QPushButton {{ background:{PANEL2}; color:{MUTED}; border:1px solid {BORDER}; border-radius:4px; padding:4px; }} QPushButton:hover {{ background:{bg_clr}; color:white; border-color:{bg_clr}; }}")
+            btn.clicked.connect(lambda _, c=cmd: self._send_dash(c))
+            dl.addWidget(btn)
+            
+        dl.addStretch(); lay.addWidget(dr)
 
     def _build_metrics(self, lay):
         lay.addSpacing(8); lay.addWidget(_sec_label("EXECUTION METRICS")); lay.addSpacing(6)

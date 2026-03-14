@@ -247,6 +247,11 @@ class TeleopNode(Node):
             Int32MultiArray, LIGHT_TOPIC, self._light_callback, 10
         )
         
+        # Dashboard Command Control (From GUI)
+        self.sub_dashboard_cmd = self.create_subscription(
+            String, "/robot/dashboard_cmd", self._dashboard_cmd_callback, 10
+        )
+        
         # 3. Connect to Robot
         if not self.connection.connect():
             self.get_logger().error("Failed to connect to robot")
@@ -511,6 +516,22 @@ class TeleopNode(Node):
                 self.sender.set_digital_output(port, state)
             else:
                 self.get_logger().warn(f"⚠️ Cannot set light port {port}; Robot disconnected.")
+
+    def _dashboard_cmd_callback(self, msg):
+        """Callback for arbitrary Dashboard Commands sent from GUI over ROS."""
+        cmd = msg.data.strip()
+        if not cmd:
+            return
+            
+        if self.connection.connected:
+            self.get_logger().info(f"📨 Dashboard Command received from GUI: {cmd}")
+            # Add newline if missing as required by Dobot protocol
+            if not cmd.endswith('\n'):
+                cmd += '\n'
+            # Send via connection (non-blocking for basic commands)
+            self.connection.send_dashboard_cmd(cmd)
+        else:
+            self.get_logger().warn(f"⚠️ Cannot send dashboard cmd '{cmd}'; Robot disconnected.")
     
     def _high_precision_control_loop(self):
         """
