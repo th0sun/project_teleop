@@ -795,7 +795,12 @@ class MonitorWindow(QMainWindow):
             tl.setStyleSheet(f"color:{MUTED}; border:none;")
             cl.addWidget(tl)
             
-            self._flow_cards[name] = {"hz": hz}
+            val = QLabel("Waiting for data...")
+            val.setFont(font(FONT_MONO, 10))
+            val.setStyleSheet(f"color:{TEXT}; border:none;")
+            cl.addWidget(val)
+            
+            self._flow_cards[name] = {"hz": hz, "val": val}
             return c
 
         # Main Grid Layout
@@ -1512,6 +1517,17 @@ class MonitorWindow(QMainWindow):
                     lbl = self._flow_cards[k]["hz"]
                     lbl.setText(f"{hz:.1f} Hz")
                     lbl.setStyleSheet(f"color:{GREEN if hz > 0.5 else MUTED}; border:none;")
+
+        # Update real-time values in Data Flow cards
+        if self._flow_cards:
+            self._flow_cards.get("UNITY TARGET", {}).get("val", QLabel()).setText(f"[{d.unity[0]:+.1f}°, {d.unity[1]:+.1f}°, {d.unity[2]:+.1f}°, {d.unity[3]:+.1f}°]")
+            self._flow_cards.get("PREDICTED TGT", {}).get("val", QLabel()).setText(f"[{d.predicted[0]:+.1f}°, {d.predicted[1]:+.1f}°, {d.predicted[2]:+.1f}°, {d.predicted[3]:+.1f}°]")
+            self._flow_cards.get("SENT COMMAND", {}).get("val", QLabel()).setText(f"[{d.sent[0]:+.1f}°, {d.sent[1]:+.1f}°, {d.sent[2]:+.1f}°, {d.sent[3]:+.1f}°]")
+            self._flow_cards.get("ACTUAL FEEDBACK", {}).get("val", QLabel()).setText(f"[{d.actual[0]:+.1f}°, {d.actual[1]:+.1f}°, {d.actual[2]:+.1f}°, {d.actual[3]:+.1f}°]")
+            self._flow_cards.get("TOOL VECTOR", {}).get("val", QLabel()).setText(f"X: {d.tool_act[0]:.1f}  Y: {d.tool_act[1]:.1f}  Z: {d.tool_act[2]:.1f}")
+            self._flow_cards.get("ROBOT MODE", {}).get("val", QLabel()).setText(f"Mode: {MODE_NAMES.get(d.robot_mode, d.robot_mode)}")
+            self._flow_cards.get("ROBOT ERROR", {}).get("val", QLabel()).setText(f"Err Code: 0x{d.error_stat:02X}")
+            self._flow_cards.get("DIGITAL IO", {}).get("val", QLabel()).setText(f"Mask: 0x{d.do_status:04X}")
 
         # Latency
         if d.last_tgt_t: self._chips["cmd"].setText(f"Cmd: {(now-d.last_tgt_t)*1000:.0f}ms")
