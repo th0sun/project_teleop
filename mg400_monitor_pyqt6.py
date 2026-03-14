@@ -125,15 +125,17 @@ STOP_THR  = 0.5
 # ══════════════════════════════════════════════════════════════════════════════
 #  FONT SETUP
 # ══════════════════════════════════════════════════════════════════════════════
+FONT_MONO, FONT_SANS, FONT_COND = "Courier", "Arial", "Arial"
+
 def _load_fonts():
     """Load embedded Google Fonts from system or fallback gracefully."""
-    db = QFontDatabase()
+    global FONT_MONO, FONT_SANS, FONT_COND
     # Try to load from system; if unavailable use fallback names
     _mono = "JetBrains Mono"
     _sans = "Inter"
     _cond = "Barlow Condensed"
     # Check availability
-    families = db.families()
+    families = QFontDatabase.families()
     if "Consolas" in families:     _mono = "Consolas"
     elif "JetBrains Mono" in families: pass
     elif "Courier New" in families: _mono = "Courier New"
@@ -142,9 +144,8 @@ def _load_fonts():
         _sans = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
     if "Barlow Condensed" not in families:
         _cond = _sans
-    return _mono, _sans, _cond
-
-FONT_MONO, FONT_SANS, FONT_COND = _load_fonts()
+        
+    FONT_MONO, FONT_SANS, FONT_COND = _mono, _sans, _cond
 
 def font(family=None, size=10, bold=False, italic=False):
     f = QFont(family or FONT_SANS, size)
@@ -1343,6 +1344,10 @@ def main():
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 
     app = QApplication(sys.argv)
+    
+    # Must load fonts AFTER QApplication is created
+    _load_fonts()
+    
     app.setApplicationName("MG400 Monitor")
     app.setStyleSheet(QSS)
 
