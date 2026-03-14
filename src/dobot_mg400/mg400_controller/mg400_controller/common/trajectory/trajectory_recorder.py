@@ -65,12 +65,10 @@ class TrajectoryRecorder:
     """
 
     def __init__(self, command_send_fn: Callable, logger,
-                 get_position_fn: Optional[Callable] = None,
-                 waypoint_callback: Optional[Callable] = None):
+                 get_position_fn: Optional[Callable] = None):
         self._send = command_send_fn
         self._log  = logger
         self._get_pos = get_position_fn
-        self._waypoint_cb = waypoint_callback
 
         # ── State ────────────────────────────────────────────────────────────
         self.is_recording  = False

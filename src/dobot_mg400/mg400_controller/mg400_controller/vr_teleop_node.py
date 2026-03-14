@@ -659,8 +659,9 @@ class TeleopNode(Node):
                     # Update target so the default control logic tracks it
                     self.latest_target = playback_target
                     self.latest_raw_target = playback_target
-                    # Also notify the waypoint callback so Unity/Sent graphs update immediately
-                    tr._waypoint_cb(playback_target)
+                    
+                    # Publish the target directly to Unity & Sent graphs exactly as VR would
+                    self._playback_waypoint_callback(playback_target)
                 else:
                     is_blocked = True  # Stop sending if playback just finished or errored
             
