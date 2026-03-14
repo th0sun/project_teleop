@@ -652,22 +652,36 @@ class TeleopNode(Node):
             if time.perf_counter() < tr._block_until:
                 is_blocked = True
             
-            # If playing, override the user's latest_target with the interpolated playback target
+            # If playing, bypass regular logic and send directly at 25Hz
             if tr.is_playing:
                 playback_target = tr.get_playback_target(now)
                 if playback_target is not None:
-                    # Update target so the default control logic tracks it
+                    # Update target so the default control logic tracks it visually
                     self.latest_target = playback_target
                     self.latest_raw_target = playback_target
                     
-                    # Publish the target directly to Unity & Sent graphs exactly as VR would
-                    self._playback_waypoint_callback(playback_target)
+                    if not hasattr(self, '_last_playback_send_time'):
+                        self._last_playback_send_time = 0.0
+                        
+                    # Playback runs at exactly 25Hz (0.04s) to match M17 optimal rate
+                    if now - self._last_playback_send_time >= 0.04:
+                        self._last_playback_send_time = now
+                        
+                        # Format direct TCP command
+                        q_deg = np.degrees(playback_target)
+                        cmd_str = f"JointMovJ({q_deg[0]:.4f},{q_deg[1]:.4f},{q_deg[2]:.4f},{q_deg[3]:.4f},SpeedJ=100,AccJ=100,CP=100)"
+                        
+                        if self.sender.send(cmd_str):
+                            self._playback_waypoint_callback(playback_target)
+                            
+                    is_blocked = True  # Block regular teleop logic below
                 else:
                     is_blocked = True  # Stop sending if playback just finished or errored
             
             if tr.is_recording and not tr.is_playing and not is_blocked:
-                # We record the *TARGET* from VR/Simulator, not the actual robot pos
-                tr.record_tick(self.latest_target)
+                # We record the *RAW TARGET* from VR/Simulator to capture pure intent
+                # without latency-compensation artifacts.
+                tr.record_tick(self.latest_raw_target)
             
             # === UPDATE VELOCITY ===
             # Delegate velocity tracking to controller
