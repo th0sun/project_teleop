@@ -224,7 +224,7 @@ class _M11Logic:
                 return True, cmd, "Prox"
 
         # Rate floor
-        if (now - self._last_send_t) >= rate_interval:
+        if (now - self._last_send_t) >= (rate_interval - 0.005):
             dt = now - self._last_send_t
             cmd = self._integrate(q_target, dt)
             self._cmd_pos = cmd.copy()
@@ -382,10 +382,10 @@ class _M14Logic:
             return True, cmd, "Prox"
 
         # Adaptive rate
-        if dt_send >= interval:
-            cmd, cl = self._clamp(ff_tgt, dt_send)
+        if dt_send >= (interval - 0.005):
+            cmd, clamped = self._clamp(ff_tgt, dt_send)
             self._commit(cmd, now)
-            return True, cmd, "Rate"
+            return True, cmd, "Floor_C" if clamped else "Floor"
 
         return False, None, "Wait"
 
@@ -620,7 +620,7 @@ class _M16Logic:
             return False, None, "Gate"
 
         # 4. Fixed interval
-        if (now - self._last_send_t) < self.CMD_INTERVAL:
+        if (now - self._last_send_t) < (self.CMD_INTERVAL - 0.005):
             return False, None, "Wait"
 
         # 5. Step-limiting: advance from LAST COMMAND (smooth) toward predicted target
@@ -739,7 +739,7 @@ class _CleanFFLogic:
             return False, None, "QueueGate_Reset"
 
         # 4. Fixed 25 Hz rate floor
-        if (now - self._last_send_t) < self.CMD_INTERVAL:
+        if (now - self._last_send_t) < (self.CMD_INTERVAL - 0.005):
             return False, None, "Wait"
 
         # 5. Spatial noise floor: how much has the predicted target moved
