@@ -283,8 +283,18 @@ class TeleopNode(Node):
         self.pub_haptic = self.create_publisher(String, HAPTIC_TOPIC, 10)
         self.collision_haptic = CollisionHaptic(self.pub_haptic, self.get_logger())
         
-        # Trajectory Recorder (teach-and-repeat mode)
-        self.trajectory_recorder = TrajectoryRecorder(self.feedback, self.sender, self.get_logger())
+        # Trajectory Recorder (teach-and-repeat sequencer)
+        self.trajectory_recorder = TrajectoryRecorder(
+            command_send_fn=self.sender.send,
+            logger=self.get_logger(),
+            get_position_fn=self.feedback.get_current_position
+        )
+
+        # Teach & Repeat ROS topics
+        self.sub_teach_status = self.create_subscription(
+            String, "/unity/teach_status", self._teach_status_callback, 10)
+        self.sub_traj_data = self.create_subscription(
+            String, "/unity/trajectory_data", self._traj_data_callback, 10)
         
         self.interactive = InteractiveCommandHandler(
             self.connection,
@@ -318,6 +328,7 @@ class TeleopNode(Node):
         self.create_timer(0.05, self._publish_haptic_feedback)
         
         self.get_logger().info(f"✅ Teleop Node Ready")
+        self.get_logger().info(f"🎓 Teach & Repeat: /unity/teach_status + /unity/trajectory_data")
         self.get_logger().info(f"📊 Control Strategy: Proximity + Velocity-Based Stuck Detection")
         self.get_logger().info(f"📏 Dyn Proximity Base: {motion_config.DYNAMIC_PROXIMITY_BASE_RAD:.3f} rad ({np.degrees(motion_config.DYNAMIC_PROXIMITY_BASE_RAD):.1f} deg)")
         self.get_logger().info(f"🎯 Target Change Threshold: {motion_config.TARGET_CHANGE_THRESHOLD:.3f} rad ({np.degrees(motion_config.TARGET_CHANGE_THRESHOLD):.1f} deg)")
@@ -412,30 +423,33 @@ class TeleopNode(Node):
             # Level 2 & 3: Filtered Min-Window + Drift Compensation
             corrected_unity_time = self.clock_calibrator.calibrate(unity_send_time_sec, now_ros_sec)
             
-            # 3. Kalman Filter Prediction (with Anti-Overshoot)
-            # Overcome physical robot inertia by predicting targets +80ms into the future
-            # Use calibrated send time to ensure accurate dt calculation even over Tailscale
-            q_actual = self.feedback.get_current_position()
+            # 3. Latency Compensation (replaces Kalman prediction)
+            # Use raw validated target directly — compensate by timing, not by
+            # projecting into the future.  Measure network latency and let the
+            # control loop send promptly instead of adding overshoot-prone prediction.
+            network_latency_sec = max(0.0, now_ros_sec - corrected_unity_time)
             
-            # --- Anti-Overshoot: Dynamic Prediction Damping ---
-            dist_to_target = np.linalg.norm(q_safe - q_actual)
-            velocity_mag = self.controller.robot_velocity
+            # Simple velocity estimation for latency comp (EMA over last targets)
+            if not hasattr(self, '_prev_target_q'):
+                self._prev_target_q = q_safe.copy()
+                self._prev_target_t = corrected_unity_time
+                self._ema_target_vel = np.zeros(4)
             
-            # Reduce horizon if close to target or moving slowly
-            # Base = 80ms, drops to 10ms when dist < 0.1 rad
-            base_horizon = 0.08
-            dist_scale = np.clip(dist_to_target / 0.1, 0.1, 1.0)
-            vel_scale = np.clip(velocity_mag / 0.05, 0.0, 1.0)
-            dynamic_horizon = base_horizon * dist_scale * vel_scale
+            dt_target = corrected_unity_time - self._prev_target_t
+            if 0.002 < dt_target < 0.5:
+                raw_vel = (q_safe[:4] - self._prev_target_q[:4]) / dt_target
+                alpha = 0.3
+                self._ema_target_vel = alpha * raw_vel + (1.0 - alpha) * self._ema_target_vel
+            self._prev_target_q = q_safe.copy()
+            self._prev_target_t = corrected_unity_time
             
-            self.predictor.prediction_horizon_sec = dynamic_horizon
-            predicted_q = self.predictor.update_and_predict(q_safe, corrected_unity_time, q_actual=q_actual)
+            # Apply latency compensation: shift target forward by measured latency
+            latency_comp_sec = min(network_latency_sec, 0.08)  # cap at 80ms
+            q_compensated = q_safe[:4] + self._ema_target_vel * latency_comp_sec
             
-            # 📊 Publish Predicted Target for GUI graph
-            pred_msg = JointState()
-            pred_msg.header.stamp = self.get_clock().now().to_msg()
-            pred_msg.position = predicted_q.tolist()
-            self.pub_predicted_target.publish(pred_msg)
+            # Re-validate compensated target
+            q_compensated_full = np.concatenate([q_compensated, q_safe[4:]])
+            q_compensated_safe, _ = self.validator.validate_and_clamp(q_compensated_full)
             
             # 📊 Publish Unity Input XYZ (FK of raw Unity joint angles, degrees)
             try:
@@ -450,12 +464,12 @@ class TeleopNode(Node):
             self.log_queue.put(('CSV', [
                 now_ros_sec, corrected_unity_time,
                 q_safe[0], q_safe[1], q_safe[2], q_safe[3],
-                predicted_q[0], predicted_q[1], predicted_q[2], predicted_q[3]
+                q_compensated_safe[0], q_compensated_safe[1], q_compensated_safe[2], q_compensated_safe[3]
             ]))
                 
             # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
-            self.latest_raw_target = q_safe              # Raw validated (before prediction)
-            self.latest_target = predicted_q
+            self.latest_raw_target = q_safe                  # Raw validated (no compensation)
+            self.latest_target = q_compensated_safe          # Latency-compensated target
             self.target_recv_time = now_ros_sec          # T2: ROS receive time
             self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
             
@@ -532,7 +546,36 @@ class TeleopNode(Node):
             self.connection.send_dashboard_cmd(cmd)
         else:
             self.get_logger().warn(f"⚠️ Cannot send dashboard cmd '{cmd}'; Robot disconnected.")
-    
+
+    # ── Teach & Repeat callbacks ──────────────────────────────────────────────
+    def _teach_status_callback(self, msg):
+        """Handle /unity/teach_status: Record | Stop | Save | Load:<name> | Preview"""
+        status = msg.data.strip()
+        tr = self.trajectory_recorder
+        self.get_logger().info(f"🎓 Teach status: {status}")
+
+        if status == "Record":
+            tr.start_recording()
+        elif status == "Stop":
+            tr.stop_all()
+        elif status == "Save":
+            tr.save_temp()
+        elif status.startswith("Load:"):
+            name = status.split(":", 1)[1].strip()
+            tr.load(name)
+        elif status == "Preview":
+            tr.start_preview()
+        else:
+            self.get_logger().warn(f"⚠️ Unknown teach status: {status}")
+
+    def _traj_data_callback(self, msg):
+        """Handle /unity/trajectory_data: raw JSON from Unity Save button."""
+        json_str = msg.data.strip()
+        if json_str:
+            path = self.trajectory_recorder.save_from_unity_json(json_str)
+            if path:
+                self.get_logger().info(f"🎓 Unity trajectory saved → {path}")
+
     def _high_precision_control_loop(self):
         """
         Runs the control loop in a dedicated thread to avoid ROS executor jitter.
@@ -573,6 +616,15 @@ class TeleopNode(Node):
             q_current = self.feedback.get_current_position()
             # Use perf_counter for ultra-precise delta-time calculation in logic
             now = time.perf_counter()
+            
+            # === TEACH & REPEAT GATING ===
+            # During playback, the sequencer owns the command stream — skip teleop.
+            # During recording, capture waypoints but still allow live teleop.
+            tr = self.trajectory_recorder
+            if tr.is_playing:
+                return  # sequencer thread is sending commands
+            if tr.is_recording:
+                tr.record_tick()
             
             # === UPDATE VELOCITY ===
             # Delegate velocity tracking to controller

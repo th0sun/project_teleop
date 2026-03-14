@@ -479,6 +479,7 @@ class UdpBridgeNode:
 
         self._running = True
         threading.Thread(target=self._rx_loop, daemon=True).start()
+        threading.Thread(target=self._hello_loop, daemon=True).start()
         print(f"[UDP Bridge] Listening for telemetry on :{self.TELEM_PORT}  "
               f"(set BRIDGE_IP env to override target for commands)")
 
@@ -547,7 +548,19 @@ class UdpBridgeNode:
             except Exception as e:
                 print(f"[UDP Bridge] RX error: {e}")
 
-    # ── Command sender ────────────────────────────────────────────────────────
+    # ── Hello beacon (announces Mac IP to ROS bridge) ────────────────────
+    def _hello_loop(self):
+        """Send periodic hello to bridge so it discovers our IP for unicast."""
+        hello = json.dumps({"action": "hello"}, separators=(',', ':')).encode()
+        while self._running:
+            if self._bridge_ip:
+                try:
+                    self._tx.sendto(hello, (self._bridge_ip, self.CMD_PORT))
+                except Exception:
+                    pass
+            time.sleep(5.0)  # every 5s
+
+    # ── Command sender ──────────────────────────────────────────────────────────
     def _send_cmd(self, payload: dict):
         if self._bridge_ip is None:
             print("[UDP Bridge] Bridge IP not yet discovered — command dropped")
@@ -726,7 +739,11 @@ class FlowCanvas(QWidget):
 
     # ── Bezier math ────────────────────────────────────────────────────────────
     @staticmethod
-    def _sample(p0, c1, c2, p3, n=70):
+    def _sample(p0, c1, c2, p3, n=0):
+        # Adaptive: estimate chord length, use ~1 sample per 3px
+        if n <= 0:
+            chord = math.sqrt((p3.x()-p0.x())**2 + (p3.y()-p0.y())**2)
+            n = max(80, int(chord / 3))
         pts = []
         for i in range(n + 1):
             t = i / n; mt = 1 - t

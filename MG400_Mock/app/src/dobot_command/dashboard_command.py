@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
+
 from dobot_command import robot_mode
 from dobot_command.dobot_hardware import DobotHardware
 from utilities.utils_for_command import generate_return_msg
@@ -122,3 +124,69 @@ class DashboardCommands:
     def CP(self, args):
         """CP"""
         return self.__single_int_command(args, 0, 100, self.__dobot.set_cp_ratio)
+
+    # ── Querying commands ────────────────────────────────────────────────
+    def RobotMode(self, args) -> str:
+        """RobotMode — return current robot mode integer."""
+        _ = args
+        mode = self.__dobot.get_robot_mode()
+        error_id = self.__dobot.get_error_id()
+        return generate_return_msg(error_id, [str(int(mode))])
+
+    def GetAngle(self, args) -> str:
+        """GetAngle — return current joint angles in degrees."""
+        _ = args
+        q = self.__dobot.get_q_actual()  # radians, 6-element
+        degs = np.degrees(q[:4])
+        error_id = self.__dobot.get_error_id()
+        vals = [f"{d:.4f}" for d in degs]
+        return generate_return_msg(error_id, vals)
+
+    def GetPose(self, args) -> str:
+        """GetPose — return current Cartesian pose {X,Y,Z,R}."""
+        _ = args
+        tv = self.__dobot.get_tool_vector_actual()  # [x,y,z,rx,ry,rz]
+        error_id = self.__dobot.get_error_id()
+        vals = [f"{tv[0]:.4f}", f"{tv[1]:.4f}", f"{tv[2]:.4f}", f"{tv[3]:.4f}"]
+        return generate_return_msg(error_id, vals)
+
+    def GetTool(self, args) -> str:
+        """GetTool — return active tool coordinate index."""
+        _ = args
+        error_id = self.__dobot.get_error_id()
+        tidx = getattr(self.__dobot, '_DobotHardware__tool_index', 0)
+        return generate_return_msg(error_id, [str(tidx)])
+
+    def GetUser(self, args) -> str:
+        """GetUser — return active user coordinate index."""
+        _ = args
+        error_id = self.__dobot.get_error_id()
+        uidx = getattr(self.__dobot, '_DobotHardware__user_index', 0)
+        return generate_return_msg(error_id, [str(uidx)])
+
+    def Pause(self, args) -> str:
+        """Pause"""
+        _ = args
+        self.__dobot.set_robot_mode(robot_mode.MODE_PAUSE)
+        return generate_return_msg(self.__dobot.get_error_id())
+
+    def Continue(self, args) -> str:
+        """Continue"""
+        _ = args
+        self.__dobot.set_robot_mode(robot_mode.MODE_RUNNING)
+        return generate_return_msg(self.__dobot.get_error_id())
+
+    def EmergencyStop(self, args) -> str:
+        """EmergencyStop"""
+        _ = args
+        self.__dobot.set_robot_mode(robot_mode.MODE_ERROR)
+        return generate_return_msg(self.__dobot.get_error_id())
+
+    def SetCollisionLevel(self, args) -> str:
+        """SetCollisionLevel"""
+        return self.__single_int_command(args, 0, 5, lambda v: None)
+
+    def SetPayLoad(self, args) -> str:
+        """SetPayLoad"""
+        _ = args
+        return generate_return_msg(self.__dobot.get_error_id())

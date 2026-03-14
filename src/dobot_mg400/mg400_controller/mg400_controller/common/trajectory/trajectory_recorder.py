@@ -2,268 +2,301 @@
 # -*- coding: utf-8 -*-
 
 """
-Trajectory Recording and Playback Module
+Trajectory Recorder & Sequencer — Teach-and-Repeat for MG400
+=============================================================
+Handles the full lifecycle:
 
-Provides teach-and-repeat functionality for MG400 robot:
-- Record robot trajectory during VR teleoperation
-- Save/load trajectories to JSON files
-- Replay trajectories with adjustable speed
-- Progress monitoring
+1. **Record**  — capture robot joint positions while user teleoperates.
+2. **Save**    — persist recorded data as Unity-compatible JSON
+                 (frames: [{timeStamp, j1..j4}]).
+3. **Load**    — read a saved JSON trajectory (Unity or native format).
+4. **Preview** — temporal sequencer that replays a trajectory on the real
+                 robot, computing per-segment SpeedJ to match the original
+                 timing.  Uses CP=100 for smooth continuous-path motion and
+                 gates live teleop commands during playback.
+5. **Stop**    — abort any operation and send the robot Home (0,0,0,0).
 
-NOTE: This operates SEPARATELY from real-time teleoperation control.
+Topic integration (managed by vr_teleop_node.py):
+  /unity/teach_status   — String: Record | Stop | Save | Load | Preview
+  /unity/trajectory_data — String: JSON body from Unity
 """
 
+import os
 import time
 import json
+import math
+import threading
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
+
+
+# ── Home position (degrees) ──────────────────────────────────────────────────
+HOME_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0]
+
+# ── Trajectory storage directory ─────────────────────────────────────────────
+TRAJ_DIR = os.path.expanduser("~/project_teleop_ws/trajectories")
 
 
 class TrajectoryRecorder:
     """
-    Trajectory recording and playback for teach-and-repeat mode
-    
-    Use cases:
-    - Record a VR teleoperation session → replay later
-    - Teach by demonstration
-    - Create reusable motion sequences
-    - Demo/testing mode
-    
-    This is SEPARATE from real-time VR teleoperation.
+    Teach-and-Repeat sequencer for MG400.
+
+    Parameters
+    ----------
+    command_send_fn : callable(str) -> bool
+        Function that sends a raw TCP command string to the robot
+        (e.g. ``sender.send``).
+    logger
+        ROS-compatible logger with .info / .warn / .error methods.
+    get_position_fn : callable() -> np.ndarray | None, optional
+        Returns current joint angles in *radians* (4,).
+        Required for recording mode.
     """
-    
-    def __init__(self, feedback_handler, command_sender, logger):
-        """
-        Initialize trajectory recorder
-        
-        Args:
-            feedback_handler: FeedbackHandler instance to read robot position
-            command_sender: CommandSender instance to send motion commands
-            logger: ROS logger instance
-        """
-        self.feedback = feedback_handler
-        self.sender = command_sender
-        self.logger = logger
-        
-        self.is_recording = False
-        self.trajectory = []  # List of waypoints
-        self.record_start_time = 0.0
-        
-        # Recording parameters
-        self.RECORD_RATE = 10.0  # Hz - waypoint sampling rate
-        
-    def start_recording(self) -> None:
-        """
-        Start recording robot trajectory
-        
-        Call record_waypoint() at regular intervals during recording.
-        """
+
+    def __init__(self, command_send_fn: Callable, logger,
+                 get_position_fn: Optional[Callable] = None):
+        self._send = command_send_fn
+        self._log  = logger
+        self._get_pos = get_position_fn
+
+        # ── State ────────────────────────────────────────────────────────────
+        self.is_recording  = False
+        self.is_playing    = False
+        self._stop_flag    = threading.Event()
+        self._play_thread: Optional[threading.Thread] = None
+
+        # ── Recorded data (native format) ────────────────────────────────────
+        self._frames: List[Dict] = []   # [{timeStamp, j1..j4}] degrees
+        self._rec_t0 = 0.0
+
+        # ── Loaded trajectory (ready for playback) ───────────────────────────
+        self.loaded_frames: List[Dict] = []
+        self.loaded_name: str = ""
+
+        os.makedirs(TRAJ_DIR, exist_ok=True)
+
+    # ═════════════════════════════════════════════════════════════════════════
+    #  RECORD
+    # ═════════════════════════════════════════════════════════════════════════
+    def start_recording(self):
+        if self.is_playing:
+            self._log.warn("⚠️  Cannot record while playing")
+            return
         self.is_recording = True
-        self.trajectory = []
-        self.record_start_time = time.time()
-        self.logger.info("🔴 Trajectory recording started...")
-    
-    def record_waypoint(self) -> bool:
-        """
-        Record current robot position as a waypoint
-        
-        Should be called at ~10Hz during recording.
-        
-        Returns:
-            True if waypoint recorded, False if not recording
-        """
-        if not self.is_recording:
-            return False
-        
-        # Get current joint positions
-        q_current = self.feedback.get_current_position()
-        if q_current is None:
-            self.logger.warn("Cannot record waypoint: no current position")
-            return False
-        
-        # Calculate elapsed time since recording started
-        timestamp = time.time() - self.record_start_time
-        
-        waypoint = {
-            'time': timestamp,
-            'joints': q_current.tolist(),
-            'timestamp_abs': time.time()
-        }
-        self.trajectory.append(waypoint)
-        
-        return True
-    
+        self._frames = []
+        self._rec_t0 = time.time()
+        self._log.info("🔴 Recording started")
+
+    def record_tick(self):
+        """Call at ~50 Hz from the control loop while recording."""
+        if not self.is_recording or self._get_pos is None:
+            return
+        q_rad = self._get_pos()
+        if q_rad is None:
+            return
+        q_deg = np.degrees(q_rad[:4])
+        self._frames.append({
+            "timeStamp": time.time() - self._rec_t0,
+            "j1": float(q_deg[0]),
+            "j2": float(q_deg[1]),
+            "j3": float(q_deg[2]),
+            "j4": float(q_deg[3]),
+        })
+
     def stop_recording(self) -> List[Dict]:
-        """
-        Stop recording and return trajectory
-        
-        Returns:
-            List of recorded waypoints
-        """
         self.is_recording = False
-        duration = self.trajectory[-1]['time'] if self.trajectory else 0
-        self.logger.info(
-            f"⏹️  Trajectory recording stopped\n"
-            f"   Waypoints: {len(self.trajectory)}\n"
-            f"   Duration: {duration:.2f}s"
-        )
-        return self.trajectory
-    
-    def save_trajectory(self, filename: str) -> bool:
-        """
-        Save trajectory to JSON file
-        
-        Args:
-            filename: Path to save file
-            
-        Returns:
-            True if successful
-        """
+        self._log.info(f"⏹️  Recording stopped — {len(self._frames)} frames, "
+                       f"{self._frames[-1]['timeStamp']:.1f}s" if self._frames else "⏹️  Recording stopped — 0 frames")
+        return self._frames
+
+    # ═════════════════════════════════════════════════════════════════════════
+    #  SAVE / LOAD
+    # ═════════════════════════════════════════════════════════════════════════
+    def save_temp(self) -> str:
+        """Save last recording to temp_trajectory.json and return the path."""
+        path = os.path.join(TRAJ_DIR, "temp_trajectory.json")
+        return self._save_json(path, self._frames)
+
+    def save_as(self, name: str) -> str:
+        """Save last recording with a user-supplied name."""
+        if not name.endswith(".json"):
+            name += ".json"
+        path = os.path.join(TRAJ_DIR, name)
+        return self._save_json(path, self._frames)
+
+    def save_from_unity_json(self, json_str: str) -> str:
+        """Receive raw JSON from Unity /unity/trajectory_data and save."""
         try:
-            trajectory_data = {
-                'trajectory': self.trajectory,
-                'metadata': {
-                    'waypoints': len(self.trajectory),
-                    'duration': self.trajectory[-1]['time'] if self.trajectory else 0,
-                    'recorded_at': self.trajectory[0]['timestamp_abs'] if self.trajectory else 0,
-                    'record_rate_hz': self.RECORD_RATE
-                }
-            }
-            
-            with open(filename, 'w') as f:
-                json.dump(trajectory_data, f, indent=2)
-            
-            self.logger.info(f"💾 Trajectory saved: {filename}")
-            return True
-            
+            data = json.loads(json_str)
+            frames = data if isinstance(data, list) else data.get("frames", [])
+            self._frames = frames
+            return self.save_temp()
         except Exception as e:
-            self.logger.error(f"Failed to save trajectory: {e}")
+            self._log.error(f"Failed to parse Unity trajectory JSON: {e}")
+            return ""
+
+    def load(self, name: str) -> bool:
+        """Load a trajectory file by name from TRAJ_DIR."""
+        if not name.endswith(".json"):
+            name += ".json"
+        path = os.path.join(TRAJ_DIR, name)
+        if not os.path.isfile(path):
+            self._log.error(f"Trajectory file not found: {path}")
             return False
-    
-    def load_trajectory(self, filename: str) -> bool:
-        """
-        Load trajectory from JSON file
-        
-        Args:
-            filename: Path to load file
-            
-        Returns:
-            True if successful
-        """
         try:
-            with open(filename, 'r') as f:
+            with open(path, "r") as f:
                 data = json.load(f)
-            
-            self.trajectory = data['trajectory']
-            metadata = data.get('metadata', {})
-            
-            self.logger.info(
-                f"📂 Trajectory loaded: {filename}\n"
-                f"   Waypoints: {metadata.get('waypoints', len(self.trajectory))}\n"
-                f"   Duration: {metadata.get('duration', 0):.2f}s"
-            )
+            frames = data if isinstance(data, list) else data.get("frames", [])
+            if not frames:
+                self._log.error("Trajectory file is empty")
+                return False
+            self.loaded_frames = frames
+            self.loaded_name = name
+            dur = frames[-1]["timeStamp"] - frames[0]["timeStamp"]
+            self._log.info(f"📂 Loaded {name}: {len(frames)} frames, {dur:.1f}s")
             return True
-            
         except Exception as e:
-            self.logger.error(f"Failed to load trajectory: {e}")
+            self._log.error(f"Failed to load trajectory: {e}")
             return False
-    
-    def replay_trajectory(self, speed_scale: float = 1.0, loop: bool = False) -> bool:
-        """
-        Replay recorded trajectory
-        
-        Args:
-            speed_scale: Speed multiplier (1.0 = original speed, 0.5 = half speed, 2.0 = double speed)
-            loop: If True, repeat trajectory continuously (use Ctrl+C to stop)
-            
-        Returns:
-            True if replay completed successfully
-        """
-        if not self.trajectory:
-            self.logger.error("No trajectory to replay")
-            return False
-        
-        self.logger.info(
-            f"▶️  Replaying trajectory\n"
-            f"   Waypoints: {len(self.trajectory)}\n"
-            f"   Speed: {speed_scale}x\n"
-            f"   Loop: {loop}"
-        )
-        
+
+    def list_files(self) -> List[str]:
+        """Return list of .json trajectory files."""
         try:
-            iteration = 0
-            while True:
-                iteration += 1
-                if loop:
-                    self.logger.info(f"Loop iteration: {iteration}")
-                
-                start_time = time.time()
-                last_logged_progress = 0
-                
-                for i, waypoint in enumerate(self.trajectory):
-                    # Calculate when this waypoint should be reached
-                    target_time = waypoint['time'] / speed_scale
-                    
-                    # Wait until it's time
-                    elapsed = time.time() - start_time
-                    if elapsed < target_time:
-                        time.sleep(target_time - elapsed)
-                    
-                    # Send command
-                    joints = waypoint['joints']
-                    command = f"JointMovJ({joints[0]},{joints[1]},{joints[2]},{joints[3]})"
-                    
-                    # Send non-blocking motion command
-                    self.sender.send_motion(command, speed_percent=100, distance=0.0)
-                    
-                    # Log progress every 10%
-                    progress = int((i / len(self.trajectory)) * 100)
-                    if progress >= last_logged_progress + 10:
-                        self.logger.info(f"Progress: {progress}%")
-                        last_logged_progress = progress
-                
-                self.logger.info("✅ Trajectory replay complete")
-                
-                if not loop:
-                    break
-                    
-        except KeyboardInterrupt:
-            self.logger.info("Trajectory replay interrupted by user")
-            return False
-        except Exception as e:
-            self.logger.error(f"Trajectory replay failed: {e}")
-            return False
-        
-        return True
-    
-    def get_trajectory_info(self) -> Dict:
-        """
-        Get information about current trajectory
-        
-        Returns:
-            Dictionary with trajectory metadata
-        """
-        if not self.trajectory:
-            return {
-                'loaded': False,
-                'waypoints': 0,
-                'duration': 0,
-                'avg_sample_rate': 0
-            }
-        
-        duration = self.trajectory[-1]['time']
-        avg_rate = len(self.trajectory) / duration if duration > 0 else 0
-        
+            return sorted(f for f in os.listdir(TRAJ_DIR) if f.endswith(".json"))
+        except Exception:
+            return []
+
+    # ═════════════════════════════════════════════════════════════════════════
+    #  PREVIEW (Temporal Sequencer)
+    # ═════════════════════════════════════════════════════════════════════════
+    def start_preview(self):
+        """Begin playing back loaded trajectory in a background thread."""
+        if not self.loaded_frames:
+            self._log.error("No trajectory loaded for preview")
+            return
+        if self.is_playing:
+            self._log.warn("Already playing")
+            return
+        self._stop_flag.clear()
+        self.is_playing = True
+        self._play_thread = threading.Thread(target=self._play_worker, daemon=True)
+        self._play_thread.start()
+
+    def _play_worker(self):
+        """Sequencer thread: sends JointMovJ commands with computed SpeedJ."""
+        frames = self.loaded_frames
+        n = len(frames)
+        self._log.info(f"▶️  Preview start — {n} waypoints")
+
+        # Normalize timestamps relative to first frame
+        t0_traj = frames[0]["timeStamp"]
+
+        t_wall_start = time.perf_counter()
+
+        for i in range(n):
+            if self._stop_flag.is_set():
+                self._log.info("⏹️  Preview aborted")
+                break
+
+            fr = frames[i]
+            j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
+
+            # ── Compute SpeedJ for this segment ──────────────────────────────
+            if i < n - 1:
+                fr_next = frames[i + 1]
+                dt = fr_next["timeStamp"] - fr["timeStamp"]
+                if dt < 0.001:
+                    dt = 0.02  # guard
+
+                j_next = [fr_next["j1"], fr_next["j2"], fr_next["j3"], fr_next["j4"]]
+                max_delta = max(abs(j_next[k] - j[k]) for k in range(4))
+                # SpeedJ is percentage of max (360°/s) → speed_pct = (deg/s) / 360 * 100
+                required_deg_per_s = max_delta / dt if dt > 0 else 0
+                speed_pct = max(1, min(100, int(math.ceil(required_deg_per_s / 360.0 * 100))))
+            else:
+                speed_pct = 20  # last frame: slow down
+
+            # ── Build and send command ───────────────────────────────────────
+            cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
+                   f"SpeedJ={speed_pct},AccJ=100,CP=100)")
+            self._send(cmd)
+
+            # ── Wait until the next frame's wall-clock time ──────────────────
+            if i < n - 1:
+                next_rel = frames[i + 1]["timeStamp"] - t0_traj
+                target_wall = t_wall_start + next_rel
+                sleep_dur = target_wall - time.perf_counter()
+                if sleep_dur > 0:
+                    # Use Event.wait so _stop_flag can interrupt sleep
+                    if self._stop_flag.wait(timeout=sleep_dur):
+                        self._log.info("⏹️  Preview aborted during wait")
+                        break
+
+            # Progress log every 25%
+            pct = int((i + 1) / n * 100)
+            if pct % 25 == 0 and pct > 0:
+                self._log.info(f"   Preview: {pct}%")
+
+        self.is_playing = False
+        if not self._stop_flag.is_set():
+            self._log.info("✅ Preview complete")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    #  STOP & HOME
+    # ═════════════════════════════════════════════════════════════════════════
+    def stop_all(self):
+        """Stop any recording/playback and command robot to Home."""
+        was_recording = self.is_recording
+        was_playing   = self.is_playing
+
+        self.is_recording = False
+        self._stop_flag.set()
+
+        if self._play_thread and self._play_thread.is_alive():
+            self._play_thread.join(timeout=2.0)
+        self.is_playing = False
+
+        if was_recording:
+            self._log.info("⏹️  Recording stopped by Stop command")
+        if was_playing:
+            self._log.info("⏹️  Playback stopped by Stop command")
+
+        self._go_home()
+
+    def _go_home(self):
+        """Send robot to Home position (0, 0, 0, 0)."""
+        h = HOME_JOINTS_DEG
+        cmd = f"JointMovJ({h[0]:.4f},{h[1]:.4f},{h[2]:.4f},{h[3]:.4f},SpeedJ=30,AccJ=50,CP=0)"
+        self._log.info("🏠 Moving to Home (0, 0, 0, 0)")
+        self._send(cmd)
+
+    # ═════════════════════════════════════════════════════════════════════════
+    #  INFO
+    # ═════════════════════════════════════════════════════════════════════════
+    def get_info(self) -> Dict:
+        frames = self.loaded_frames or self._frames
+        if not frames:
+            return {"loaded": False, "waypoints": 0, "duration": 0.0}
+        dur = frames[-1]["timeStamp"] - frames[0]["timeStamp"]
         return {
-            'loaded': True,
-            'waypoints': len(self.trajectory),
-            'duration': duration,
-            'avg_sample_rate': avg_rate,
-            'start_position': self.trajectory[0]['joints'],
-            'end_position': self.trajectory[-1]['joints']
+            "loaded": bool(self.loaded_frames),
+            "name": self.loaded_name,
+            "waypoints": len(frames),
+            "duration": round(dur, 2),
         }
-    
-    def clear_trajectory(self) -> None:
-        """Clear current trajectory"""
-        self.trajectory = []
-        self.logger.info("Trajectory cleared")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    #  INTERNAL
+    # ═════════════════════════════════════════════════════════════════════════
+    def _save_json(self, path: str, frames: List[Dict]) -> str:
+        if not frames:
+            self._log.error("No frames to save")
+            return ""
+        try:
+            with open(path, "w") as f:
+                json.dump({"frames": frames}, f, indent=2)
+            self._log.info(f"💾 Saved {len(frames)} frames → {path}")
+            return path
+        except Exception as e:
+            self._log.error(f"Save failed: {e}")
+            return ""

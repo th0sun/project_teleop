@@ -51,7 +51,6 @@ except ImportError:
     ERROR_STATUS_TOPIC = "/mg400/error_status"
 
 ACTUAL_TOPIC    = "/joint_states"
-PREDICTED_TOPIC = "/teleop/predicted_target"
 SENT_TOPIC      = "/teleop/sent_command"
 TOOL_ACT_TOPIC  = "/mg400/tool_vector_actual"
 TOOL_TGT_TOPIC  = "/mg400/tool_vector_target"
@@ -61,6 +60,7 @@ TOOL_IDX_TOPIC  = "/robot/tool_index"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BCAST_IP   = os.environ.get("BRIDGE_BROADCAST_IP",   "255.255.255.255")
+TARGET_IP  = os.environ.get("BRIDGE_TARGET_IP",      "")  # unicast to Mac
 TELEM_PORT = int(os.environ.get("BRIDGE_TELEMETRY_PORT", "5556"))
 CMD_PORT   = int(os.environ.get("BRIDGE_CMD_PORT",       "5557"))
 SEND_HZ    = int(os.environ.get("BRIDGE_HZ",             "50"))
@@ -73,7 +73,6 @@ class MonitorBridge(Node):
         # ── Shared telemetry state ────────────────────────────────────────────
         self.actual     = [0.0] * 4
         self.unity      = [0.0] * 4
-        self.predicted  = [0.0] * 4
         self.sent       = [0.0] * 4
         self.tool_act   = [0.0] * 6
         self.tool_tgt   = [0.0] * 6
@@ -84,9 +83,13 @@ class MonitorBridge(Node):
         self.robot_mode = 7
         self.error_stat = 0
 
+        # ── Target IP for telemetry (unicast preferred, broadcast fallback) ──
+        self._target_ip = TARGET_IP if TARGET_IP else None
+        self._mac_discovered = False
+
         # ── Frequency tracking (rolling 1s window) ───────────────────────────
         self._counts = {
-            "UNITY TARGET": 0, "PREDICTED TGT": 0, "SENT COMMAND": 0,
+            "UNITY TARGET": 0, "SENT COMMAND": 0,
             "ACTUAL FEEDBACK": 0, "TOOL VECTOR": 0,
             "ROBOT MODE": 0, "ROBOT ERROR": 0, "DIGITAL IO": 0,
         }
@@ -119,7 +122,6 @@ class MonitorBridge(Node):
 
         sub(ACTUAL_TOPIC,     JointState,        self._cb_actual)
         sub(UNITY_TOPIC,      JointState,        self._cb_unity, qos_be)
-        sub(PREDICTED_TOPIC,  JointState,        self._cb_pred)
         sub(SENT_TOPIC,       JointState,        self._cb_sent)
         sub(TOOL_ACT_TOPIC,   Float64MultiArray, lambda m: self._f64(m, 'tool_act'))
         sub(TOOL_TGT_TOPIC,   Float64MultiArray, lambda m: self._f64(m, 'tool_tgt'))
@@ -135,8 +137,9 @@ class MonitorBridge(Node):
         threading.Thread(target=self._telem_loop, daemon=True).start()
         threading.Thread(target=self._cmd_loop,   daemon=True).start()
 
+        tgt_desc = self._target_ip if self._target_ip else f"broadcast({BCAST_IP})"
         self.get_logger().info(
-            f"🔗 Monitor Bridge ready — telemetry → {BCAST_IP}:{TELEM_PORT} | cmds ← :{CMD_PORT}")
+            f"🔗 Monitor Bridge ready — telemetry → {tgt_desc}:{TELEM_PORT} | cmds ← :{CMD_PORT}")
 
     # ── ROS callbacks ─────────────────────────────────────────────────────────
     def _cb_actual(self, msg):
@@ -148,11 +151,6 @@ class MonitorBridge(Node):
         self._counts["UNITY TARGET"] += 1
         if len(msg.position) >= 4:
             self.unity = list(np.degrees(msg.position[:4]))
-
-    def _cb_pred(self, msg):
-        self._counts["PREDICTED TGT"] += 1
-        if len(msg.position) >= 4:
-            self.predicted = list(np.degrees(msg.position[:4]))
 
     def _cb_sent(self, msg):
         self._counts["SENT COMMAND"] += 1
@@ -202,7 +200,7 @@ class MonitorBridge(Node):
                     "ts":         time.time(),
                     "actual":     self.actual,
                     "unity":      self.unity,
-                    "predicted":  self.predicted,
+                    "predicted":  self.unity,
                     "sent":       self.sent,
                     "tool_act":   self.tool_act,
                     "tool_tgt":   self.tool_tgt,
@@ -214,7 +212,8 @@ class MonitorBridge(Node):
                     "error_stat": self.error_stat,
                     "freq":       self._freq,
                 }, separators=(',', ':')).encode()
-                self._tx.sendto(pkt, (BCAST_IP, TELEM_PORT))
+                dest = self._target_ip if self._target_ip else BCAST_IP
+                self._tx.sendto(pkt, (dest, TELEM_PORT))
             except Exception as e:
                 self.get_logger().warn(f"Telem TX error: {e}", throttle_duration_sec=5)
 
@@ -235,6 +234,15 @@ class MonitorBridge(Node):
                 cmd    = json.loads(raw.decode())
                 action = cmd.get("action", "")
                 data   = cmd.get("data")
+
+                if action == "hello":
+                    # Mac GUI announces itself — switch to unicast
+                    self._target_ip = addr[0]
+                    if not self._mac_discovered:
+                        self._mac_discovered = True
+                        self.get_logger().info(
+                            f"🖥️  Mac GUI discovered at {addr[0]} — switching to unicast")
+                    continue
 
                 if action == "dashboard":
                     msg = String(); msg.data = str(data)
