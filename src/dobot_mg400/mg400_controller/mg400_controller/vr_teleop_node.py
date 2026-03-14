@@ -231,6 +231,8 @@ class TeleopNode(Node):
         self.pub_predicted_target = self.create_publisher(JointState, "/teleop/predicted_target", 10)
         self.pub_sent_command = self.create_publisher(JointState, "/teleop/sent_command", 10)
         self.pub_unity_xyz = self.create_publisher(Float64MultiArray, "/teleop/unity_xyz", 10)
+        # Teach & Repeat playback publisher — feeds monitor graphs during playback
+        self.pub_playback_unity = self.create_publisher(JointState, "/teleop/playback_unity", 10)
         
         # Suction Cup Control (Smart Trigger)
         self.suction_state = False
@@ -287,7 +289,8 @@ class TeleopNode(Node):
         self.trajectory_recorder = TrajectoryRecorder(
             command_send_fn=self.sender.send,
             logger=self.get_logger(),
-            get_position_fn=self.feedback.get_current_position
+            get_position_fn=self.feedback.get_current_position,
+            waypoint_callback=self._playback_waypoint_callback,
         )
 
         # Teach & Repeat ROS topics
@@ -575,6 +578,17 @@ class TeleopNode(Node):
             path = self.trajectory_recorder.save_from_unity_json(json_str)
             if path:
                 self.get_logger().info(f"🎓 Unity trajectory saved → {path}")
+
+    def _playback_waypoint_callback(self, q_rad):
+        """Called by TrajectoryRecorder for each played waypoint (radians, 4-element).
+        Publishes to /teleop/playback_unity and /teleop/sent_command so the monitor
+        bridge shows the live trajectory values in the Unity and Sent graphs.
+        """
+        js = JointState()
+        js.header.stamp = self.get_clock().now().to_msg()
+        js.position = list(q_rad)
+        self.pub_playback_unity.publish(js)
+        self.pub_sent_command.publish(js)
 
     def _high_precision_control_loop(self):
         """

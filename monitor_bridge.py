@@ -123,6 +123,7 @@ class MonitorBridge(Node):
         sub(ACTUAL_TOPIC,     JointState,        self._cb_actual)
         sub(UNITY_TOPIC,      JointState,        self._cb_unity, qos_be)
         sub(SENT_TOPIC,       JointState,        self._cb_sent)
+        sub("/teleop/playback_unity", JointState, self._cb_unity)  # T&R playback overrides unity graph
         sub(TOOL_ACT_TOPIC,   Float64MultiArray, lambda m: self._f64(m, 'tool_act'))
         sub(TOOL_TGT_TOPIC,   Float64MultiArray, lambda m: self._f64(m, 'tool_tgt'))
         sub(UNITY_XYZ_TOPIC,  Float64MultiArray, lambda m: self._f64(m, 'unity_xyz'))

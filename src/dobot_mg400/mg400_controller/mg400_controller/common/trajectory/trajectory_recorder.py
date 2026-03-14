@@ -40,7 +40,7 @@ TRAJ_DIR = os.path.expanduser("~/project_teleop_ws/trajectories")
 # Recording is done at 50 Hz (20ms per frame).  Sending every raw frame gives
 # tiny per-segment deltas → very low SpeedJ → robot crawls.  We decimate to
 # PLAYBACK_HZ target rate so each segment has enough motion for a real speed.
-PLAYBACK_MIN_DT = 0.10   # seconds — minimum gap between sent waypoints (≈10 Hz)
+PLAYBACK_MIN_DT = 1.0 / 30  # seconds — minimum gap between sent waypoints (≈30 Hz)
 
 
 class TrajectoryRecorder:
@@ -60,10 +60,12 @@ class TrajectoryRecorder:
     """
 
     def __init__(self, command_send_fn: Callable, logger,
-                 get_position_fn: Optional[Callable] = None):
+                 get_position_fn: Optional[Callable] = None,
+                 waypoint_callback: Optional[Callable] = None):
         self._send = command_send_fn
         self._log  = logger
         self._get_pos = get_position_fn
+        self._waypoint_cb = waypoint_callback  # called with np.array(4,) radians each played waypoint
 
         # ── State ────────────────────────────────────────────────────────────
         self.is_recording  = False
@@ -230,6 +232,13 @@ class TrajectoryRecorder:
             cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
                    f"SpeedJ={speed_pct},AccJ=100,CP=100)")
             self._send(cmd)
+
+            # ── Notify waypoint observers (e.g. ROS graph publishers) ────────
+            if self._waypoint_cb is not None:
+                try:
+                    self._waypoint_cb(np.radians(j))
+                except Exception:
+                    pass
 
             # ── Check stop immediately after send ────────────────────────────
             if self._stop_flag.is_set():
