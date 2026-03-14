@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QScrollArea, QTextEdit, QGridLayout, QTabWidget,
     QHBoxLayout, QVBoxLayout, QSizePolicy, QLineEdit,
 )
-from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QThread, QPointF, QSize
+from PyQt6.QtCore    import Qt, QTimer, QEvent, pyqtSignal, QObject, QThread, QPointF, QSize
 from PyQt6.QtGui     import (
     QFont, QFontDatabase, QColor, QPalette, QTextCursor, QIcon,
     QPainter, QPainterPath, QPen, QBrush
@@ -683,10 +683,30 @@ def _set_prop(widget, prop, val):
     widget.style().polish(widget)
 #  MAIN WINDOW
 # ══════════════════════════════════════════════════════════════════════════════
+class _PinchFilter(QObject):
+    """Event filter installed on QScrollArea viewport to forward macOS pinch → FlowCanvas zoom."""
+    def __init__(self, canvas):
+        super().__init__()
+        self._canvas = canvas
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.Type.NativeGesture:
+            try:
+                if e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                    f  = 1.0 + e.value()
+                    nw = max(900,  min(3200, int(self._canvas.width()  * f)))
+                    nh = max(600,  min(2200, int(self._canvas.height() * f)))
+                    self._canvas.setFixedSize(QSize(nw, nh))
+                    e.accept()
+                    return True
+            except (AttributeError, RuntimeError):
+                pass
+        return False
+
+
 class FlowCanvas(QWidget):
-    _ARROW_SPACING = 28.0   # px between arrowheads
-    _ARROW_LEN     = 7.0
-    _ARROW_WID     = 3.8
+    _ARROW_SPACING = 62.0   # px between chevrons (less dense)
+    _ARROW_LEN     = 9.0
+    _ARROW_WID     = 5.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -701,7 +721,7 @@ class FlowCanvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
 
     def _tick(self):
-        self.anim_offset -= 1.5
+        self.anim_offset -= 0.7   # slower drift = less optical-illusion
         self.update()
 
     # ── Bezier math ────────────────────────────────────────────────────────────
@@ -791,14 +811,14 @@ class FlowCanvas(QWidget):
             e.ignore()   # let scroll area handle plain scroll
 
     # ── Drawing helpers ────────────────────────────────────────────────────────
-    def _arrowhead(self, painter, ax, ay, atx, aty, al, aw):
+    def _chevron(self, painter, ax, ay, atx, aty, al, aw):
+        """Draw an open < chevron (two stroked lines). Pen must already be set."""
         px = -aty; py = atx
-        tip = QPointF(ax + atx*al*0.5, ay + aty*al*0.5)
-        bl  = QPointF(ax - atx*al*0.5 - px*aw, ay - aty*al*0.5 - py*aw)
-        br  = QPointF(ax - atx*al*0.5 + px*aw, ay - aty*al*0.5 + py*aw)
-        p   = QPainterPath()
-        p.moveTo(tip); p.lineTo(bl); p.lineTo(br); p.closeSubpath()
-        painter.drawPath(p)
+        tip = QPointF(ax, ay)
+        bl  = QPointF(ax - atx*al - px*aw, ay - aty*al - py*aw)
+        br  = QPointF(ax - atx*al + px*aw, ay - aty*al + py*aw)
+        painter.drawLine(tip, bl)
+        painter.drawLine(tip, br)
 
     def paintEvent(self, e):
         painter = QPainter(self)
@@ -828,34 +848,40 @@ class FlowCanvas(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(bpath)
 
-            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
 
-            # ── Animated arrowheads along path ─────────────────────────────────
+            # ── Animated < chevrons along path ────────────────────────────────
             if active and total > 5:
-                speed   = min(freq / 8.0, 5.0) + 1.5
-                c_flow  = QColor(color); c_flow.setAlpha(230)
-                painter.setBrush(QBrush(c_flow))
-                offset  = (-self.anim_offset * speed) % SP
-                n_arr   = int(total / SP) + 2
+                speed  = min(freq / 25.0, 2.5) + 0.6   # slower: less optical illusion
+                c_flow = QColor(color); c_flow.setAlpha(210)
+                pen_ch = QPen(c_flow, 1.6)
+                pen_ch.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen_ch)
+                offset = (-self.anim_offset * speed) % SP
+                n_arr  = int(total / SP) + 2
                 for ni in range(n_arr):
                     s = offset + ni * SP
                     if s > total + SP: break
                     ax, ay, atx, aty = self._at(pts, arc, s)
-                    self._arrowhead(painter, ax, ay, atx, aty, AL, AW)
+                    self._chevron(painter, ax, ay, atx, aty, AL, AW)
             else:
-                # Static dim arrows to show direction even on idle lines
-                c_dim = QColor(color); c_dim.setAlpha(55)
-                painter.setBrush(QBrush(c_dim))
-                n_s = max(1, int(total / 55))
+                # Static dim chevrons — show direction on idle lines
+                c_dim  = QColor(color); c_dim.setAlpha(55)
+                pen_ch = QPen(c_dim, 1.2)
+                pen_ch.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen_ch)
+                n_s = max(1, int(total / 80))
                 for ni in range(n_s):
                     s = total * (ni + 0.5) / n_s
                     ax, ay, atx, aty = self._at(pts, arc, s)
-                    self._arrowhead(painter, ax, ay, atx, aty, AL*0.8, AW*0.8)
+                    self._chevron(painter, ax, ay, atx, aty, AL*0.8, AW*0.8)
 
-            # ── Terminal arrowhead at endpoint ─────────────────────────────────
-            c_tip = QColor(color); c_tip.setAlpha(220 if active else 70)
-            painter.setBrush(QBrush(c_tip))
-            self._arrowhead(painter, ex, ey, etx, ety, 11.0, 5.5)
+            # ── Terminal chevron at endpoint ──────────────────────────────────
+            c_tip  = QColor(color); c_tip.setAlpha(240 if active else 90)
+            pen_tip = QPen(c_tip, 2.0)
+            pen_tip.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen_tip)
+            self._chevron(painter, ex, ey, etx, ety, 11.0, 6.0)
 
 
 class MonitorWindow(QMainWindow):
@@ -885,7 +911,7 @@ class MonitorWindow(QMainWindow):
         self.a_buf    = [deque(maxlen=MAX_PTS) for _ in range(4)]
         self.tgt_trail= deque(maxlen=TRAIL_LEN)
         self.act_trail= deque(maxlen=TRAIL_LEN)
-        self.snt_trail= deque(maxlen=60)
+        self.snt_trail= deque(maxlen=20)
 
         # Log
         self._log_idx  = 0
@@ -1047,14 +1073,16 @@ class MonitorWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet(f"background:{BG}; border:none;")
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.flow_canvas = FlowCanvas()
         self.flow_canvas.setStyleSheet(f"background:{BG};")
         self.flow_canvas.setFixedSize(QSize(1480, 920))   # fixed canvas; Ctrl+scroll to zoom
         scroll.setWidgetResizable(False)
         scroll.setWidget(self.flow_canvas)
+        self._pinch_filter = _PinchFilter(self.flow_canvas)
+        scroll.viewport().installEventFilter(self._pinch_filter)
         parent_lay.addWidget(scroll)
         
         self._flow_cards = {}
@@ -1103,7 +1131,6 @@ class MonitorWindow(QMainWindow):
 
         # Topics
         _topic("T_UNI", "UNITY TARGET", "/unity/joint_cmd", COL_UNITY, 0.28, 0.25)
-        _topic("T_PRD", "PREDICTED TGT", "Internal Trajectory", COL_PRED, 0.28, 0.50)
         _topic("T_ACT", "ACTUAL FEEDBACK", "/joint_states", COL_ACTUAL, 0.28, 0.75)
         
         _topic("T_SNT", "SENT COMMAND", "TCP Packet", COL_SENT, 0.68, 0.20)
@@ -1116,10 +1143,6 @@ class MonitorWindow(QMainWindow):
         # Input to ROS
         self.flow_canvas.add_edge("INPUT", "T_UNI", COL_UNITY, "UNITY TARGET")
         self.flow_canvas.add_edge("T_UNI", "ROS", COL_UNITY, "UNITY TARGET")
-        
-        # ROS Pred to Input
-        self.flow_canvas.add_edge("ROS", "T_PRD", COL_PRED, "PREDICTED TGT")
-        self.flow_canvas.add_edge("T_PRD", "INPUT", COL_PRED, "PREDICTED TGT")
         
         # ROS Feedback to Input
         self.flow_canvas.add_edge("ROS", "T_ACT", COL_ACTUAL, "ACTUAL FEEDBACK")
@@ -1475,7 +1498,7 @@ class MonitorWindow(QMainWindow):
             hl.addWidget(t1); hl.addSpacing(10); hl.addWidget(val); hl.addStretch()
             
             # Legend
-            for clr, lbl in [(COL_UNITY,"Unity"),(COL_PRED,"Pred"),(COL_SENT,"Sent"),(COL_ACTUAL,"Actual")]:
+            for clr, lbl in [(COL_UNITY,"Unity"),(COL_SENT,"Sent"),(COL_ACTUAL,"Actual")]:
                 dot = QLabel("—")
                 dot.setFont(font(FONT_SANS, 14, bold=True))
                 dot.setStyleSheet(f"color:{clr}; border:none;")
@@ -1502,12 +1525,11 @@ class MonitorWindow(QMainWindow):
             ax.grid(False, axis='x')
             
             lu, = ax.plot([], [], color=COL_UNITY,  lw=2.0, ls="-", alpha=0.85)
-            lp, = ax.plot([], [], color=COL_PRED,   lw=2.0, ls="--", alpha=0.85)
             ls, = ax.plot([], [], color=COL_SENT,   lw=0, marker='o', ms=2.5, alpha=0.85)
             la, = ax.plot([], [], color=COL_ACTUAL, lw=2.0)
             
             self._axes_j.append(ax)
-            self._lines_j.append((lu,lp,ls,la))
+            self._lines_j.append((lu,ls,la))
             self._canvas_list.append(canvas)
             
             cl.addWidget(canvas, stretch=1)
@@ -1545,7 +1567,8 @@ class MonitorWindow(QMainWindow):
         self._act_segs = [self._ax_3d.plot([],[],[], color=COL_ACTUAL, lw=1.5, alpha=_FA[i])[0] for i in range(4)]
         self._pt_tgt,  = self._ax_3d.plot([],[],[], 'o', color=COL_UNITY,  ms=7, zorder=5)
         self._pt_act,  = self._ax_3d.plot([],[],[], 'o', color=COL_ACTUAL, ms=7, zorder=5)
-        self._pt_sent, = self._ax_3d.plot([],[],[], '.', color=COL_SENT,   ms=4, alpha=0.7, zorder=4)
+        self._snt_new, = self._ax_3d.plot([],[],[], '.', color=COL_SENT, ms=5, alpha=0.85, zorder=4)
+        self._snt_old, = self._ax_3d.plot([],[],[], '.', color=COL_SENT, ms=3, alpha=0.25, zorder=3)
         self._line_err,= self._ax_3d.plot([],[],[], color=RED, lw=1.5, alpha=0.7, ls="--")
 
         lay.addWidget(self._canvas_3d, stretch=1)
@@ -1624,15 +1647,15 @@ class MonitorWindow(QMainWindow):
         t_arr = np.array(self.t_buf)
         import matplotlib.ticker as ticker
         for i in range(4):
-            lu,lp,ls,la = self._lines_j[i]
+            lu,ls,la = self._lines_j[i]
             ax = self._axes_j[i]
-            u=np.array(self.u_buf[i]); p=np.array(self.p_buf[i])
+            u=np.array(self.u_buf[i])
             s=np.array(self.s_buf[i]); a=np.array(self.a_buf[i])
-            lu.set_data(t_arr,u); lp.set_data(t_arr,p)
+            lu.set_data(t_arr,u)
             ls.set_data(t_arr,s); la.set_data(t_arr,a)
             ax.set_xlim(max(0,rel-GRAPH_WIN), max(GRAPH_WIN, rel+0.5))
             if len(a)>1:
-                vals = np.concatenate([u,p,a])
+                vals = np.concatenate([u,a])
                 mn,mx = np.nanmin(vals), np.nanmax(vals)
                 if not (np.isnan(mn) or np.isnan(mx)):
                     pad = max(2.0,(mx-mn)*0.15)
@@ -1665,8 +1688,19 @@ class MonitorWindow(QMainWindow):
             self._pt_act.set_data_3d([act[0]],[act[1]],[act[2]])  # type: ignore[attr-defined]
             self._line_err.set_data_3d([tgt[0],act[0]],[tgt[1],act[1]],[tgt[2],act[2]])
             if len(self.snt_trail) > 0:
-                sx,sy,sz = zip(*self.snt_trail)
-                self._pt_sent.set_data_3d(list(sx),list(sy),list(sz))
+                slist = list(self.snt_trail)
+                half  = max(1, len(slist)//2)
+                snew  = slist[half:];  sold = slist[:half]
+                if snew:
+                    nx,ny,nz = zip(*snew)
+                    self._snt_new.set_data_3d(list(nx),list(ny),list(nz))  # type: ignore[attr-defined]
+                else:
+                    self._snt_new.set_data_3d([],[],[])  # type: ignore[attr-defined]
+                if sold:
+                    ox,oy,oz = zip(*sold)
+                    self._snt_old.set_data_3d(list(ox),list(oy),list(oz))  # type: ignore[attr-defined]
+                else:
+                    self._snt_old.set_data_3d([],[],[])  # type: ignore[attr-defined]
             # auto-scale 3D
             def _lim(v):
                 mn,mx=min(v),max(v); pad=max(20,(mx-mn)*.2); return mn-pad, mx+pad

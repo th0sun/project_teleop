@@ -722,10 +722,14 @@ class _CleanFFLogic:
             if self._ema_vel is None:
                 self._ema_vel = np.zeros(4)
         else:
+            if self._ema_vel is None:
+                self._ema_vel = np.zeros(4)
             raw_vel       = (smoothed - self._prev_tgt) / dt
             self._ema_vel = 0.3 * raw_vel + 0.7 * self._ema_vel
             self._prev_tgt   = smoothed.copy()
             self._prev_tgt_t = now
+        if self._ema_vel is None:
+            self._ema_vel = np.zeros(4)
         ff   = self._ema_vel * self.FF_LEAD_SEC
         norm = float(np.max(np.abs(ff)))
         if norm > self.MAX_FF_LEAD:
