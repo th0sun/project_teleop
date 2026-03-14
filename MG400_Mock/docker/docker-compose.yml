@@ -1,0 +1,19 @@
+services:
+  dobot:
+    build:
+      context: ./dobot
+    volumes:
+      - ../app/src/:/app/
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - dobot_network
+
+networks:
+  dobot_network:
+    name: dobot_network
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.10.0.0/24
