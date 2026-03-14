@@ -728,10 +728,14 @@ class _CleanFFLogic:
 
         # 3. SAFETY GATE: prevent queue buildup. If the robot is too far behind
         #    the last command we sent, it means the queue is backing up or the
-        #    robot is stuck. Drop commands to let it catch up.
+        #    robot is stuck.
         dist_to_last = float(np.max(np.abs(q_current[:4] - self._last_cmd)))
         if dist_to_last > self.GATE_RAD:
-            return False, None, "QueueGate"
+            # IMPORTANT: Update last_cmd to current position so we don't deadlock!
+            # If we don't do this, and the robot is genuinely stuck or makes a huge
+            # sudden jump, dist_to_last will stay > 8° forever and we'll never send again.
+            self._last_cmd = q_current[:4].copy()
+            return False, None, "QueueGate_Reset"
 
         # 4. Fixed 25 Hz rate floor
         if (now - self._last_send_t) < self.CMD_INTERVAL:
