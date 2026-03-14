@@ -36,6 +36,12 @@ HOME_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0]
 # ── Trajectory storage directory ─────────────────────────────────────────────
 TRAJ_DIR = os.path.expanduser("~/project_teleop_ws/trajectories")
 
+# ── Playback decimation ───────────────────────────────────────────────────────
+# Recording is done at 50 Hz (20ms per frame).  Sending every raw frame gives
+# tiny per-segment deltas → very low SpeedJ → robot crawls.  We decimate to
+# PLAYBACK_HZ target rate so each segment has enough motion for a real speed.
+PLAYBACK_MIN_DT = 0.10   # seconds — minimum gap between sent waypoints (≈10 Hz)
+
 
 class TrajectoryRecorder:
     """
@@ -185,52 +191,56 @@ class TrajectoryRecorder:
 
     def _play_worker(self):
         """Sequencer thread: sends JointMovJ commands with computed SpeedJ."""
-        frames = self.loaded_frames
+        raw = self.loaded_frames
+
+        # ── Decimate: keep only frames >= PLAYBACK_MIN_DT apart ──────────────
+        # Recording at 50 Hz gives tiny per-segment deltas → SpeedJ=1-2% →
+        # robot crawls even though timing math is correct.  Merging to ~10 Hz
+        # gives ~5x larger deltas per segment → SpeedJ 5x higher → correct speed.
+        frames = [raw[0]]
+        for f in raw[1:]:
+            if f["timeStamp"] - frames[-1]["timeStamp"] >= PLAYBACK_MIN_DT:
+                frames.append(f)
+        if frames[-1] is not raw[-1]:
+            frames.append(raw[-1])  # always include final pose
+
         n = len(frames)
-        self._log.info(f"▶️  Preview start — {n} waypoints")
-
-        # Normalize timestamps relative to first frame
         t0_traj = frames[0]["timeStamp"]
-
         t_wall_start = time.perf_counter()
+        self._log.info(f"▶️  Preview start — {n} waypoints (decimated from {len(raw)})")
 
-        for i in range(n):
+        for i, fr in enumerate(frames):
             if self._stop_flag.is_set():
-                self._log.info("⏹️  Preview aborted")
                 break
 
-            fr = frames[i]
             j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
 
             # ── Compute SpeedJ for this segment ──────────────────────────────
             if i < n - 1:
                 fr_next = frames[i + 1]
-                dt = fr_next["timeStamp"] - fr["timeStamp"]
-                if dt < 0.001:
-                    dt = 0.02  # guard
-
+                dt = max(fr_next["timeStamp"] - fr["timeStamp"], 0.001)
                 j_next = [fr_next["j1"], fr_next["j2"], fr_next["j3"], fr_next["j4"]]
                 max_delta = max(abs(j_next[k] - j[k]) for k in range(4))
-                # SpeedJ is percentage of max (360°/s) → speed_pct = (deg/s) / 360 * 100
-                required_deg_per_s = max_delta / dt if dt > 0 else 0
-                speed_pct = max(1, min(100, int(math.ceil(required_deg_per_s / 360.0 * 100))))
+                required_dps = max_delta / dt
+                speed_pct = max(5, min(100, int(math.ceil(required_dps / 360.0 * 100))))
             else:
-                speed_pct = 20  # last frame: slow down
+                speed_pct = 20
 
             # ── Build and send command ───────────────────────────────────────
             cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
                    f"SpeedJ={speed_pct},AccJ=100,CP=100)")
             self._send(cmd)
 
+            # ── Check stop immediately after send ────────────────────────────
+            if self._stop_flag.is_set():
+                break
+
             # ── Wait until the next frame's wall-clock time ──────────────────
             if i < n - 1:
                 next_rel = frames[i + 1]["timeStamp"] - t0_traj
-                target_wall = t_wall_start + next_rel
-                sleep_dur = target_wall - time.perf_counter()
+                sleep_dur = (t_wall_start + next_rel) - time.perf_counter()
                 if sleep_dur > 0:
-                    # Use Event.wait so _stop_flag can interrupt sleep
                     if self._stop_flag.wait(timeout=sleep_dur):
-                        self._log.info("⏹️  Preview aborted during wait")
                         break
 
             # Progress log every 25%
@@ -239,14 +249,18 @@ class TrajectoryRecorder:
                 self._log.info(f"   Preview: {pct}%")
 
         self.is_playing = False
-        if not self._stop_flag.is_set():
+        if self._stop_flag.is_set():
+            self._log.info("⏹️  Playback stopped — returning to real-time teleop")
+        else:
             self._log.info("✅ Preview complete")
 
     # ═════════════════════════════════════════════════════════════════════════
     #  STOP & HOME
     # ═════════════════════════════════════════════════════════════════════════
-    def stop_all(self):
-        """Stop any recording/playback and command robot to Home."""
+    def stop_all(self, go_home: bool = False):
+        """Stop any recording/playback.  When go_home=True also move to Home.
+        By default just aborts so live teleop resumes immediately.
+        """
         was_recording = self.is_recording
         was_playing   = self.is_playing
 
@@ -258,11 +272,12 @@ class TrajectoryRecorder:
         self.is_playing = False
 
         if was_recording:
-            self._log.info("⏹️  Recording stopped by Stop command")
+            self._log.info("⏹️  Recording stopped")
         if was_playing:
-            self._log.info("⏹️  Playback stopped by Stop command")
+            self._log.info("⏹️  Playback stopped — live teleop resumed")
 
-        self._go_home()
+        if go_home:
+            self._go_home()
 
     def _go_home(self):
         """Send robot to Home position (0, 0, 0, 0)."""
