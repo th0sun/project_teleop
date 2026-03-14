@@ -17,7 +17,7 @@ import numpy as np
 # ── Qt6 ──────────────────────────────────────────────────────────────────────
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
-    QSplitter, QScrollArea, QTextEdit, QGridLayout,
+    QSplitter, QScrollArea, QTextEdit, QGridLayout, QTabWidget,
     QHBoxLayout, QVBoxLayout, QSizePolicy,
 )
 from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QThread
@@ -344,27 +344,16 @@ class RobotData:
         # sim
         self._sim_t       = 0.0
 
+        # Message counts for Data Flow tab
+        self.msg_counts = {
+            "UNITY TARGET": 0, "ACTUAL FEEDBACK": 0, "TOOL VECTOR": 0,
+            "ROBOT MODE": 0, "ROBOT ERROR": 0, "DIGITAL IO": 0
+        }
+        self.flow_hz = {k: 0.0 for k in self.msg_counts}
+
     def tick_sim(self):
-        """Fill with sinusoidal sim data when ROS unavailable."""
-        t = self._sim_t
-        self._sim_t += 0.033
-        r, cx, cy = 280, 0, 300
-        self.unity     = [30*math.sin(t*.7), 20*math.cos(t*.5)-10,
-                          15*math.sin(t*.3+1), 10*math.cos(t*.9)]
-        self.predicted = [v+(0.3 if i==0 else -0.2 if i==1 else 0.2 if i==2 else -0.1)
-                          for i,v in enumerate(self.unity)]
-        self.actual    = [self.unity[i]+[-0.8,-.6,-.6,-.4][i]+(np.random.rand()-.5)*.3
-                          for i in range(4)]
-        self.sent      = [self.unity[i]+[-.5,-.4,-.4,-.3][i] for i in range(4)]
-        self.sent_fresh = [t%0.3<0.033]*4
-        tx = cx+r*math.cos(t*.4); ty = cy+r*math.sin(t*.25); tz = 80+40*math.sin(t*.6)
-        self.unity_xyz = [tx,ty,tz,0,0,0]
-        self.tool_act  = [tx+2.5*math.sin(t*3.1)+(np.random.rand()-.5)*1.5,
-                          ty+1.8*math.cos(t*2.7)+(np.random.rand()-.5),
-                          tz+1.2*math.sin(t*4)+(np.random.rand()-.5)*.8, 0,0,0]
-        self.flange    = [v-[8,5,12,0,0,0][i] for i,v in enumerate(self.tool_act)]
-        self.last_tgt_t = time.time()
-        self.last_act_t = time.time()
+        """No longer simulating. Only true ROS data is used."""
+        pass
 
 DATA = RobotData()
 
@@ -402,15 +391,17 @@ class RosNode(Node if ROS_AVAILABLE else object):
         sub(UNITY_XYZ_TOPIC, Float64MultiArray, lambda m: self._f64(m, 'unity_xyz'))
         sub(FLANGE_TOPIC,    Float64MultiArray, lambda m: self._f64(m, 'flange'))
         sub(TOOL_IDX_TOPIC,  Int32, lambda m: setattr(d,'tool_idx',int(m.data)))
-        sub(DO_STATUS_TOPIC, Int64, lambda m: setattr(d,'do_status',int(m.data)))
-        sub(ROBOT_MODE_TOPIC,   Int32, lambda m: setattr(d,'robot_mode',int(m.data)))
-        sub(ERROR_STATUS_TOPIC, Int32, lambda m: setattr(d,'error_stat',int(m.data)))
+        sub(DO_STATUS_TOPIC, Int64, self._cb_do)
+        sub(ROBOT_MODE_TOPIC,   Int32, self._cb_mode)
+        sub(ERROR_STATUS_TOPIC, Int32, self._cb_err)
 
     def _cb_actual(self, msg):
+        self.data.msg_counts["ACTUAL FEEDBACK"] += 1
         if len(msg.position) >= 9:
             self.data.actual = list(np.degrees([msg.position[i] for i in (0,1,3,8)]))
             self.data.last_act_t = time.time()
     def _cb_unity(self, msg):
+        self.data.msg_counts["UNITY TARGET"] += 1
         if len(msg.position) >= 4:
             self.data.unity = list(np.degrees(msg.position[:4]))
             self.data.last_tgt_t = time.time()
@@ -421,7 +412,17 @@ class RosNode(Node if ROS_AVAILABLE else object):
             self.data.sent = list(np.degrees(msg.position[:4]))
             self.data.sent_fresh = [True]*4
     def _f64(self, msg, attr):
+        if attr == 'tool_act': self.data.msg_counts["TOOL VECTOR"] += 1
         if len(msg.data) >= 6: setattr(self.data, attr, list(msg.data))
+    def _cb_mode(self, msg):
+        self.data.msg_counts["ROBOT MODE"] += 1
+        self.data.robot_mode = int(msg.data)
+    def _cb_err(self, msg):
+        self.data.msg_counts["ROBOT ERROR"] += 1
+        self.data.error_stat = int(msg.data)
+    def _cb_do(self, msg):
+        self.data.msg_counts["DIGITAL IO"] += 1
+        self.data.do_status = int(msg.data)
 
     def send_suction(self, state):
         if self.pub_suction:
@@ -570,6 +571,7 @@ class MonitorWindow(QMainWindow):
         # Log
         self._log_idx  = 0
         self._last_log = 0.0
+        self._last_flow_t = time.time()
 
         self.setWindowTitle("MG400 Monitor")
         self.resize(1460, 880)
@@ -582,7 +584,35 @@ class MonitorWindow(QMainWindow):
         root_lay.setContentsMargins(0,0,0,0); root_lay.setSpacing(0)
 
         self._build_topbar(root_lay)
-        self._build_body(root_lay)
+        
+        # Tabs
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; }
+            QTabBar::tab {
+                background: #e2e8f0; color: #64748b; padding: 8px 20px;
+                border-top-left-radius: 8px; border-top-right-radius: 8px;
+                margin-right: 4px; font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff; color: #0ea5e9;
+            }
+        """)
+        
+        # Tab 1: Dashboard
+        tab1 = QWidget(); tab1.setStyleSheet(f"background:{BG};")
+        tab1_lay = QVBoxLayout(tab1)
+        tab1_lay.setContentsMargins(0,0,0,0); tab1_lay.setSpacing(0)
+        self._build_body(tab1_lay)
+        
+        # Tab 2: Data Flow
+        tab2 = QWidget(); tab2.setStyleSheet(f"background:{BG};")
+        self._build_data_flow_tab(tab2)
+        
+        self.tabs.addTab(tab1, "⚙️ DASHBOARD")
+        self.tabs.addTab(tab2, "🌐 DATA FLOW")
+        
+        root_lay.addWidget(self.tabs)
 
         # Session logger
         self.logger = SessionLogger(data)
@@ -613,9 +643,10 @@ class MonitorWindow(QMainWindow):
         lay.addWidget(t1); lay.addWidget(t2); lay.addSpacing(16)
 
         # ROS status
-        self._lbl_ros = QLabel("ROS2 CONNECTED")
+        self._lbl_ros = QLabel("CONNECTING...")
         self._lbl_ros.setObjectName("status_pill")
         self._lbl_ros.setFont(font(FONT_MONO, 10))
+        self._lbl_ros.setStyleSheet(f"color:{MUTED}; background:rgba(100,116,139,0.1); border:1px solid rgba(100,116,139,0.3); border-radius:4px; padding:3px 10px;")
         lay.addWidget(self._lbl_ros); lay.addSpacing(8)
 
         # Uptime
@@ -663,7 +694,9 @@ class MonitorWindow(QMainWindow):
 
         splitter.addWidget(left_w)
         splitter.addWidget(right_w)
-        splitter.setSizes([390, 1060])
+        
+        # Optimize split widths: Make left side 440px to fit well, right side takes rest
+        splitter.setSizes([440, 1000])
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
 
@@ -674,10 +707,77 @@ class MonitorWindow(QMainWindow):
         self._build_right(right_w)
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  LEFT PANEL
+    #  DATA FLOW TAB
     # ──────────────────────────────────────────────────────────────────────────
+    def _build_data_flow_tab(self, parent):
+        lay = QVBoxLayout(parent)
+        lay.setContentsMargins(20,20,20,20)
+        
+        title = QLabel("ROS 2 Topic & Data Flow Analysis")
+        title.setFont(font(FONT_SANS, 16, bold=True))
+        title.setStyleSheet(f"color:{TEXT};")
+        lay.addWidget(title)
+        
+        desc = QLabel("Real-time monitoring of ROS 2 topics, frequencies, and message flow across the bridge.")
+        desc.setFont(font(FONT_SANS, 11))
+        desc.setStyleSheet(f"color:{MUTED};")
+        lay.addWidget(desc)
+        
+        lay.addSpacing(20)
+        
+        # Grid for cards
+        grid = QGridLayout()
+        grid.setSpacing(16)
+        
+        self._flow_cards = {}
+        
+        topics = [
+            ("UNITY TARGET", UNITY_TOPIC, "JointState (4 DOF)", COL_UNITY),
+            ("ACTUAL FEEDBACK", ACTUAL_TOPIC, "JointState (4 DOF)", COL_ACTUAL),
+            ("TOOL VECTOR", TOOL_ACT_TOPIC, "Float64MultiArray (6 DOF)", GREEN),
+            ("ROBOT MODE", ROBOT_MODE_TOPIC, "Int32", PURPLE),
+            ("ROBOT ERROR", ERROR_STATUS_TOPIC, "Int32", RED),
+            ("DIGITAL IO", DO_STATUS_TOPIC, "Int64", ORANGE),
+        ]
+        
+        for i, (name, topic, t_type, clr) in enumerate(topics):
+            card = QFrame()
+            card.setStyleSheet(f"background:{PANEL}; border: 1px solid {BORDER}; border-radius: 10px;")
+            cl = QVBoxLayout(card)
+            
+            # Header
+            hl = QHBoxLayout()
+            n = QLabel(name)
+            n.setFont(font(FONT_SANS, 11, bold=True))
+            n.setStyleSheet(f"color:{clr}; border:none;")
+            hl.addWidget(n)
+            hl.addStretch()
+            
+            hz = QLabel("0 Hz")
+            hz.setFont(font(FONT_MONO, 12, bold=True))
+            hz.setStyleSheet(f"color:{TEXT}; border:none;")
+            hl.addWidget(hz)
+            cl.addLayout(hl)
+            
+            # Details
+            tl = QLabel(f"Topic: {topic}")
+            tl.setFont(font(FONT_MONO, 9))
+            tl.setStyleSheet(f"color:{MUTED}; border:none;")
+            cl.addWidget(tl)
+            
+            ty = QLabel(f"Type: {t_type}")
+            ty.setFont(font(FONT_MONO, 9))
+            ty.setStyleSheet(f"color:{MUTED}; border:none;")
+            cl.addWidget(ty)
+            
+            grid.addWidget(card, i // 2, i % 2)
+            
+            self._flow_cards[name] = {"hz": hz, "count": 0, "last_t": time.time()}
+            
+        lay.addLayout(grid)
+        lay.addStretch()
     def _build_left(self, parent):
-        lay = QVBoxLayout(parent); lay.setContentsMargins(0,0,4,0); lay.setSpacing(0)
+        lay = QVBoxLayout(parent); lay.setContentsMargins(0,0,8,0); lay.setSpacing(0)
 
         vsplit = QSplitter(Qt.Orientation.Vertical)
         vsplit.setHandleWidth(7)
@@ -687,7 +787,8 @@ class MonitorWindow(QMainWindow):
 
         vsplit.addWidget(data_panel)
         vsplit.addWidget(log_panel)
-        vsplit.setSizes([500, 250])
+        # Give more priority to data panel
+        vsplit.setSizes([600, 250])
         vsplit.setCollapsible(0, False)
         vsplit.setCollapsible(1, False)
 
@@ -976,58 +1077,79 @@ class MonitorWindow(QMainWindow):
     # ── 2×2 joint graphs ─────────────────────────────────────────────────────
     def _build_joint_graphs(self):
         outer = QWidget(); outer.setStyleSheet(f"background:{BG};")
-        grid  = QGridLayout(outer); grid.setContentsMargins(0,0,0,0); grid.setSpacing(8)
-
-        self._fig_joints  = Figure(facecolor=PANEL)
-        self._fig_joints.subplots_adjust(left=0.08,right=0.97,top=0.93,bottom=0.09,hspace=0.6,wspace=0.35)
-        self._canvas_j    = FigureCanvasQTAgg(self._fig_joints)
-        self._canvas_j.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        grid  = QGridLayout(outer); grid.setContentsMargins(0,0,0,0); grid.setSpacing(12)
 
         self._axes_j  = []
         self._lines_j = []    # (l_u, l_p, l_s, l_a)
         self._live_tx = []
+        self._canvas_list = []
 
         positions = [(0,0),(0,1),(1,0),(1,1)]
-        gs = self._fig_joints.add_gridspec(2,2)
 
         for idx,(ri,ci) in enumerate(positions):
-            ax = self._fig_joints.add_subplot(gs[ri,ci])
-            ax.set_facecolor("#fafbfd")
-            for sp in ax.spines.values(): sp.set_color(BORDER)
-            ax.tick_params(colors="#94a3b8", labelsize=7)
-            ax.grid(True, color="#e5e7eb", lw=0.4, ls="--")
-            ax.set_ylabel("°", color=MUTED, fontsize=8)
-            ax.set_title(f"J{idx+1}", loc="left", fontsize=10,
-                         fontweight="bold", color=TEXT, pad=3)
-
-            lu, = ax.plot([], [], color=COL_UNITY,  lw=1.3, ls="--", alpha=0.85)
-            lp, = ax.plot([], [], color=COL_PRED,   lw=1.1, alpha=0.85)
-            ls, = ax.plot([], [], color=COL_SENT,   lw=0, marker='o', ms=3.5, alpha=0.9)
-            la, = ax.plot([], [], color=COL_ACTUAL, lw=1.6)
-
-            lt = ax.text(0.99,0.95,"0.00°", transform=ax.transAxes,
-                         ha="right", va="top", fontsize=9, fontweight="bold",
-                         color=COL_ACTUAL, fontfamily=FONT_MONO)
-            self._live_tx.append(lt)
-
-            if idx == 0:
-                for clr,lbl,dsh in [
-                    (COL_UNITY,"Unity","--"),(COL_PRED,"Pred","-"),
-                    (COL_SENT,"Sent","-"),(COL_ACTUAL,"Actual","-")
-                ]:
-                    ax.plot([],[],color=clr,lw=1.5,ls=dsh,label=lbl)
-                ax.legend(loc="upper right", fontsize=6.5, frameon=True,
-                          framealpha=0.85, edgecolor=BORDER, ncol=4,
-                          bbox_to_anchor=(1.0,1.28))
-
+            card = QFrame()
+            card.setObjectName("graph_card")
+            card.setStyleSheet(f"QFrame#graph_card {{ background:{PANEL}; border: 1px solid {BORDER}; border-radius: 10px; }}")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(0,0,0,0); cl.setSpacing(0)
+            
+            # Header
+            hdr = QWidget()
+            hdr.setStyleSheet(f"border-bottom: 1px solid {BORDER};")
+            hl = QHBoxLayout(hdr)
+            hl.setContentsMargins(16,10,16,10)
+            
+            t1 = QLabel(f"J{idx+1}")
+            t1.setFont(font(FONT_SANS, 16, bold=True))
+            t1.setStyleSheet("color:#0f172a; border:none;")
+            
+            val = QLabel("0.00°")
+            val.setFont(font(FONT_SANS, 16, bold=True))
+            val.setStyleSheet(f"color:{COL_ACTUAL}; border:none;")
+            self._live_tx.append(val)
+            
+            hl.addWidget(t1); hl.addSpacing(10); hl.addWidget(val); hl.addStretch()
+            
+            # Legend
+            for clr, lbl in [(COL_UNITY,"Unity"),(COL_PRED,"Pred"),(COL_SENT,"Sent"),(COL_ACTUAL,"Actual")]:
+                dot = QLabel("—")
+                dot.setFont(font(FONT_SANS, 14, bold=True))
+                dot.setStyleSheet(f"color:{clr}; border:none;")
+                txt = QLabel(lbl)
+                txt.setFont(font(FONT_SANS, 10, bold=True))
+                txt.setStyleSheet(f"color:{MUTED}; border:none;")
+                hl.addWidget(dot); hl.addWidget(txt); hl.addSpacing(6)
+                
+            cl.addWidget(hdr)
+            
+            # Plot
+            fig = Figure(facecolor=PANEL)
+            fig.subplots_adjust(left=0.12, right=0.96, top=0.92, bottom=0.18)
+            canvas = FigureCanvasQTAgg(fig)
+            canvas.setStyleSheet("border:none; background:transparent;")
+            ax = fig.add_subplot(111)
+            ax.set_facecolor(PANEL)
+            
+            for sp in ['top','right','left']: ax.spines[sp].set_visible(False)
+            ax.spines['bottom'].set_color(BORDER)
+            ax.tick_params(axis='y', colors=MUTED, labelsize=9, length=0)
+            ax.tick_params(axis='x', colors=MUTED, labelsize=9)
+            ax.grid(True, axis='y', color="#e2e8f0", lw=0.8)
+            ax.grid(False, axis='x')
+            
+            lu, = ax.plot([], [], color=COL_UNITY,  lw=2.0, ls="-", alpha=0.85)
+            lp, = ax.plot([], [], color=COL_PRED,   lw=2.0, ls="--", alpha=0.85)
+            ls, = ax.plot([], [], color=COL_SENT,   lw=0, marker='o', ms=4.5, alpha=0.9)
+            la, = ax.plot([], [], color=COL_ACTUAL, lw=2.0)
+            
             self._axes_j.append(ax)
             self._lines_j.append((lu,lp,ls,la))
-
-        # Wrap canvas in a styled frame
-        frame = QFrame(); frame.setObjectName("panel")
-        fl = QVBoxLayout(frame); fl.setContentsMargins(4,4,4,4)
-        fl.addWidget(self._canvas_j)
-        return frame
+            self._canvas_list.append(canvas)
+            
+            cl.addWidget(canvas, stretch=1)
+            grid.addWidget(card, ri, ci)
+            
+        return outer
 
     # ── 3D trajectory ─────────────────────────────────────────────────────────
     def _build_3d_graph(self):
@@ -1129,6 +1251,7 @@ class MonitorWindow(QMainWindow):
                 self.s_buf[i].append(np.nan)
 
         t_arr = np.array(self.t_buf)
+        import matplotlib.ticker as ticker
         for i in range(4):
             lu,lp,ls,la = self._lines_j[i]
             ax = self._axes_j[i]
@@ -1136,15 +1259,18 @@ class MonitorWindow(QMainWindow):
             s=np.array(self.s_buf[i]); a=np.array(self.a_buf[i])
             lu.set_data(t_arr,u); lp.set_data(t_arr,p)
             ls.set_data(t_arr,s); la.set_data(t_arr,a)
-            ax.set_xlim(max(0,rel-GRAPH_WIN), rel+0.5)
+            ax.set_xlim(max(0,rel-GRAPH_WIN), max(GRAPH_WIN, rel+0.5))
             if len(a)>1:
                 vals = np.concatenate([u,p,a])
                 mn,mx = np.nanmin(vals), np.nanmax(vals)
                 if not (np.isnan(mn) or np.isnan(mx)):
                     pad = max(2.0,(mx-mn)*0.15)
                     ax.set_ylim(mn-pad, mx+pad)
-            self._live_tx[i].set_text(f"{d.actual[i]:+.2f}°")
-        self._canvas_j.draw_idle()
+            self._live_tx[i].setText(f"{d.actual[i]:+.2f}°")
+            ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, pos: f"{x:.1f}s"))
+
+        for canvas in self._canvas_list:
+            canvas.draw_idle()
 
         # 3D
         tgt = d.unity_xyz[:3]; act = d.tool_act[:3]
@@ -1178,16 +1304,21 @@ class MonitorWindow(QMainWindow):
 
         # Clock / uptime
         self._lbl_clock.setText(datetime.datetime.now().strftime("%H:%M:%S"))
-        el = now-self._start_t; h,r=divmod(int(el),3600); m,s=divmod(r,60)
-        self._lbl_uptime.setText(f"⏱ {h:02d}:{m:02d}:{s:02d}")
-
         # ROS status
+        now = time.time()
+        elapsed = int(now - self._start_t)
+        self._lbl_uptime.setText(f"⏱ {elapsed//3600:02d}:{(elapsed%3600)//60:02d}:{elapsed%60:02d}")
+
         if ROS_AVAILABLE:
-            self._lbl_ros.setText("ROS2 CONNECTED")
-            self._lbl_ros.setStyleSheet(f"color:{GREEN}; background:{PANEL2}; border:1px solid {BORDER}; border-radius:4px; padding:3px 10px;")
+            if d.last_act_t > 0 and (now - d.last_act_t) < 2.0:
+                self._lbl_ros.setText("ROS2 CONNECTED")
+                self._lbl_ros.setStyleSheet(f"color:{GREEN}; background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.3); border-radius:4px; padding:3px 10px;")
+            else:
+                self._lbl_ros.setText("WAITING FOR DATA")
+                self._lbl_ros.setStyleSheet(f"color:{ORANGE}; background:rgba(249,115,22,0.08); border:1px solid rgba(249,115,22,0.3); border-radius:4px; padding:3px 10px;")
         else:
-            self._lbl_ros.setText("SIM MODE")
-            self._lbl_ros.setStyleSheet(f"color:{ORANGE}; background:rgba(249,115,22,0.08); border:1px solid rgba(249,115,22,0.3); border-radius:4px; padding:3px 10px;")
+            self._lbl_ros.setText("SIMULATION / DISCONNECTED")
+            self._lbl_ros.setStyleSheet(f"color:{RED}; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.3); border-radius:4px; padding:3px 10px;")
 
         # Mode
         mode_str = MODE_NAMES.get(d.robot_mode, str(d.robot_mode))
@@ -1270,6 +1401,19 @@ class MonitorWindow(QMainWindow):
         self._stat_chips[0].setText(f"Avg {avg:.2f}s")
         self._stat_chips[1].setText(f"Min {mn:.2f}s")
         self._stat_chips[2].setText(f"Max {mx:.2f}s")
+
+        # Data Flow Tab Updates
+        if now - self._last_flow_t >= 1.0:
+            dt = now - self._last_flow_t
+            self._last_flow_t = now
+            for k in d.msg_counts:
+                hz = d.msg_counts[k] / dt
+                d.flow_hz[k] = hz
+                d.msg_counts[k] = 0
+                if k in self._flow_cards:
+                    lbl = self._flow_cards[k]["hz"]
+                    lbl.setText(f"{hz:.1f} Hz")
+                    lbl.setStyleSheet(f"color:{GREEN if hz > 0.5 else MUTED}; border:none;")
 
         # Latency
         if d.last_tgt_t: self._chips["cmd"].setText(f"Cmd: {(now-d.last_tgt_t)*1000:.0f}ms")
