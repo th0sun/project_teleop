@@ -9,7 +9,7 @@ Styling : QStyleSheet  (border-radius, shadows, custom fonts)
 Graphs  : matplotlib embedded via FigureCanvasQTAgg  (2D joints + 3D trail)
 """
 
-import sys, os, time, math, csv, datetime, threading
+import sys, os, time, math, csv, datetime, threading, socket, json
 from collections import deque
 
 import numpy as np
@@ -437,6 +437,113 @@ class RosNode(Node if ROS_AVAILABLE else object):
     def send_dashboard_cmd(self, cmd_str):
         if hasattr(self, 'pub_dash') and self.pub_dash:
             msg = String(); msg.data = cmd_str; self.pub_dash.publish(msg)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  UDP BRIDGE NODE  (Mac-side replacement for RosNode — no ROS required)
+# ══════════════════════════════════════════════════════════════════════════════
+class UdpBridgeNode:
+    """Receives telemetry from monitor_bridge.py on Ubuntu via UDP (port 5556).
+    Sends commands back to Ubuntu via UDP (port 5557).
+    Same public interface as RosNode so MonitorWindow needs no changes."""
+
+    TELEM_PORT = int(os.environ.get("BRIDGE_TELEMETRY_PORT", "5556"))
+    CMD_PORT   = int(os.environ.get("BRIDGE_CMD_PORT",       "5557"))
+
+    def __init__(self, data: RobotData):
+        self.data        = data
+        self._bridge_ip  = os.environ.get("BRIDGE_IP")   # optional manual override
+        self._connected  = False
+        self._last_rx    = 0.0
+
+        # Receive socket — listen for broadcast telemetry
+        self._rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._rx.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 131072)
+        self._rx.settimeout(0.5)
+        self._rx.bind(("0.0.0.0", self.TELEM_PORT))
+
+        # Send socket — for commands to Ubuntu
+        self._tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        self._running = True
+        threading.Thread(target=self._rx_loop, daemon=True).start()
+        print(f"[UDP Bridge] Listening for telemetry on :{self.TELEM_PORT}  "
+              f"(set BRIDGE_IP env to override target for commands)")
+
+    # ── Receiver thread ───────────────────────────────────────────────────────
+    def _rx_loop(self):
+        while self._running:
+            try:
+                raw, addr = self._rx.recvfrom(65536)
+
+                # Auto-discover bridge IP from sender's address
+                if self._bridge_ip is None:
+                    self._bridge_ip = addr[0]
+                    print(f"[UDP Bridge] Bridge auto-discovered at {self._bridge_ip}")
+
+                pkt = json.loads(raw.decode())
+                d   = self.data
+                self._last_rx  = time.time()
+                self._connected = True
+
+                d.actual     = pkt.get("actual",     d.actual)
+                d.unity      = pkt.get("unity",      d.unity)
+                d.predicted  = pkt.get("predicted",  d.predicted)
+                d.sent       = pkt.get("sent",       d.sent)
+                d.tool_act   = pkt.get("tool_act",   d.tool_act)
+                d.tool_tgt   = pkt.get("tool_tgt",   d.tool_tgt)
+                d.unity_xyz  = pkt.get("unity_xyz",  d.unity_xyz)
+                d.flange     = pkt.get("flange",     d.flange)
+                d.tool_idx   = pkt.get("tool_idx",   d.tool_idx)
+                d.do_status  = pkt.get("do_status",  d.do_status)
+                d.robot_mode = pkt.get("robot_mode", d.robot_mode)
+                d.error_stat = pkt.get("error_stat", d.error_stat)
+                d.last_act_t = self._last_rx
+                d.last_tgt_t = self._last_rx
+
+                # Bridge pre-computes Hz — update flow_hz directly
+                for k, v in pkt.get("freq", {}).items():
+                    if k in d.flow_hz:
+                        d.flow_hz[k] = float(v)
+
+            except socket.timeout:
+                if self._connected and time.time() - self._last_rx > 3.0:
+                    self._connected = False
+                    print("[UDP Bridge] Connection lost (no data for 3 s)")
+            except Exception as e:
+                print(f"[UDP Bridge] RX error: {e}")
+
+    # ── Command sender ────────────────────────────────────────────────────────
+    def _send_cmd(self, payload: dict):
+        if self._bridge_ip is None:
+            print("[UDP Bridge] Bridge IP not yet discovered — command dropped")
+            return
+        try:
+            raw = json.dumps(payload, separators=(',', ':')).encode()
+            self._tx.sendto(raw, (self._bridge_ip, self.CMD_PORT))
+        except Exception as e:
+            print(f"[UDP Bridge] TX error: {e}")
+
+    # ── Public interface (same as RosNode) ────────────────────────────────────
+    def send_dashboard_cmd(self, cmd_str):
+        self._send_cmd({"action": "dashboard", "data": cmd_str})
+
+    def send_suction(self, state):
+        self._send_cmd({"action": "suction", "data": bool(state)})
+
+    def send_light(self, port, state):
+        self._send_cmd({"action": "light", "data": [int(port), int(state)]})
+
+    def is_connected(self):
+        return self._connected and (time.time() - self._last_rx) < 3.0
+
+    def stop(self):
+        self._running = False
+        try: self._rx.close()
+        except: pass
+        try: self._tx.close()
+        except: pass
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SESSION LOGGER
@@ -1440,6 +1547,14 @@ class MonitorWindow(QMainWindow):
             else:
                 self._lbl_ros.setText("WAITING FOR DATA")
                 self._lbl_ros.setStyleSheet(f"color:{ORANGE}; background:rgba(249,115,22,0.08); border:1px solid rgba(249,115,22,0.3); border-radius:4px; padding:3px 10px;")
+        elif isinstance(self.ros_node, UdpBridgeNode):
+            if self.ros_node.is_connected():
+                ip = self.ros_node._bridge_ip or "?"
+                self._lbl_ros.setText(f"UDP BRIDGE ● {ip}")
+                self._lbl_ros.setStyleSheet(f"color:{GREEN}; background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.3); border-radius:4px; padding:3px 10px;")
+            else:
+                self._lbl_ros.setText("UDP BRIDGE ● WAITING…")
+                self._lbl_ros.setStyleSheet(f"color:{ORANGE}; background:rgba(249,115,22,0.08); border:1px solid rgba(249,115,22,0.3); border-radius:4px; padding:3px 10px;")
         else:
             self._lbl_ros.setText("SIMULATION / DISCONNECTED")
             self._lbl_ros.setStyleSheet(f"color:{RED}; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.3); border-radius:4px; padding:3px 10px;")
@@ -1530,15 +1645,19 @@ class MonitorWindow(QMainWindow):
         if now - self._last_flow_t >= 1.0:
             dt = now - self._last_flow_t
             self._last_flow_t = now
-            for k in d.msg_counts:
-                hz = d.msg_counts[k] / dt
-                d.flow_hz[k] = hz
-                d.msg_counts[k] = 0
-                if k in self._flow_cards:
-                    lbl = self._flow_cards[k]["hz"]
-                    lbl.setText(f"{hz:.1f} Hz")
-                    lbl.setStyleSheet(f"color:{GREEN if hz > 0.5 else MUTED}; border:none;")
-                if hasattr(self, 'flow_canvas'):
+            # In UDP mode the bridge pre-computes freq; only recount in ROS mode
+            if ROS_AVAILABLE and not isinstance(self.ros_node, UdpBridgeNode):
+                for k in d.msg_counts:
+                    hz = d.msg_counts[k] / dt
+                    d.flow_hz[k] = hz
+                    d.msg_counts[k] = 0
+                    if k in self._flow_cards:
+                        lbl = self._flow_cards[k]["hz"]
+                        lbl.setText(f"{hz:.1f} Hz")
+                        lbl.setStyleSheet(f"color:{GREEN if hz > 0.5 else MUTED}; border:none;")
+            # Always push d.flow_hz → flow_canvas (works for both ROS and UDP)
+            if hasattr(self, 'flow_canvas'):
+                for k, hz in d.flow_hz.items():
                     self.flow_canvas.set_freq(k, hz)
 
         # Update real-time values in Data Flow cards
@@ -1657,22 +1776,26 @@ def main():
     app.setApplicationName("MG400 Monitor")
     app.setStyleSheet(QSS)
 
-    # ROS2
+    # ROS2 / UDP Bridge
     ros_node = None
     if ROS_AVAILABLE:
         rclpy.init()
         ros_node = RosNode(DATA)
         spin_thread = threading.Thread(target=rclpy.spin, args=(ros_node,), daemon=True)
         spin_thread.start()
+        print("[INFO] ROS 2 available — using native ROS node")
     else:
-        print("[INFO] Running in simulation mode (no ROS2)")
+        ros_node = UdpBridgeNode(DATA)
+        print("[INFO] ROS 2 not available — using UDP bridge (monitor_bridge.py on Ubuntu)")
 
     win = MonitorWindow(DATA, ros_node)
     win.show()
 
     exit_code = app.exec()
 
-    if ros_node:
+    if isinstance(ros_node, UdpBridgeNode):
+        ros_node.stop()
+    elif ros_node:
         ros_node.destroy_node()
         rclpy.shutdown()
 

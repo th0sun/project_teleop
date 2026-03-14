@@ -39,7 +39,7 @@ _ip="export ROBOT_IP=$ROBOT_IP"
 # note: exec bash ทำให้ pane ค้างไว้หลัง node หยุด, กด ↑ Enter รันใหม่ได้
 CMD_NODE="$_ip && $_src && ros2 run mg400_controller vr_teleop_node; exec bash"
 CMD_RVIZ="$_src && ros2 launch mg400_bringup main.launch.py; exec bash"
-CMD_MONITOR="$_src && ros2 run mg400_controller monitor_gui; exec bash"
+CMD_BRIDGE="$_src && python3 $WS/project_teleop/monitor_bridge.py; exec bash"
 
 if [ "$MODE" = "3" ] || [ "$MODE" = "4" ]; then
     CMD_EXTRA="$_src && ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0; exec bash"
@@ -77,9 +77,9 @@ tmux send-keys -t "$PANE_B" "$CMD_RVIZ" Enter
 PANE_C=$(tmux split-window -v -t "$PANE_B" -P -F '#{pane_id}')
 tmux send-keys -t "$PANE_C" "$CMD_EXTRA" Enter
 
-# Pane D: Monitor GUI (ซ้ายล่าง)
+# Pane D: Monitor Bridge (ซ้ายล่าง) — UDP telemetry → Mac
 PANE_D=$(tmux split-window -v -t "$PANE_A" -l 12 -P -F '#{pane_id}')
-tmux send-keys -t "$PANE_D" "$CMD_MONITOR" Enter
+tmux send-keys -t "$PANE_D" "$CMD_BRIDGE" Enter
 
 # Pane E: Docker Logs (Mock mode เท่านั้น)
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
@@ -94,7 +94,7 @@ tmux set -g pane-border-format " #{pane_index}: #{pane_title} "
 tmux select-pane -t "$PANE_A" -T "🤖 Teleop"
 tmux select-pane -t "$PANE_B" -T "📐 RViz"
 tmux select-pane -t "$PANE_C" -T "🔌 TCP/Sim"
-tmux select-pane -t "$PANE_D" -T "📊 Monitor GUI"
+tmux select-pane -t "$PANE_D" -T "� UDP Bridge"
 
 tmux set -g status-right " 💡 Ctrl+C=stop | ↑Enter=restart | Shift+drag=copy | Ctrl+D=close pane | kill-server=exit all "
 tmux set -g status-right-length 90
