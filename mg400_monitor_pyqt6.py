@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QThread, QPointF
 from PyQt6.QtGui     import (
     QFont, QFontDatabase, QColor, QPalette, QTextCursor, QIcon,
-    QPainter, QPainterPath, QPen
+    QPainter, QPainterPath, QPen, QBrush
 )
 from PyQt6.QtWidgets import QScrollBar  # explicit import for log scrollbar
 
@@ -342,6 +342,7 @@ class RobotData:
         self.error_stat   = 0
         self.last_tgt_t   = 0.0
         self.last_act_t   = 0.0
+        self.bridge_latency_ms = 0.0
         # sim
         self._sim_t       = 0.0
 
@@ -486,10 +487,20 @@ class UdpBridgeNode:
                 self._last_rx  = time.time()
                 self._connected = True
 
+                # Measure one-way latency from bridge packet timestamp
+                pkt_ts = pkt.get("ts", 0)
+                if pkt_ts > 0:
+                    lat_ms = (self._last_rx - pkt_ts) * 1000.0
+                    if 0 < lat_ms < 500:   # filter implausible values (clock skew)
+                        d.bridge_latency_ms = lat_ms
+
                 d.actual     = pkt.get("actual",     d.actual)
                 d.unity      = pkt.get("unity",      d.unity)
                 d.predicted  = pkt.get("predicted",  d.predicted)
-                d.sent       = pkt.get("sent",       d.sent)
+                new_sent     = pkt.get("sent",       d.sent)
+                if new_sent != d.sent:
+                    d.sent_fresh = [True] * 4
+                d.sent       = new_sent
                 d.tool_act   = pkt.get("tool_act",   d.tool_act)
                 d.tool_tgt   = pkt.get("tool_tgt",   d.tool_tgt)
                 d.unity_xyz  = pkt.get("unity_xyz",  d.unity_xyz)
@@ -682,15 +693,15 @@ class FlowCanvas(QWidget):
         super().resizeEvent(e)
         w, h = self.width(), self.height()
         for nid, n in self.nodes.items():
-            nx = int(n["rx"] * w - n["w"]/2)
-            ny = int(n["ry"] * h - n["h"]/2)
+            nx = max(4, min(int(n["rx"] * w - n["w"]/2), w - n["w"] - 4))
+            ny = max(4, min(int(n["ry"] * h - n["h"]/2), h - n["h"] - 4))
             n["widget"].setGeometry(nx, ny, n["w"], n["h"])
 
     def paintEvent(self, e):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        
+
         paths = []
         for p1_id, p2_id, color, key in self.edges:
             if p1_id not in self.nodes or p2_id not in self.nodes:
@@ -698,53 +709,74 @@ class FlowCanvas(QWidget):
             n1, n2 = self.nodes[p1_id], self.nodes[p2_id]
             x1, y1 = n1["rx"] * w, n1["ry"] * h
             x2, y2 = n2["rx"] * w, n2["ry"] * h
-            
             dx, dy = x2 - x1, y2 - y1
-            
+
             if abs(dx) > abs(dy):
                 start_x = x1 + n1["w"]/2 if dx > 0 else x1 - n1["w"]/2
                 end_x   = x2 - n2["w"]/2 if dx > 0 else x2 + n2["w"]/2
                 start_y, end_y = y1, y2
                 c1 = QPointF(start_x + dx/2.5, start_y)
-                c2 = QPointF(end_x - dx/2.5, end_y)
+                c2 = QPointF(end_x   - dx/2.5, end_y)
             else:
                 start_y = y1 + n1["h"]/2 if dy > 0 else y1 - n1["h"]/2
                 end_y   = y2 - n2["h"]/2 if dy > 0 else y2 + n2["h"]/2
                 start_x, end_x = x1, x2
                 c1 = QPointF(start_x, start_y + dy/2.5)
-                c2 = QPointF(end_x, end_y - dy/2.5)
+                c2 = QPointF(end_x,   end_y   - dy/2.5)
+
+            # Tangent at endpoint for arrowhead orientation
+            tx = end_x - c2.x(); ty = end_y - c2.y()
+            tlen = math.sqrt(tx*tx + ty*ty) or 1.0
+            tx /= tlen; ty /= tlen
 
             path = QPainterPath()
             path.moveTo(start_x, start_y)
             path.cubicTo(c1, c2, QPointF(end_x, end_y))
-            paths.append((path, color, key, end_x, end_y))
-            
-        # Draw base lines
-        for path, color, key, ex, ey in paths:
+            paths.append((path, color, key, end_x, end_y, tx, ty))
+
+        for path, color, key, ex, ey, tx, ty in paths:
+            freq   = self.frequencies.get(key, 0.0)
+            active = freq > 0.3
+
+            # ── Base line: thin solid when active, thin dashed when idle ─────
             c_base = QColor(color)
-            c_base.setAlpha(50)
-            pen_base = QPen(c_base)
-            pen_base.setWidth(2)
+            c_base.setAlpha(50 if active else 30)
+            pen_base = QPen(c_base, 1.5)
+            if not active:
+                pen_base.setStyle(Qt.PenStyle.CustomDashLine)
+                pen_base.setDashPattern([4.0, 6.0])
             painter.setPen(pen_base)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(path)
-            
-        # Draw animated flow
-        for path, color, key, ex, ey in paths:
-            freq = self.frequencies.get(key, 0.0)
-            if freq > 0:
-                speed = min(freq / 10.0, 5.0) + 1.0
-                c_anim = QColor(color)
-                pen_anim = QPen(c_anim)
-                pen_anim.setWidth(2)
-                pen_anim.setStyle(Qt.PenStyle.DashLine)
-                pen_anim.setDashPattern([4, 15])
-                pen_anim.setDashOffset(self.anim_offset * speed)
-                painter.setPen(pen_anim)
+
+            # ── Animated chevrons (‹ ‹ ‹) when data flows ────────────────────
+            if active:
+                speed = min(freq / 8.0, 5.0) + 1.5
+                c_flow = QColor(color)
+                c_flow.setAlpha(215)
+                pen_flow = QPen(c_flow, 2.2)
+                pen_flow.setStyle(Qt.PenStyle.CustomDashLine)
+                pen_flow.setDashPattern([3.5, 11.0])
+                pen_flow.setDashOffset(self.anim_offset * speed)
+                painter.setPen(pen_flow)
                 painter.drawPath(path)
-                
-            painter.setBrush(QColor(color))
+
+            # ── Filled arrowhead at endpoint ──────────────────────────────────
+            alen = 9.0; awid = 4.5
+            px = -ty; py = tx
+            tip    = QPointF(ex, ey)
+            base_l = QPointF(ex - tx*alen - px*awid, ey - ty*alen - py*awid)
+            base_r = QPointF(ex - tx*alen + px*awid, ey - ty*alen + py*awid)
+            arrow = QPainterPath()
+            arrow.moveTo(tip)
+            arrow.lineTo(base_l)
+            arrow.lineTo(base_r)
+            arrow.closeSubpath()
+            c_arr = QColor(color)
+            c_arr.setAlpha(200 if active else 70)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QPointF(ex, ey), 4, 4)
+            painter.setBrush(QBrush(c_arr))
+            painter.drawPath(arrow)
 
 
 class MonitorWindow(QMainWindow):
@@ -774,6 +806,7 @@ class MonitorWindow(QMainWindow):
         self.a_buf    = [deque(maxlen=MAX_PTS) for _ in range(4)]
         self.tgt_trail= deque(maxlen=TRAIL_LEN)
         self.act_trail= deque(maxlen=TRAIL_LEN)
+        self.snt_trail= deque(maxlen=60)
 
         # Log
         self._log_idx  = 0
@@ -919,10 +952,19 @@ class MonitorWindow(QMainWindow):
     def _build_data_flow_tab(self, parent):
         parent_lay = QVBoxLayout(parent)
         parent_lay.setContentsMargins(0,0,0,0)
-        
+
+        scroll = QScrollArea()
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(f"background:{BG}; border:none;")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
         self.flow_canvas = FlowCanvas()
         self.flow_canvas.setStyleSheet(f"background:{BG};")
-        parent_lay.addWidget(self.flow_canvas)
+        self.flow_canvas.setMinimumSize(1200, 750)
+        scroll.setWidget(self.flow_canvas)
+        parent_lay.addWidget(scroll)
         
         self._flow_cards = {}
         
@@ -1393,7 +1435,7 @@ class MonitorWindow(QMainWindow):
         t = QLabel("END EFFECTOR — 3D TRAJECTORY"); t.setFont(font(FONT_COND,13,True))
         t.setStyleSheet(f"color:{TEXT}; background:transparent; letter-spacing:3px;")
         hl.addWidget(t); hl.addStretch()
-        for clr,lbl in [(COL_UNITY,"Target (Unity FK)"),(COL_ACTUAL,"Actual (TCP)")]:
+        for clr,lbl in [(COL_UNITY,"Target (Unity FK)"),(COL_ACTUAL,"Actual (TCP)"),(COL_SENT,"Sent Cmd")]:
             dot = QLabel("●"); dot.setStyleSheet(f"color:{clr}; background:transparent; font-size:11px;")
             lw  = QLabel(lbl); lw.setFont(font(FONT_SANS,9))
             lw.setStyleSheet(f"color:{MUTED}; background:transparent;")
@@ -1407,11 +1449,13 @@ class MonitorWindow(QMainWindow):
         self._canvas_3d.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._style_3d()
 
-        self._line_tgt, = self._ax_3d.plot([],[],[], color=COL_UNITY, lw=1.2, alpha=0.75)
-        self._line_act, = self._ax_3d.plot([],[],[], color=COL_ACTUAL, lw=1.5, alpha=0.9)
-        self._pt_tgt,   = self._ax_3d.plot([],[],[], 'o', color=COL_UNITY,  ms=7)
-        self._pt_act,   = self._ax_3d.plot([],[],[], 'o', color=COL_ACTUAL, ms=7)
-        self._line_err, = self._ax_3d.plot([],[],[], color=RED, lw=1.5, alpha=0.7, ls="--")
+        _FA = [0.12, 0.30, 0.55, 0.90]
+        self._tgt_segs = [self._ax_3d.plot([],[],[], color=COL_UNITY,  lw=1.2, alpha=_FA[i])[0] for i in range(4)]
+        self._act_segs = [self._ax_3d.plot([],[],[], color=COL_ACTUAL, lw=1.5, alpha=_FA[i])[0] for i in range(4)]
+        self._pt_tgt,  = self._ax_3d.plot([],[],[], 'o', color=COL_UNITY,  ms=7, zorder=5)
+        self._pt_act,  = self._ax_3d.plot([],[],[], 'o', color=COL_ACTUAL, ms=7, zorder=5)
+        self._pt_sent, = self._ax_3d.plot([],[],[], '.', color=COL_SENT,   ms=4, alpha=0.7, zorder=4)
+        self._line_err,= self._ax_3d.plot([],[],[], color=RED, lw=1.5, alpha=0.7, ls="--")
 
         lay.addWidget(self._canvas_3d, stretch=1)
 
@@ -1425,13 +1469,15 @@ class MonitorWindow(QMainWindow):
             lp = QLabel(prefix); lp.setFont(font(FONT_SANS,8,True))
             lp.setStyleSheet(f"color:{clr}; background:transparent;"); cl.addWidget(lp)
             cl.addSpacing(8)
-            for ax in ["X","Y","Z"]:
-                la = QLabel(ax); la.setFont(font(FONT_MONO,9,True))
-                la.setStyleSheet(f"color:{MUTED}; background:transparent;"); cl.addWidget(la)
-                lv = QLabel("0.0"); lv.setFont(font(FONT_MONO,10))
+            for ax_lbl in ["X","Y","Z"]:
+                la = QLabel(ax_lbl); la.setFont(font(FONT_MONO,9,True))
+                la.setStyleSheet(f"color:{MUTED}; background:transparent;")
+                la.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+                cl.addWidget(la)
+                lv = QLabel("0.0"); lv.setFont(font(FONT_MONO,9))
                 lv.setStyleSheet(f"color:{clr}; background:transparent;")
-                lv.setFixedWidth(62); lv.setAlignment(Qt.AlignmentFlag.AlignRight)
-                cl.addWidget(lv); store.append(lv); cl.addSpacing(6)
+                lv.setFixedWidth(58); lv.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+                cl.addWidget(lv); store.append(lv); cl.addSpacing(5)
             cl.addSpacing(16)
 
         cl.addStretch()
@@ -1506,21 +1552,35 @@ class MonitorWindow(QMainWindow):
         # 3D
         tgt = d.unity_xyz[:3]; act = d.tool_act[:3]
         self.tgt_trail.append(tuple(tgt)); self.act_trail.append(tuple(act))
+        if any(d.sent_fresh):
+            self.snt_trail.append(tuple(d.tool_tgt[:3]))
         if len(self.tgt_trail) >= 2:
-            tx,ty,tz = zip(*self.tgt_trail)
-            ax_,ay_,az_ = zip(*self.act_trail)
-            self._line_tgt.set_data_3d(tx,ty,tz)
-            self._line_act.set_data_3d(ax_,ay_,az_)
-            self._pt_tgt.set_data_3d([tgt[0]],[tgt[1]],[tgt[2]])
-            self._pt_act.set_data_3d([act[0]],[act[1]],[act[2]])
+            trail_t = list(self.tgt_trail); trail_a = list(self.act_trail)
+            n = len(trail_t)
+            # Fading segments: oldest → most transparent (index 0)
+            for i in range(4):
+                s = int(i * n / 4); e = min(int((i+1) * n / 4) + 1, n)
+                if s < n and e > s:
+                    tt = list(zip(*trail_t[s:e])); ta = list(zip(*trail_a[s:e]))
+                    self._tgt_segs[i].set_data_3d(tt[0], tt[1], tt[2])  # type: ignore[attr-defined]
+                    self._act_segs[i].set_data_3d(ta[0], ta[1], ta[2])  # type: ignore[attr-defined]
+                else:
+                    self._tgt_segs[i].set_data_3d([],[],[])  # type: ignore[attr-defined]
+                    self._act_segs[i].set_data_3d([],[],[])  # type: ignore[attr-defined]
+            self._pt_tgt.set_data_3d([tgt[0]],[tgt[1]],[tgt[2]])  # type: ignore[attr-defined]
+            self._pt_act.set_data_3d([act[0]],[act[1]],[act[2]])  # type: ignore[attr-defined]
             self._line_err.set_data_3d([tgt[0],act[0]],[tgt[1],act[1]],[tgt[2],act[2]])
+            if len(self.snt_trail) > 0:
+                sx,sy,sz = zip(*self.snt_trail)
+                self._pt_sent.set_data_3d(list(sx),list(sy),list(sz))
             # auto-scale 3D
             def _lim(v):
                 mn,mx=min(v),max(v); pad=max(20,(mx-mn)*.2); return mn-pad, mx+pad
             ax3=self._ax_3d
-            ax3.set_xlim(*_lim(list(tx)+list(ax_)))
-            ax3.set_ylim(*_lim(list(ty)+list(ay_)))
-            ax3.set_zlim(*_lim(list(tz)+list(az_)))
+            all_x=[t[0] for t in trail_t]+[t[0] for t in trail_a]
+            all_y=[t[1] for t in trail_t]+[t[1] for t in trail_a]
+            all_z=[t[2] for t in trail_t]+[t[2] for t in trail_a]
+            ax3.set_xlim(*_lim(all_x)); ax3.set_ylim(*_lim(all_y)); ax3.set_zlim(*_lim(all_z))
             self._canvas_3d.draw_idle()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1550,7 +1610,9 @@ class MonitorWindow(QMainWindow):
         elif isinstance(self.ros_node, UdpBridgeNode):
             if self.ros_node.is_connected():
                 ip = self.ros_node._bridge_ip or "?"
-                self._lbl_ros.setText(f"UDP BRIDGE ● {ip}")
+                lat = d.bridge_latency_ms
+                lat_str = f" ● {lat:.1f}ms" if lat > 0 else ""
+                self._lbl_ros.setText(f"UDP BRIDGE ● {ip}{lat_str}")
                 self._lbl_ros.setStyleSheet(f"color:{GREEN}; background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.3); border-radius:4px; padding:3px 10px;")
             else:
                 self._lbl_ros.setText("UDP BRIDGE ● WAITING…")
@@ -1645,20 +1707,21 @@ class MonitorWindow(QMainWindow):
         if now - self._last_flow_t >= 1.0:
             dt = now - self._last_flow_t
             self._last_flow_t = now
-            # In UDP mode the bridge pre-computes freq; only recount in ROS mode
+            # In ROS mode recount from msg_counts; UDP mode pre-fills d.flow_hz
             if ROS_AVAILABLE and not isinstance(self.ros_node, UdpBridgeNode):
                 for k in d.msg_counts:
                     hz = d.msg_counts[k] / dt
                     d.flow_hz[k] = hz
                     d.msg_counts[k] = 0
-                    if k in self._flow_cards:
-                        lbl = self._flow_cards[k]["hz"]
-                        lbl.setText(f"{hz:.1f} Hz")
-                        lbl.setStyleSheet(f"color:{GREEN if hz > 0.5 else MUTED}; border:none;")
-            # Always push d.flow_hz → flow_canvas (works for both ROS and UDP)
+            # Always update flow_cards Hz labels and flow_canvas from d.flow_hz
             if hasattr(self, 'flow_canvas'):
                 for k, hz in d.flow_hz.items():
                     self.flow_canvas.set_freq(k, hz)
+            for k, hz in d.flow_hz.items():
+                if k in self._flow_cards:
+                    lbl = self._flow_cards[k]["hz"]
+                    lbl.setText(f"{hz:.1f} Hz")
+                    lbl.setStyleSheet(f"color:{GREEN if hz > 0.5 else MUTED}; border:none;")
 
         # Update real-time values in Data Flow cards
         if self._flow_cards:
