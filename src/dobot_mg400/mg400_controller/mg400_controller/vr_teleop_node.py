@@ -113,8 +113,16 @@ def select_control_mode():
     selected_logic = logic_modes.get(logic_in, "default")
     cfg.LOGIC_MODE = selected_logic
     
+    if selected_logic == "m8_raw":
+        hz_in = input("Enter Raw Hz [1-50] (default 25): ").strip()
+        if hz_in.isdigit() and int(hz_in) > 0:
+            cfg.RAW_HZ = int(hz_in)
+        else:
+            cfg.RAW_HZ = 25
+        print(f"[INFO] Raw Frequency set to {cfg.RAW_HZ} Hz")
+    
     logic_names = {"default": "Default (Production)", "m11": "M11_Stable",
-                   "m14": "M14_Smooth", "m15": "M15_Sharp", "m8_raw": "M8_RawData",
+                   "m14": "M14_Smooth", "m15": "M15_Sharp", "m8_raw": f"M8_RawData ({cfg.RAW_HZ}Hz)",
                    "m16": "M16_AdaptCP", "m17": "M17_CleanFF"}
     print(f"[INFO] Logic Mode = {logic_names.get(selected_logic, selected_logic)}")
     
