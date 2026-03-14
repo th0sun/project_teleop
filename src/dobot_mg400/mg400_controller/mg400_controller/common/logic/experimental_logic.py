@@ -502,6 +502,254 @@ class _M15Logic:
 
 
 # ═══════════════════════════════════════════════════════════════
+# M16 AdaptCP — LPF + Feedforward + Step-Limit + Adaptive CP
+# ═══════════════════════════════════════════════════════════════
+
+class _M16Logic:
+    """
+    M16_AdaptCP: Physics-aware teleoperation mode.
+
+    Signal pipeline (per 50 ms tick):
+      1. LPF(α=0.25) on raw Unity target        → smoothed noise
+      2. Feedforward (70 ms lead) on smoothed   → predicted target
+      3. Queue gate: skip if |q_robot – last_cmd| > 5° (robot still chasing)
+      4. Fixed 50 ms send interval
+      5. Step-limiter: advance ≤ MAX_STEP_RAD toward predicted
+      6. Adaptive CP based on per-command step size (degrees):
+           step > 3°  → CP = 25
+           step 1–3°  → CP = 12
+           step < 1°  → CP = 3
+
+    Physics note (MG400 Mock, SpeedFactor=100, SpeedL=50):
+      r_blend = (CP/100) × speed_l² / (2×acc_l) = (CP/100) × 375 mm
+      With CP=3 → r_blend ≈ 11 mm;  step=1° ≈ 5 mm → fires immediately.
+      On the real robot (SpeedL=10) r_blend scales to 1/25 of the mock
+      values, making CP=25 physically meaningful (r_blend ≈ 15 mm).
+    """
+    CMD_INTERVAL  = 0.040              # 25 Hz
+    LPF_ALPHA     = 0.20               # stronger smoothing weight
+    FF_LEAD_SEC   = 0.080              # 80 ms feedforward to lead the robot
+    MAX_FF_LEAD   = np.radians(10.0)   # cap feedforward
+    MAX_STEP_RAD  = np.radians(1.5)    # max 1.5° per command
+    GATE_RAD      = np.radians(4.0)    # 4° queue-depth gate
+
+    CP_TABLE = [                       # (min_step_rad, cp_value)
+        (np.radians(2.0), 50),         # step > 2°
+        (np.radians(0.5), 25),         # step 0.5–2.0°
+        (np.radians(0.0), 10),         # step < 0.5° (keep CP decent to avoid full stops)
+    ]
+
+    def __init__(self):
+        self._lpf: Optional[np.ndarray]      = None
+        self._last_cmd: Optional[np.ndarray] = None
+        self._last_send_t: float             = 0.0
+        # Feedforward state
+        self._prev_tgt: Optional[np.ndarray] = None
+        self._prev_tgt_t: float              = 0.0
+        self._ema_vel: Optional[np.ndarray]  = None
+        self.last_cp: int = 3               # exposed for ExperimentalStrategy
+
+    def reset(self):
+        self._lpf = None
+        self._last_cmd = None
+        self._last_send_t = 0.0
+        self._prev_tgt = None
+        self._prev_tgt_t = 0.0
+        self._ema_vel = None
+        self.last_cp = 3
+
+    # ── internal helpers ──────────────────────────────────────────
+
+    def _apply_lpf(self, target: np.ndarray) -> np.ndarray:
+        if self._lpf is None:
+            self._lpf = target[:4].copy()
+        else:
+            self._lpf = (self.LPF_ALPHA * target[:4]
+                         + (1.0 - self.LPF_ALPHA) * self._lpf)
+        return self._lpf.copy()
+
+    def _apply_ff(self, smoothed: np.ndarray, now: float) -> np.ndarray:
+        dt = now - self._prev_tgt_t
+        if self._prev_tgt is None or dt < 0.001:
+            self._prev_tgt  = smoothed.copy()
+            self._prev_tgt_t = now
+            if self._ema_vel is None:
+                self._ema_vel = np.zeros(4)
+            return smoothed.copy()
+
+        raw_vel = (smoothed - self._prev_tgt) / dt
+        if self._ema_vel is None:
+            self._ema_vel = np.zeros(4)
+        self._ema_vel = 0.3 * raw_vel + 0.7 * self._ema_vel
+        self._prev_tgt  = smoothed.copy()
+        self._prev_tgt_t = now
+
+        lead = self._ema_vel * self.FF_LEAD_SEC
+        norm = float(np.max(np.abs(lead)))
+        if norm > self.MAX_FF_LEAD:
+            lead = lead * (self.MAX_FF_LEAD / norm)
+        return smoothed + lead
+
+    def _adaptive_cp(self, step_rad: float) -> int:
+        for thresh, cp in self.CP_TABLE:
+            if step_rad >= thresh:
+                return cp
+        return self.CP_TABLE[-1][1]
+
+    # ── main process ──────────────────────────────────────────────
+
+    def process(self, q_target: np.ndarray, q_current: np.ndarray,
+                now: float) -> Tuple[bool, Optional[np.ndarray], str]:
+
+        # 1. LPF
+        smoothed = self._apply_lpf(q_target)
+
+        # 2. Feedforward prediction
+        predicted = self._apply_ff(smoothed, now)
+
+        # Bootstrap on first call
+        if self._last_cmd is None:
+            self._last_cmd    = q_current[:4].copy()
+            self._last_send_t = now - self.CMD_INTERVAL  # fire immediately
+
+        # 3. Queue gate: robot is still far behind last command → wait
+        #    (bounds queue depth to ≤ GATE_RAD / MAX_STEP ≈ 2 commands)
+        dist_to_last = float(np.max(np.abs(q_current[:4] - self._last_cmd)))
+        if dist_to_last > self.GATE_RAD:
+            return False, None, "Gate"
+
+        # 4. Fixed interval
+        if (now - self._last_send_t) < self.CMD_INTERVAL:
+            return False, None, "Wait"
+
+        # 5. Step-limiting: advance from LAST COMMAND (smooth) toward predicted target
+        #    Using q_current as the base introduces feedback noise/jitter.
+        delta      = predicted - self._last_cmd
+        delta_norm = float(np.max(np.abs(delta)))
+        if delta_norm > self.MAX_STEP_RAD:
+            delta = delta * (self.MAX_STEP_RAD / delta_norm)
+        cmd        = self._last_cmd + delta
+
+        # Spatial noise floor
+        actual_step = float(np.max(np.abs(delta)))
+        if actual_step < _SPATIAL_THRESHOLD:
+            return False, None, "SpatialSkip"
+
+        # 6. Adaptive CP
+        self.last_cp   = self._adaptive_cp(actual_step)
+        self._last_cmd = cmd.copy()
+        self._last_send_t = now
+
+        return True, cmd, (f"M16/CP={self.last_cp}"
+                           f"/step={np.degrees(actual_step):.2f}deg")
+
+
+# ═══════════════════════════════════════════════════════════════
+# M17 CleanFF — Fixed 25 Hz + LPF + FF=40ms + CP=100 (no dropout spikes)
+# ═══════════════════════════════════════════════════════════════
+
+_MODE_ENABLE  = 5
+_MODE_RUNNING = 7
+
+
+class _CleanFFLogic:
+    """
+    M17_CleanFF: Default + LPF + Feedforward.  Same CP=100 as Default.
+
+    Key insight: CP=100 with SpeedL=10 gives r_blend ≈ 11 mm > step ≈ 6 mm,
+    so commands chain IMMEDIATELY.  This is what keeps Default's queue at
+    depth 1-2.  Changing CP lower breaks that and grows the queue to 3-5x,
+    collapsing effective update rate from 25 Hz to 8-10 Hz.
+
+    Improvements over Default (Mode 0):
+      - LPF(α=0.20) on raw VR target → VR tracker noise suppression
+      - Feedforward (100 ms EMA velocity) → compensates AccJ=100 execution lag
+        (Default has zero feedforward — the phase lag is entirely uncompensated)
+      - target_drift check (vs last_cmd, not vs q_current) → correct spatial guard
+      - Fixed 25 Hz rate floor only (no dynamic proximity trigger)
+    """
+    CMD_INTERVAL = 0.040             # 25 Hz
+    LPF_ALPHA    = 0.20
+    FF_LEAD_SEC  = 0.040             # 40 ms = one command interval (exact 1-step lag compensation)
+    MAX_FF_LEAD  = np.radians(5.0)   # 5° cap (prevents peak overshoot)
+    SPATIAL_TH   = np.radians(0.10)  # 0.1° noise floor (vs target drift)
+    GATE_RAD     = np.radians(8.0)   # 8° safety queue gate (drops commands if queue builds up)
+    last_cp      = 100               # KEEP CP=100: r_blend > step → immediate chain
+
+    def __init__(self):
+        self._lpf: Optional[np.ndarray]      = None
+        self._prev_tgt: Optional[np.ndarray] = None
+        self._prev_tgt_t: float              = 0.0
+        self._ema_vel: Optional[np.ndarray]  = None
+        self._last_cmd: Optional[np.ndarray] = None
+        self._last_send_t: float             = 0.0
+
+    def reset(self):
+        self._lpf         = None
+        self._prev_tgt    = None
+        self._prev_tgt_t  = 0.0
+        self._ema_vel     = None
+        self._last_cmd    = None
+        self._last_send_t = 0.0
+
+    def process(self, q_target: np.ndarray, q_current: np.ndarray,
+                now: float) -> Tuple[bool, Optional[np.ndarray], str]:
+
+        # 1. LPF on raw target
+        if self._lpf is None:
+            self._lpf = q_target[:4].copy()
+        else:
+            self._lpf = (self.LPF_ALPHA * q_target[:4]
+                         + (1.0 - self.LPF_ALPHA) * self._lpf)
+        smoothed = self._lpf.copy()
+
+        # 2. Feedforward velocity EMA
+        dt = now - self._prev_tgt_t
+        if self._prev_tgt is None or dt < 0.001:
+            self._prev_tgt   = smoothed.copy()
+            self._prev_tgt_t = now
+            if self._ema_vel is None:
+                self._ema_vel = np.zeros(4)
+        else:
+            raw_vel       = (smoothed - self._prev_tgt) / dt
+            self._ema_vel = 0.3 * raw_vel + 0.7 * self._ema_vel
+            self._prev_tgt   = smoothed.copy()
+            self._prev_tgt_t = now
+        ff   = self._ema_vel * self.FF_LEAD_SEC
+        norm = float(np.max(np.abs(ff)))
+        if norm > self.MAX_FF_LEAD:
+            ff = ff * (self.MAX_FF_LEAD / norm)
+        predicted = smoothed + ff
+
+        # Bootstrap
+        if self._last_cmd is None:
+            self._last_cmd    = q_current[:4].copy()
+            self._last_send_t = now - self.CMD_INTERVAL
+
+        # 3. SAFETY GATE: prevent queue buildup. If the robot is too far behind
+        #    the last command we sent, it means the queue is backing up or the
+        #    robot is stuck. Drop commands to let it catch up.
+        dist_to_last = float(np.max(np.abs(q_current[:4] - self._last_cmd)))
+        if dist_to_last > self.GATE_RAD:
+            return False, None, "QueueGate"
+
+        # 4. Fixed 25 Hz rate floor
+        if (now - self._last_send_t) < self.CMD_INTERVAL:
+            return False, None, "Wait"
+
+        # 5. Spatial noise floor: how much has the predicted target moved
+        #    since the last command?  (NOT how far robot is from target —
+        #    that would be ~0 when tracking is good, causing false skips)
+        target_drift = float(np.max(np.abs(predicted - self._last_cmd)))
+        if target_drift < self.SPATIAL_TH:
+            return False, None, "SpatialSkip"
+
+        self._last_cmd    = predicted.copy()
+        self._last_send_t = now
+        return True, predicted, "CleanFF"
+
+
+# ═══════════════════════════════════════════════════════════════
 # Public API — ExperimentalStrategy (used by vr_teleop_node.py)
 # ═══════════════════════════════════════════════════════════════
 
@@ -522,10 +770,12 @@ class ExperimentalStrategy:
     """
 
     MODE_MAP = {
-        "m8_raw": ("M8_RawData", _RawLogic),
-        "m11": ("M11_Stable", _M11Logic),
-        "m14": ("M14_Smooth", _M14Logic),
-        "m15": ("M15_Sharp", _M15Logic),
+        "m8_raw": ("M8_RawData",   _RawLogic),
+        "m11":    ("M11_Stable",   _M11Logic),
+        "m14":    ("M14_Smooth",   _M14Logic),
+        "m15":    ("M15_Sharp",    _M15Logic),
+        "m16":    ("M16_AdaptCP",  _M16Logic),
+        "m17":    ("M17_CleanFF",   _CleanFFLogic),
     }
 
     def __init__(self, mode_key: str, control_mode: str, logger):
@@ -556,7 +806,8 @@ class ExperimentalStrategy:
         return f"JointMovJ({args})"  # default: jointmovj
 
     def process(self, q_target_rad: np.ndarray, q_current_rad: np.ndarray,
-                now: float) -> Tuple[bool, Optional[str], Optional[np.ndarray], str]:
+                now: float, robot_mode: int = _MODE_ENABLE
+                ) -> Tuple[bool, Optional[str], Optional[np.ndarray], str]:
         """
         Run one cycle of the experimental logic.
 
@@ -565,19 +816,25 @@ class ExperimentalStrategy:
                           (NOT Kalman-predicted — bypasses TargetPredictor)
             q_current_rad: Current robot joints in radians (4,)
             now: Current time (seconds)
+            robot_mode: Current robot mode integer (5=ENABLE, 7=RUNNING).
+                        Required by M17_ReactiveFF; ignored by other modes.
 
         Returns:
             (should_send, cmd_string, q_safe_rad, reason)
             cmd_string is a ready-to-send TCP command string
             q_safe_rad is the actual joint target (may differ due to clamping)
         """
+        if hasattr(self._logic, 'set_robot_mode'):
+            self._logic.set_robot_mode(robot_mode)
         should_send, cmd_rad, reason = self._logic.process(q_target_rad, q_current_rad, now)
 
         if not should_send or cmd_rad is None:
             return False, None, None, reason
 
         # Format command DIRECTLY (bypass MotionPlanner entirely)
-        cmd_str = self._format_cmd(cmd_rad, self._control_mode)
+        # M16 exposes last_cp for adaptive per-command CP values
+        cp = getattr(self._logic, 'last_cp', 100)
+        cmd_str = self._format_cmd(cmd_rad, self._control_mode, cp=cp)
 
         # Hz tracking
         self._cmd_times.append(now)

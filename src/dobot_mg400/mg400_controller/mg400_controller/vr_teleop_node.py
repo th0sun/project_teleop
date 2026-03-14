@@ -94,6 +94,8 @@ def select_control_mode():
     print("2 = M14_Smooth  (ลื่นไหว ดีที่สุดสำหรับ circle/sine)")
     print("3 = M15_Sharp   (คมกริบ ดีที่สุดสำหรับ square/zigzag)")
     print("4 = M8_RawData  (ส่งข้อมูลดิบตามความถี่ ปรับ Hz ผ่าน Terminal ได้)")
+    print("5 = M16_AdaptCP  (LPF+FF+StepLimit+AdaptiveCP)")
+    print("6 = M17_CleanFF  (⭐ แนะนำ — 25Hz+LPF+FF+CP100 เส้นราบไม่สั่น ไม่มี lag spike)", flush=True)
     print("-"*50)
     
     logic_in = input("Logic> ").strip()
@@ -103,14 +105,17 @@ def select_control_mode():
         "1": "m11",
         "2": "m14",
         "3": "m15",
-        "4": "m8_raw"
+        "4": "m8_raw",
+        "5": "m16",
+        "6": "m17",
     }
     
     selected_logic = logic_modes.get(logic_in, "default")
     cfg.LOGIC_MODE = selected_logic
     
     logic_names = {"default": "Default (Production)", "m11": "M11_Stable",
-                   "m14": "M14_Smooth", "m15": "M15_Sharp", "m8_raw": "M8_RawData"}
+                   "m14": "M14_Smooth", "m15": "M15_Sharp", "m8_raw": "M8_RawData",
+                   "m16": "M16_AdaptCP", "m17": "M17_CleanFF"}
     print(f"[INFO] Logic Mode = {logic_names.get(selected_logic, selected_logic)}")
     
     return selected
@@ -643,7 +648,7 @@ class TeleopNode(Node):
             # Uses RAW validated target — bypasses Kalman predictor entirely
             if self._experimental_strategy is not None:
                 should_send, cmd_str, q_safe, exp_reason = self._experimental_strategy.process(
-                    self.latest_raw_target, q_current, now
+                    self.latest_raw_target, q_current, now, robot_mode=current_mode
                 )
                 if should_send and cmd_str:
                     t3_cmd_send = time.time()
