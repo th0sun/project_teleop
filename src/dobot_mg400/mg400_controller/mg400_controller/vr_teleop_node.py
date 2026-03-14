@@ -302,8 +302,9 @@ class TeleopNode(Node):
         self.get_logger().info("✅ Teleop Node fully initialized and listening.")
         self.interactive.start()
         
-        # 6. Start Control Loop (50Hz) - Sends latest target when robot is close enough
-        self.create_timer(0.02, self._control_loop)
+        # 6. Start Control Loop in a Dedicated High-Precision Thread (Isolates from ROS jitter/CPU load)
+        self.control_loop_thread = threading.Thread(target=self._high_precision_control_loop, daemon=True)
+        self.control_loop_thread.start()
         
         # 7. Start Safety Monitor (1Hz)
         self.create_timer(1.0, self.check_safety_status)
@@ -511,26 +512,45 @@ class TeleopNode(Node):
             else:
                 self.get_logger().warn(f"⚠️ Cannot set light port {port}; Robot disconnected.")
     
-    def _control_loop(self):
+    def _high_precision_control_loop(self):
         """
-        Main Control Loop (50Hz)
+        Runs the control loop in a dedicated thread to avoid ROS executor jitter.
+        Ensures strict 50Hz (20ms) timing regardless of computer load.
+        """
+        target_hz = 50.0
+        period = 1.0 / target_hz
+        next_time = time.perf_counter() + period
+        
+        while not self.stop_event.is_set():
+            try:
+                self._control_loop_step()
+            except Exception as e:
+                self.get_logger().error(f"Error in control loop: {e}")
+                
+            # Precision Sleep
+            now = time.perf_counter()
+            sleep_time = next_time - now
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            
+            next_time += period
+            # Prevent death spiral if severely lagging
+            if time.perf_counter() > next_time + period:
+                next_time = time.perf_counter() + period
+
+    def _control_loop_step(self):
+        """
+        Main Control Logic (50Hz) - Called by high-precision thread
         
         STRATEGY: "Proximity + Velocity-Based Stuck Detection"
         - Send when robot is CLOSE to last target (smooth real-time)
         - Send when robot is STUCK AND target changed significantly (safety)
         - NO TIMEOUT - Pure event-driven control
-        
-        LOGIC:
-        1. Update velocity tracking
-        2. Check Proximity: Is robot close to last_sent_target?
-        3. Check Stuck: Is robot not moving + target changed significantly?
-        4. Send if either condition is true
         """
         if self.connection.connected and self.latest_target is not None:
             q_current = self.feedback.get_current_position()
-            # ✅ ใช้ ROS clock เท่านั้น
-            ros_now = self.get_clock().now()
-            now = ros_now.nanoseconds * 1e-9
+            # Use perf_counter for ultra-precise delta-time calculation in logic
+            now = time.perf_counter()
             
             # === UPDATE VELOCITY ===
             # Delegate velocity tracking to controller
