@@ -243,14 +243,8 @@ class TrajectoryRecorder:
         self._play_thread.start()
 
     def _play_worker(self):
-        """Batch sequencer: queues ALL JointMovJ + wait(dt) into the robot's
-        internal command queue at once, then fires graph callbacks at
-        wall-clock time in a polling loop.
-
-        Phase 1 — BATCH: push every waypoint as
-            JointMovJ(j1,j2,j3,j4, SpeedJ=100, AccJ=100, CP=100)
-            wait(dt_ms)   ← dashboard queue cmd, delays next motion
-        Phase 2 — GRAPH: fire waypoint_callback at exact wall-clock times
+        """Sequencer: dynamically queues commands ahead of time while firing
+        graph callbacks at wall-clock time in a polling loop.
         """
         frames = self.loaded_frames
         n = len(frames)
@@ -261,50 +255,25 @@ class TrajectoryRecorder:
         total_dur = frames[-1]["timeStamp"] - t0_traj
 
         self._log.info(f"▶️  Preview start — {n} waypoints, {total_dur:.1f}s")
+        LOOKAHEAD = 0.25
+        CP_VAL    = 20
+        idx = 0
+        t_start = time.time()
+        while idx < len(frames) and not self._stop_flag.is_set():
+            elapsed = time.time() - t_start
+            
+            # Pre-send any waypoints that fall within the current lookahead window
+            while idx < len(frames) and (frames[idx]['timeStamp'] - t0_traj) <= elapsed + LOOKAHEAD:
+                fr = frames[idx]
+                cmd = f"JointMovJ({fr['j1']},{fr['j2']},{fr['j3']},{fr['j4']},SpeedJ=100,CP={CP_VAL})"
+                self._send(cmd)
+                idx += 1
+                
+            time.sleep(0.005) # Prevent busy loop spinning
 
-        # ── Phase 1: Batch ALL commands into robot queue ─────────────────
-        self._log.info(f"📤 Batching {n} JointMovJ + wait() into robot queue...")
-        for i in range(n):
-            if self._stop_flag.is_set():
-                break
-
-            fr = frames[i]
-            j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
-
-            # JointMovJ at MAX speed with CP=100 for smooth blending
-            cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
-                   f"SpeedJ=100,AccJ=100,CP=100)")
-            self._send(cmd)
-
-            # Insert wait(dt_ms) between waypoints (not after last)
-            if i < n - 1 and self._send_dash is not None:
-                dt_ms = int((frames[i + 1]["timeStamp"] - fr["timeStamp"]) * 1000)
-                dt_ms = max(1, dt_ms)
-                self._send_dash(f"wait({dt_ms})")
-
-        batch_time = time.perf_counter()
-        self._log.info(f"📤 Queue sent ({n} cmds) in "
-                       f"{(batch_time - time.perf_counter() + 0.001)*1000:.0f}ms, "
-                       f"starting graph playback...")
-
-        # ── Phase 2: Fire graph callbacks at wall-clock time ─────────────
-        t_wall_start = time.perf_counter()
-        graph_idx = 0
-
-        while graph_idx < n and not self._stop_flag.is_set():
-            elapsed = time.perf_counter() - t_wall_start
-
-            while graph_idx < n and (frames[graph_idx]["timeStamp"] - t0_traj) <= elapsed:
-                fr = frames[graph_idx]
-                j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
-                if self._waypoint_cb is not None:
-                    try:
-                        self._waypoint_cb(np.radians(j))
-                    except Exception:
-                        pass
-                graph_idx += 1
-
-            time.sleep(0.008)  # ~125 Hz poll for smooth graph updates
+        # Wait for the robot to finish the remaining queued motion
+        if not self._stop_flag.is_set():
+            time.sleep(LOOKAHEAD + 0.1)
 
         self.is_playing = False
         if self._stop_flag.is_set():
