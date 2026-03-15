@@ -357,6 +357,8 @@ class RobotData:
         self._sim_t       = 0.0
         # T&R playback mode flag (set by ROS callback or UDP bridge)
         self.tr_active    = False
+        # Full trajectory preview for background dots (race.py style)
+        self.traj_preview = None  # {"t": [...], "q": [[j1,j2,j3,j4], ...]}
 
         # Message counts for Data Flow tab
         self.msg_counts = {
@@ -419,6 +421,14 @@ class RosNode(Node if ROS_AVAILABLE else object):
         sub(DO_STATUS_TOPIC, Int64, self._cb_do)
         sub(ROBOT_MODE_TOPIC,   Int32, self._cb_mode)
         sub(ERROR_STATUS_TOPIC, Int32, self._cb_err)
+        sub("/teleop/traj_preview", String, self._cb_traj_preview)
+
+    def _cb_traj_preview(self, msg):
+        import json as _json
+        try:
+            self.data.traj_preview = _json.loads(msg.data)
+        except Exception:
+            pass
 
     def _cb_actual(self, msg):
         self.data.msg_counts["ACTUAL FEEDBACK"] += 1
@@ -531,6 +541,9 @@ class UdpBridgeNode:
                         d.bridge_latency_ms = lat_ms
 
                 d.tr_active  = pkt.get("tr_active",  False)
+                tp = pkt.get("traj_preview")
+                if tp is not None:
+                    d.traj_preview = tp
                 d.actual     = pkt.get("actual",     d.actual)
                 d.unity      = pkt.get("unity",      d.unity)
                 d.predicted  = pkt.get("predicted",  d.predicted)
@@ -1571,9 +1584,10 @@ class MonitorWindow(QMainWindow):
             lu, = ax.plot([], [], color=COL_UNITY,  lw=2.0, ls="-", alpha=0.85, zorder=2)
             ls, = ax.plot([], [], color=COL_SENT,   lw=0, marker='o', ms=2.5, alpha=0.85, zorder=1)
             la, = ax.plot([], [], color=COL_ACTUAL, lw=2.5, zorder=3)
+            lbg, = ax.plot([], [], color='#1a1a1a', lw=0, marker='.', ms=2.0, alpha=0.35, zorder=0)
             
             self._axes_j.append(ax)
-            self._lines_j.append((lu,ls,la))
+            self._lines_j.append((lu,ls,la,lbg))
             self._canvas_list.append(canvas)
             
             cl.addWidget(canvas, stretch=1)
@@ -1670,35 +1684,22 @@ class MonitorWindow(QMainWindow):
     #  GRAPH STYLE  (switch between normal VR-teleop and T&R playback palettes)
     # ──────────────────────────────────────────────────────────────────────────
     def _apply_graph_style(self, tr_mode: bool):
-        """Switch line colors, axes style, and legend labels for all 4 joint graphs."""
+        """Switch line colors and legend labels for all 4 joint graphs."""
         if tr_mode:
             u_col, u_lbl = COL_TR_TARGET,   "Target"
             s_col, s_lbl = COL_TR_WAYPOINT, "Waypoints"
             a_col, a_lbl = COL_TR_ACTUAL,   "Actual"
-            ax_bg        = "#ffffff"   # white — race.py style
-            grid_col     = "#cccccc"
-            u_lw, u_alpha = 1.8, 0.7
-            a_lw          = 1.8
-            s_ms          = 3.0
         else:
             u_col, u_lbl = COL_UNITY,  "Unity"
             s_col, s_lbl = COL_SENT,   "Sent"
             a_col, a_lbl = COL_ACTUAL, "Actual"
-            ax_bg        = PANEL
-            grid_col     = "#e2e8f0"
-            u_lw, u_alpha = 2.0, 0.85
-            a_lw          = 2.5
-            s_ms          = 2.5
 
         for i in range(4):
-            lu, ls, la = self._lines_j[i]
-            lu.set_color(u_col);  lu.set_linewidth(u_lw);  lu.set_alpha(u_alpha)
-            ls.set_color(s_col);  ls.set_markersize(s_ms)
-            la.set_color(a_col);  la.set_linewidth(a_lw)
-            ax = self._axes_j[i]
-            ax.set_facecolor(ax_bg)
-            ax.grid(True, axis='y', color=grid_col, lw=0.8, alpha=0.6)
-            ax.grid(tr_mode, axis='x', color=grid_col, lw=0.8, alpha=0.6)
+            lu, ls, la, lbg = self._lines_j[i]
+            lu.set_color(u_col)
+            ls.set_color(s_col)
+            la.set_color(a_col)
+            lbg.set_visible(tr_mode)
             for (dot, txt), (clr, lbl) in zip(
                 self._legend_items_j[i],
                 [(u_col, u_lbl), (s_col, s_lbl), (a_col, a_lbl)]
@@ -1722,6 +1723,8 @@ class MonitorWindow(QMainWindow):
         # Detect mode transition → clear buffers + update graph style
         if d.tr_active != self._was_tr:
             self._was_tr = d.tr_active
+            if not d.tr_active:
+                d.traj_preview = None  # clear background dots when T&R ends
             self.t_buf.clear()
             self.g_start = now
             rel = 0.0
@@ -1750,19 +1753,34 @@ class MonitorWindow(QMainWindow):
 
         t_arr = np.array(self.t_buf)
         import matplotlib.ticker as ticker
+
+        # Background dots: pre-compute once from traj_preview
+        tp = d.traj_preview if d.tr_active else None
+        tp_t = np.array(tp["t"]) if tp else None
+        tp_q = np.array(tp["q"]) if tp else None  # shape (N, 4)
+        traj_dur = float(tp_t[-1]) if tp_t is not None and len(tp_t) > 0 else 0.0
+
         for i in range(4):
-            lu,ls,la = self._lines_j[i]
+            lu,ls,la,lbg = self._lines_j[i]
             ax = self._axes_j[i]
             u=np.array(self.u_buf[i])
             s=np.array(self.s_buf[i]); a=np.array(self.a_buf[i])
             lu.set_data(t_arr,u)
             ls.set_data(t_arr,s); la.set_data(t_arr,a)
+            # Background static dots (all waypoints from trajectory, like race.py)
+            if tp_t is not None and tp_q is not None:
+                lbg.set_data(tp_t, tp_q[:, i])
+            else:
+                lbg.set_data([], [])
             if d.tr_active:
-                ax.set_xlim(0, max(GRAPH_WIN, rel + 0.5))  # growing from t=0 like race.py
+                x_right = max(GRAPH_WIN, traj_dur + 0.5, rel + 0.5)
+                ax.set_xlim(0, x_right)  # fixed to full trajectory span, growing from t=0
             else:
                 ax.set_xlim(max(0, rel - GRAPH_WIN), max(GRAPH_WIN, rel + 0.5))
             if len(a)>1:
                 vals = np.concatenate([u,a])
+                if tp_q is not None:
+                    vals = np.concatenate([vals, tp_q[:, i]])
                 mn,mx = np.nanmin(vals), np.nanmax(vals)
                 if not (np.isnan(mn) or np.isnan(mx)):
                     pad = max(2.0,(mx-mn)*0.15)

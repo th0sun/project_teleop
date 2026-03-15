@@ -74,6 +74,8 @@ class MonitorBridge(Node):
         self.actual     = [0.0] * 4
         self.unity      = [0.0] * 4
         self._last_playback_t = 0.0  # perf_counter of last /teleop/playback_unity msg
+        self.traj_preview         = None   # full trajectory for background dots (sent once)
+        self._traj_preview_pending = False  # True until sent to Mac
         self.sent       = [0.0] * 4
         self.tool_act   = [0.0] * 6
         self.tool_tgt   = [0.0] * 6
@@ -125,6 +127,7 @@ class MonitorBridge(Node):
         sub(UNITY_TOPIC,      JointState,        self._cb_unity_vr, qos_be)
         sub(SENT_TOPIC,       JointState,        self._cb_sent)
         sub("/teleop/playback_unity", JointState, self._cb_unity_playback)
+        sub("/teleop/traj_preview",   String,    self._cb_traj_preview)
         sub(TOOL_ACT_TOPIC,   Float64MultiArray, lambda m: self._f64(m, 'tool_act'))
         sub(TOOL_TGT_TOPIC,   Float64MultiArray, lambda m: self._f64(m, 'tool_tgt'))
         sub(UNITY_XYZ_TOPIC,  Float64MultiArray, lambda m: self._f64(m, 'unity_xyz'))
@@ -157,6 +160,15 @@ class MonitorBridge(Node):
         self._counts["UNITY TARGET"] += 1
         if len(msg.position) >= 4:
             self.unity = list(np.degrees(msg.position[:4]))
+
+    def _cb_traj_preview(self, msg):
+        """Full trajectory waypoints published once at Preview start."""
+        import json as _json
+        try:
+            self.traj_preview = _json.loads(msg.data)
+            self._traj_preview_pending = True
+        except Exception:
+            pass
 
     def _cb_unity_playback(self, msg):
         """T&R playback waypoint — always accepted; stamps _last_playback_t."""
@@ -216,6 +228,7 @@ class MonitorBridge(Node):
                 pkt = json.dumps({
                     "ts":         time.time(),
                     "tr_active":  self._tr_active,
+                    "traj_preview": self.traj_preview if self._traj_preview_pending else None,
                     "actual":     self.actual,
                     "unity":      self.unity,
                     "predicted":  self.unity,
@@ -232,6 +245,8 @@ class MonitorBridge(Node):
                 }, separators=(',', ':')).encode()
                 dest = self._target_ip if self._target_ip else BCAST_IP
                 self._tx.sendto(pkt, (dest, TELEM_PORT))
+                if self._traj_preview_pending:
+                    self._traj_preview_pending = False
             except Exception as e:
                 self.get_logger().warn(f"Telem TX error: {e}", throttle_duration_sec=5)
 
