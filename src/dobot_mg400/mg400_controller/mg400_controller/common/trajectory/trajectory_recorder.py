@@ -69,12 +69,14 @@ class TrajectoryRecorder:
     def __init__(self, command_send_fn: Callable, logger,
                  dashboard_send_fn: Optional[Callable] = None,
                  get_position_fn: Optional[Callable] = None,
-                 waypoint_callback: Optional[Callable] = None):
+                 waypoint_callback: Optional[Callable] = None,
+                 target_callback: Optional[Callable] = None):
         self._send = command_send_fn
         self._send_dash = dashboard_send_fn
         self._log  = logger
         self._get_pos = get_position_fn
         self._waypoint_cb = waypoint_callback
+        self._target_cb = target_callback
 
         # ── State ────────────────────────────────────────────────────────────
         self.is_recording  = False
@@ -259,31 +261,43 @@ class TrajectoryRecorder:
         self._log.info(f"▶️  Preview start — {n} waypoints, {total_dur:.1f}s")
         LOOKAHEAD = 0.25
         CP_VAL    = 20
+        
+        # Prepare for smooth real-time interpolation for the monitor graphs
+        target_t = np.array([f["timeStamp"] - t0_traj for f in frames])
+        target_q = np.array([[f['j1'], f['j2'], f['j3'], f['j4']] for f in frames])
+
         idx = 0
         t_start = time.time()
-        while idx < len(frames) and not self._stop_flag.is_set():
+        while not self._stop_flag.is_set():
             elapsed = time.time() - t_start
             
-            # Pre-send any waypoints that fall within the current lookahead window
-            while idx < len(frames) and (frames[idx]['timeStamp'] - t0_traj) <= elapsed + LOOKAHEAD:
+            # 1. Pre-send any waypoints that fall within the current lookahead window
+            while idx < len(frames) and target_t[idx] <= elapsed + LOOKAHEAD:
                 fr = frames[idx]
                 cmd = f"JointMovJ({fr['j1']},{fr['j2']},{fr['j3']},{fr['j4']},SpeedJ=100,CP={CP_VAL})"
                 self._send(cmd)
                 
+                # Publish the discrete command sent for the red dots graph
                 if self._waypoint_cb is not None:
                     try:
-                        j = [fr['j1'], fr['j2'], fr['j3'], fr['j4']]
-                        self._waypoint_cb(np.radians(j))
+                        self._waypoint_cb(np.radians([fr['j1'], fr['j2'], fr['j3'], fr['j4']]))
                     except Exception:
                         pass
                         
                 idx += 1
                 
-            time.sleep(0.005) # Prevent busy loop spinning
-
-        # Wait for the robot to finish the remaining queued motion
-        if not self._stop_flag.is_set():
-            time.sleep(LOOKAHEAD + 0.1)
+            # 2. Publish smooth real-time target for accurate graphing (like race.py)
+            if hasattr(self, '_target_cb') and self._target_cb is not None and elapsed <= total_dur:
+                try:
+                    q_curr = [np.interp(elapsed, target_t, target_q[:, i]) for i in range(4)]
+                    self._target_cb(np.radians(q_curr))
+                except Exception:
+                    pass
+                    
+            if elapsed >= total_dur + LOOKAHEAD + 0.1:
+                break
+                
+            time.sleep(0.01) # 100Hz interpolation and polling loop
 
         self.is_playing = False
         if self._stop_flag.is_set():

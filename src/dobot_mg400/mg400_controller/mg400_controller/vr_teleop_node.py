@@ -292,6 +292,7 @@ class TeleopNode(Node):
             dashboard_send_fn=self.connection.send_dashboard_cmd,
             get_position_fn=self.feedback.get_current_position,
             waypoint_callback=self._playback_waypoint_callback,
+            target_callback=self._playback_target_callback,
         )
 
         # Teach & Repeat ROS topics
@@ -585,17 +586,25 @@ class TeleopNode(Node):
                 self.get_logger().info(f"🎓 Unity trajectory saved → {path}")
 
     def _playback_waypoint_callback(self, q_rad):
-        """Called by TrajectoryRecorder for each played waypoint (radians, 4-element).
-        Publishes to /teleop/playback_unity and /teleop/sent_command so the monitor
-        bridge shows the live trajectory values in the Unity and Sent graphs.
-        Also publishes FK of waypoint to /teleop/unity_xyz so the 3D graph target
-        trail updates during playback.
+        """Called by TrajectoryRecorder when a waypoint is queued (sent to robot).
+        Publishes ONLY to /teleop/sent_command.
+        """
+        js = JointState()
+        js.header.stamp = self.get_clock().now().to_msg()
+        js.position = list(q_rad)
+        self.pub_sent_command.publish(js)
+
+    def _playback_target_callback(self, q_rad):
+        """Called by TrajectoryRecorder at ~100Hz with the perfectly interpolated 
+        real-time target (equivalent to race.py's target line).
+        Publishes to /teleop/playback_unity so the monitor draws the yellow target 
+        line accurately in real-time.
         """
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.position = list(q_rad)
         self.pub_playback_unity.publish(js)
-        self.pub_sent_command.publish(js)
+        
         try:
             xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_rad))
             xyz_msg = Float64MultiArray()
