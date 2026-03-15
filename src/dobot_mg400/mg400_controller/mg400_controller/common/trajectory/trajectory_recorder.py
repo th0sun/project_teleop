@@ -189,8 +189,10 @@ class TrajectoryRecorder:
         try:
             data = json.loads(json_str)
             frames = data if isinstance(data, list) else data.get("frames", [])
+            filename = data.get("filename", "unity_trajectory.json") if isinstance(data, dict) else "unity_trajectory.json"
+            
             self._frames = frames
-            return self.save_temp()
+            return self.save_as(filename)
         except Exception as e:
             self._log.error(f"Failed to parse Unity trajectory JSON: {e}")
             return ""
@@ -267,6 +269,14 @@ class TrajectoryRecorder:
                 fr = frames[idx]
                 cmd = f"JointMovJ({fr['j1']},{fr['j2']},{fr['j3']},{fr['j4']},SpeedJ=100,CP={CP_VAL})"
                 self._send(cmd)
+                
+                if self._waypoint_cb is not None:
+                    try:
+                        j = [fr['j1'], fr['j2'], fr['j3'], fr['j4']]
+                        self._waypoint_cb(np.radians(j))
+                    except Exception:
+                        pass
+                        
                 idx += 1
                 
             time.sleep(0.005) # Prevent busy loop spinning
