@@ -106,10 +106,10 @@ COL_PRED   = "#a855f7"
 COL_SENT   = "#ef4444"
 COL_ACTUAL = "#0ea5e9"
 
-# T&R playback mode — professional blue/green/red palette (race.py style)
-COL_TR_TARGET   = "#3b82f6"  # vivid blue   — interpolated target
-COL_TR_WAYPOINT = "#22c55e"  # emerald green — queued waypoints
-COL_TR_ACTUAL   = "#ef4444"  # red           — robot actual
+# T&R playback mode — exact race.py colors
+COL_TR_TARGET   = "#2980b9"  # race.py blue  — interpolated target
+COL_TR_WAYPOINT = "#1a1a1a"  # black dots    — queued waypoints
+COL_TR_ACTUAL   = "#e74c3c"  # race.py red   — robot actual
 
 LOG_BG  = "#0d1f1a"
 LOG_GRN = "#86efac"
@@ -1670,21 +1670,35 @@ class MonitorWindow(QMainWindow):
     #  GRAPH STYLE  (switch between normal VR-teleop and T&R playback palettes)
     # ──────────────────────────────────────────────────────────────────────────
     def _apply_graph_style(self, tr_mode: bool):
-        """Update matplotlib line colors + Qt legend widgets for all 4 joint graphs."""
+        """Switch line colors, axes style, and legend labels for all 4 joint graphs."""
         if tr_mode:
             u_col, u_lbl = COL_TR_TARGET,   "Target"
             s_col, s_lbl = COL_TR_WAYPOINT, "Waypoints"
             a_col, a_lbl = COL_TR_ACTUAL,   "Actual"
+            ax_bg        = "#ffffff"   # white — race.py style
+            grid_col     = "#cccccc"
+            u_lw, u_alpha = 1.8, 0.7
+            a_lw          = 1.8
+            s_ms          = 3.0
         else:
             u_col, u_lbl = COL_UNITY,  "Unity"
             s_col, s_lbl = COL_SENT,   "Sent"
             a_col, a_lbl = COL_ACTUAL, "Actual"
+            ax_bg        = PANEL
+            grid_col     = "#e2e8f0"
+            u_lw, u_alpha = 2.0, 0.85
+            a_lw          = 2.5
+            s_ms          = 2.5
 
         for i in range(4):
             lu, ls, la = self._lines_j[i]
-            lu.set_color(u_col)
-            ls.set_color(s_col)
-            la.set_color(a_col)
+            lu.set_color(u_col);  lu.set_linewidth(u_lw);  lu.set_alpha(u_alpha)
+            ls.set_color(s_col);  ls.set_markersize(s_ms)
+            la.set_color(a_col);  la.set_linewidth(a_lw)
+            ax = self._axes_j[i]
+            ax.set_facecolor(ax_bg)
+            ax.grid(True, axis='y', color=grid_col, lw=0.8, alpha=0.6)
+            ax.grid(tr_mode, axis='x', color=grid_col, lw=0.8, alpha=0.6)
             for (dot, txt), (clr, lbl) in zip(
                 self._legend_items_j[i],
                 [(u_col, u_lbl), (s_col, s_lbl), (a_col, a_lbl)]
@@ -1743,7 +1757,10 @@ class MonitorWindow(QMainWindow):
             s=np.array(self.s_buf[i]); a=np.array(self.a_buf[i])
             lu.set_data(t_arr,u)
             ls.set_data(t_arr,s); la.set_data(t_arr,a)
-            ax.set_xlim(max(0,rel-GRAPH_WIN), max(GRAPH_WIN, rel+0.5))
+            if d.tr_active:
+                ax.set_xlim(0, max(GRAPH_WIN, rel + 0.5))  # growing from t=0 like race.py
+            else:
+                ax.set_xlim(max(0, rel - GRAPH_WIN), max(GRAPH_WIN, rel + 0.5))
             if len(a)>1:
                 vals = np.concatenate([u,a])
                 mn,mx = np.nanmin(vals), np.nanmax(vals)
