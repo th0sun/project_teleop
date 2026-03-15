@@ -162,10 +162,23 @@ class MonitorBridge(Node):
             self.unity = list(np.degrees(msg.position[:4]))
 
     def _cb_traj_preview(self, msg):
-        """Full trajectory waypoints published once at Preview start."""
+        """Full trajectory waypoints published once at Preview start.
+        Downsampled to ≤90 points so it fits in a single UDP datagram."""
         import json as _json
         try:
-            self.traj_preview = _json.loads(msg.data)
+            raw = _json.loads(msg.data)
+            t_all = raw["t"]
+            q_all = raw["q"]
+            n = len(t_all)
+            N_MAX = 90
+            if n > N_MAX:
+                step = max(1, n // N_MAX)
+                idxs = list(range(0, n, step))
+                if idxs[-1] != n - 1:
+                    idxs.append(n - 1)  # always include last point
+                t_all = [t_all[i] for i in idxs]
+                q_all = [q_all[i] for i in idxs]
+            self.traj_preview = {"t": t_all, "q": q_all}
             self._traj_preview_pending = True
         except Exception:
             pass
@@ -244,9 +257,8 @@ class MonitorBridge(Node):
                     "freq":       self._freq,
                 }, separators=(',', ':')).encode()
                 dest = self._target_ip if self._target_ip else BCAST_IP
+                self._traj_preview_pending = False  # clear before send — never retry on failure
                 self._tx.sendto(pkt, (dest, TELEM_PORT))
-                if self._traj_preview_pending:
-                    self._traj_preview_pending = False
             except Exception as e:
                 self.get_logger().warn(f"Telem TX error: {e}", throttle_duration_sec=5)
 
