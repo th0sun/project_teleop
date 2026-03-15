@@ -20,6 +20,7 @@ import time
 import datetime
 import csv
 import queue
+import json
 
 # Import configuration
 from mg400_controller.common.config.robot_config import (
@@ -233,6 +234,8 @@ class TeleopNode(Node):
         self.pub_unity_xyz = self.create_publisher(Float64MultiArray, "/teleop/unity_xyz", 10)
         # Teach & Repeat playback publisher — feeds monitor graphs during playback
         self.pub_playback_unity = self.create_publisher(JointState, "/teleop/playback_unity", 10)
+        # Full trajectory preview (published once at Preview start for background dots)
+        self.pub_traj_preview = self.create_publisher(String, "/teleop/traj_preview", 10)
         
         # Suction Cup Control (Smart Trigger)
         self.suction_state = False
@@ -573,6 +576,15 @@ class TeleopNode(Node):
             name = status.split(":", 1)[1].strip()
             tr.load(name)
         elif status == "Preview":
+            # Publish full trajectory data for monitor background dots (race.py style)
+            if tr.loaded_frames:
+                t0 = tr.loaded_frames[0]["timeStamp"]
+                preview = {
+                    "t": [f["timeStamp"] - t0 for f in tr.loaded_frames],
+                    "q": [[f["j1"], f["j2"], f["j3"], f["j4"]] for f in tr.loaded_frames]
+                }
+                pmsg = String(); pmsg.data = json.dumps(preview)
+                self.pub_traj_preview.publish(pmsg)
             tr.start_preview()
         else:
             self.get_logger().warn(f"⚠️ Unknown teach status: {status}")
