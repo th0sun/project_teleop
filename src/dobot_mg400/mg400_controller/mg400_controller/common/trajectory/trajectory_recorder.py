@@ -35,6 +35,46 @@ from typing import List, Dict, Optional, Callable
 # ── Home position (degrees) ──────────────────────────────────────────────────
 HOME_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0]
 
+# ── Playback speed model (Mock defaults at SpeedJ=100, global_speed_rate=50) ──
+_EXEC_SPEED_J  = 180.0   # deg/s  (50 * 360 * 100 * 1e-4)
+_EXEC_ACC_J    = 90.0    # deg/s² (50 * 360 * 50  * 1e-4)
+
+
+def compute_exec_timestamps(frames,
+                            speed_j: float = _EXEC_SPEED_J,
+                            acc_j:   float = _EXEC_ACC_J):
+    """Return execution-time-based timestamps (seconds, starting at 0) for
+    *frames*, assuming continuous CP-blended motion at *speed_j* / *acc_j*.
+
+    Uses a cumulative-path-length model: the robot is treated as executing the
+    whole trajectory as one trapezoidal move, with per-frame times distributed
+    proportionally to angular path length.  This matches real behaviour when
+    CP=20 blending chains small waypoints into continuous motion.
+    """
+    n = len(frames)
+    if n < 2:
+        return [0.0] * n
+
+    # Cumulative max-joint-delta path lengths
+    path = [0.0]
+    for i in range(1, n):
+        d = max(abs(frames[i][j] - frames[i - 1][j]) for j in ('j1', 'j2', 'j3', 'j4'))
+        path.append(path[-1] + max(d, 0.0))
+    L = path[-1]
+
+    if L < 1e-6:
+        # Stationary trajectory — keep tiny uniform spacing
+        return [i * 0.05 for i in range(n)]
+
+    # Total trapezoidal execution time for the full angular path
+    if L > speed_j ** 2 / acc_j:   # trapezoidal (can reach full speed)
+        exec_total = L / speed_j + speed_j / acc_j
+    else:                           # triangular (short move)
+        exec_total = 2.0 * math.sqrt(L / acc_j)
+
+    # Distribute proportionally to path length
+    return [exec_total * p / L for p in path]
+
 # ── Trajectory storage directory ─────────────────────────────────────────────
 TRAJ_DIR = os.path.expanduser("~/project_teleop_ws/trajectories")
 
@@ -256,48 +296,87 @@ class TrajectoryRecorder:
             return
 
         t0_traj = frames[0]["timeStamp"]
-        total_dur = frames[-1]["timeStamp"] - t0_traj
 
-        self._log.info(f"▶️  Preview start — {n} waypoints, {total_dur:.1f}s")
         LOOKAHEAD = 0.25
         CP_VAL    = 20
-        
-        # Prepare for smooth real-time interpolation for the monitor graphs
-        target_t = np.array([f["timeStamp"] - t0_traj for f in frames])
+
+        # ── Recording-time axis (used only for send scheduling) ───────────────
+        rec_t = np.array([f["timeStamp"] - t0_traj for f in frames])
         target_q = np.array([[f['j1'], f['j2'], f['j3'], f['j4']] for f in frames])
 
+        # ── Execution-time axis (used for target interpolation & loop end) ─────
+        exec_t = np.array(compute_exec_timestamps(frames))
+        total_exec_dur = float(exec_t[-1])
+
+        self._log.info(
+            f"▶️  Preview start — {n} waypoints, rec={rec_t[-1]:.1f}s "
+            f"exec≈{total_exec_dur:.1f}s"
+        )
+
+        # ── 0. Move to trajectory start position before playing ────────────────
+        first = frames[0]
+        cmd_start = (
+            f"JointMovJ({first['j1']},{first['j2']},{first['j3']},{first['j4']}"
+            f",SpeedJ=20,AccJ=50,CP=0)"
+        )
+        self._log.info(
+            f"🏁 Go-to-start: ({first['j1']:.1f},{first['j2']:.1f},"
+            f"{first['j3']:.1f},{first['j4']:.1f})"
+        )
+        self._send(cmd_start)
+
+        # Wait until near start position (up to 6 s) or stop flag
+        if self._get_pos is not None:
+            start_q = np.array([first['j1'], first['j2'], first['j3'], first['j4']])
+            deadline = time.time() + 6.0
+            while time.time() < deadline and not self._stop_flag.is_set():
+                pos = self._get_pos()
+                if pos is not None:
+                    err = float(np.max(np.abs(np.degrees(pos[:4]) - start_q)))
+                    if err < 3.0:
+                        break
+                time.sleep(0.05)
+        else:
+            time.sleep(2.0)
+
+        if self._stop_flag.is_set():
+            self.is_playing = False
+            return
+
+        # ── 1. Main playback loop ─────────────────────────────────────────────
         idx = 0
         t_start = time.time()
         while not self._stop_flag.is_set():
             elapsed = time.time() - t_start
-            
-            # 1. Pre-send any waypoints that fall within the current lookahead window
-            while idx < len(frames) and target_t[idx] <= elapsed + LOOKAHEAD:
+
+            # Send waypoints that fall within the current lookahead window
+            # (still use recording-time axis so CP blending gets dense commands)
+            while idx < len(frames) and rec_t[idx] <= elapsed + LOOKAHEAD:
                 fr = frames[idx]
                 cmd = f"JointMovJ({fr['j1']},{fr['j2']},{fr['j3']},{fr['j4']},SpeedJ=100,CP={CP_VAL})"
                 self._send(cmd)
-                
-                # Publish the discrete command sent for the red dots graph
+
                 if self._waypoint_cb is not None:
                     try:
                         self._waypoint_cb(np.radians([fr['j1'], fr['j2'], fr['j3'], fr['j4']]))
                     except Exception:
                         pass
-                        
+
                 idx += 1
-                
-            # 2. Publish smooth real-time target for accurate graphing (like race.py)
-            if hasattr(self, '_target_cb') and self._target_cb is not None and elapsed <= total_dur:
+
+            # Publish smooth real-time target using execution-time axis so the
+            # monitor Target line tracks the robot's actual progress
+            if self._target_cb is not None and elapsed <= total_exec_dur:
                 try:
-                    q_curr = [np.interp(elapsed, target_t, target_q[:, i]) for i in range(4)]
+                    q_curr = [np.interp(elapsed, exec_t, target_q[:, i]) for i in range(4)]
                     self._target_cb(np.radians(q_curr))
                 except Exception:
                     pass
-                    
-            if elapsed >= total_dur + LOOKAHEAD + 0.1:
+
+            if elapsed >= total_exec_dur + LOOKAHEAD + 0.1:
                 break
-                
-            time.sleep(0.01) # 100Hz interpolation and polling loop
+
+            time.sleep(0.01)  # 100 Hz polling loop
 
         self.is_playing = False
         if self._stop_flag.is_set():

@@ -22,6 +22,8 @@ import csv
 import queue
 import json
 
+from mg400_controller.common.trajectory.trajectory_recorder import compute_exec_timestamps
+
 # Import configuration
 from mg400_controller.common.config.robot_config import (
     CONTROL_MODE, 
@@ -576,11 +578,12 @@ class TeleopNode(Node):
             name = status.split(":", 1)[1].strip()
             tr.load(name)
         elif status == "Preview":
-            # Publish full trajectory data for monitor background dots (race.py style)
+            # Publish full trajectory data for monitor background dots (race.py style).
+            # Use execution-time axis so dots align with the Target line and Actual.
             if tr.loaded_frames:
-                t0 = tr.loaded_frames[0]["timeStamp"]
+                exec_t = compute_exec_timestamps(tr.loaded_frames)
                 preview = {
-                    "t": [f["timeStamp"] - t0 for f in tr.loaded_frames],
+                    "t": exec_t,
                     "q": [[f["j1"], f["j2"], f["j3"], f["j4"]] for f in tr.loaded_frames]
                 }
                 pmsg = String(); pmsg.data = json.dumps(preview)
