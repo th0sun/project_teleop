@@ -374,6 +374,8 @@ DATA = RobotData()
 # ══════════════════════════════════════════════════════════════════════════════
 #  ROS2 NODE  (runs in background thread)
 # ══════════════════════════════════════════════════════════════════════════════
+PLAYBACK_UNITY_TOPIC = "/teleop/playback_unity"
+
 class RosNode(Node if ROS_AVAILABLE else object):
     def __init__(self, data: RobotData):
         if ROS_AVAILABLE:
@@ -381,6 +383,7 @@ class RosNode(Node if ROS_AVAILABLE else object):
         self.data = data
         self.pub_suction = None
         self.pub_light   = None
+        self._last_playback_t = 0.0
         if ROS_AVAILABLE:
             self._setup()
 
@@ -396,10 +399,11 @@ class RosNode(Node if ROS_AVAILABLE else object):
             depth=1
         )
         def sub(topic, typ, cb, qos=10): return self.create_subscription(typ, topic, cb, qos)
-        sub(ACTUAL_TOPIC,    JointState,        self._cb_actual)
-        sub(UNITY_TOPIC,     JointState,        self._cb_unity, qos_be)
-        sub(PREDICTED_TOPIC, JointState,        self._cb_pred)
-        sub(SENT_TOPIC,      JointState,        self._cb_sent)
+        sub(ACTUAL_TOPIC,          JointState,        self._cb_actual)
+        sub(UNITY_TOPIC,          JointState,        self._cb_unity, qos_be)
+        sub(PLAYBACK_UNITY_TOPIC, JointState,        self._cb_unity_playback)
+        sub(PREDICTED_TOPIC,      JointState,        self._cb_pred)
+        sub(SENT_TOPIC,           JointState,        self._cb_sent)
         sub(TOOL_ACT_TOPIC,  Float64MultiArray, lambda m: self._f64(m, 'tool_act'))
         sub(TOOL_TGT_TOPIC,  Float64MultiArray, lambda m: self._f64(m, 'tool_tgt'))
         sub(UNITY_XYZ_TOPIC, Float64MultiArray, lambda m: self._f64(m, 'unity_xyz'))
@@ -415,6 +419,15 @@ class RosNode(Node if ROS_AVAILABLE else object):
             self.data.actual = list(np.degrees([msg.position[i] for i in (0,1,3,8)]))
             self.data.last_act_t = time.time()
     def _cb_unity(self, msg):
+        if time.perf_counter() - self._last_playback_t < 0.5:
+            return  # suppress stale VR cmd during playback
+        self.data.msg_counts["UNITY TARGET"] += 1
+        if len(msg.position) >= 4:
+            self.data.unity = list(np.degrees(msg.position[:4]))
+            self.data.last_tgt_t = time.time()
+    def _cb_unity_playback(self, msg):
+        """T&R playback waypoint — always accepted; suppresses /unity/joint_cmd for 0.5s."""
+        self._last_playback_t = time.perf_counter()
         self.data.msg_counts["UNITY TARGET"] += 1
         if len(msg.position) >= 4:
             self.data.unity = list(np.degrees(msg.position[:4]))
@@ -1687,7 +1700,7 @@ class MonitorWindow(QMainWindow):
         tgt = d.unity_xyz[:3]; act = d.tool_act[:3]
         self.tgt_trail.append(tuple(tgt)); self.act_trail.append(tuple(act))
         if had_fresh:
-            self.snt_trail.append(tuple(d.tool_tgt[:3]))
+            self.snt_trail.append(tuple(d.unity_xyz[:3]))
         if len(self.tgt_trail) >= 2:
             trail_t = list(self.tgt_trail); trail_a = list(self.act_trail)
             n = len(trail_t)

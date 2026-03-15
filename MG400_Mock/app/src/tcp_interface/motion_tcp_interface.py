@@ -42,5 +42,8 @@ class MotionTcpInterface(TcpInterfaceBase):
                     recv = connection.recv(max_receive_bytes).decode()
                     if not recv:
                         break
-                    self.logger.info(recv)
-                    self.__dobot.motion_stack(recv)
+                    for cmd in recv.strip().split('\n'):
+                        if not cmd:
+                            continue
+                        self.logger.info(cmd)
+                        self.__dobot.motion_stack(cmd)

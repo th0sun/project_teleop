@@ -40,14 +40,19 @@ class DashboardTcpInterface(TcpInterfaceBase):
                     recv = connection.recv(max_receive_bytes).decode()
                     if not recv:
                         break
-                    self.logger.info(recv)
-
-                    try:
-                        res = FunctionParser.exec(
-                            self.__dashboard_commands, recv)
-                    except ValueError as err:
-                        self.logger.error(err)
-
-                    return_str = res+recv+";"
+                    
+                    return_str = ""
+                    for cmd in recv.strip().split('\n'):
+                        if not cmd:
+                            continue
+                        self.logger.info(cmd)
+                        try:
+                            res = FunctionParser.exec(
+                                self.__dashboard_commands, cmd)
+                        except ValueError as err:
+                            self.logger.error(err)
+                            res = ""
+                        return_str += res + cmd + ";"
+                        
                     print("RETURN: " + return_str)
                     connection.send((return_str).encode())
