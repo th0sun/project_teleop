@@ -239,8 +239,12 @@ class TrajectoryRecorder:
         self._play_thread.start()
 
     def _play_worker(self):
-        """Sequencer thread: sends EXACT frame joint values with computed SpeedJ.
-        Pushes commands slightly ahead of time to keep the robot's queue full for CP blending.
+        """One-at-a-time sequencer: sends JointMovJ per waypoint and paces
+        by wall-clock to match recorded timestamps exactly.
+
+        CP=0 ensures the robot fully stops at each waypoint for deterministic
+        timing.  SpeedJ is computed with 25% headroom so the robot arrives
+        BEFORE the next waypoint's scheduled time.
         """
         frames = self.loaded_frames
         n = len(frames)
@@ -249,58 +253,50 @@ class TrajectoryRecorder:
 
         t0_traj = frames[0]["timeStamp"]
         t_wall_start = time.perf_counter()
+        MG400_MAX_DPS = 300.0  # max joint speed (deg/s)
+
         self._log.info(f"▶️  Preview start — {n} waypoints, "
                        f"{frames[-1]['timeStamp'] - t0_traj:.1f}s")
 
-        cmd_idx = 0
-        graph_idx = 0
-        QUEUE_AHEAD_TIME = 0.5  # seconds ahead to keep CP blending active
-
-        while self.is_playing and graph_idx < n:
+        for i in range(n):
             if self._stop_flag.is_set():
                 break
 
-            now = time.perf_counter()
-            elapsed = now - t_wall_start
+            fr = frames[i]
+            j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
 
-            # 1. Push commands to robot slightly ahead of time
-            while cmd_idx < n and (frames[cmd_idx]["timeStamp"] - t0_traj) <= elapsed + QUEUE_AHEAD_TIME:
-                fr = frames[cmd_idx]
-                j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
+            # ── Compute SpeedJ for this segment ──────────────────────────
+            if i < n - 1:
+                fr_next = frames[i + 1]
+                dt = max(fr_next["timeStamp"] - fr["timeStamp"], 0.02)
+                j_next = [fr_next["j1"], fr_next["j2"], fr_next["j3"], fr_next["j4"]]
+                max_delta = max(abs(j_next[k] - j[k]) for k in range(4))
+                required_dps = max_delta / dt
+                # 1.25x headroom so robot arrives BEFORE next timestamp
+                speed_pct = max(1, min(100, int(math.ceil(
+                    (required_dps / MG400_MAX_DPS) * 100 * 1.25))))
+            else:
+                speed_pct = 30  # gentle stop at final frame
 
-                # Compute SpeedJ for this segment
-                if cmd_idx < n - 1:
-                    fr_next = frames[cmd_idx + 1]
-                    dt = max(fr_next["timeStamp"] - fr["timeStamp"], 0.001)
-                    j_next = [fr_next["j1"], fr_next["j2"], fr_next["j3"], fr_next["j4"]]
-                    max_delta = max(abs(j_next[k] - j[k]) for k in range(4))
-                    required_dps = max_delta / dt          # degrees per second needed
-                    # MG400 max joint speed is approx 300 deg/s
-                    speed_pct = max(1, min(100, int(math.ceil((required_dps / 300.0) * 100))))
-                else:
-                    speed_pct = 20  # final frame: coast to a gentle stop
+            # ── Send JointMovJ (CP=0 for deterministic stop) ─────────────
+            cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
+                   f"SpeedJ={speed_pct},AccJ=100,CP=0)")
+            self._send(cmd)
 
-                cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
-                       f"SpeedJ={speed_pct},AccJ=100,CP=100)")
-                self._send(cmd)
-                cmd_idx += 1
+            # ── Fire graph callback immediately ──────────────────────────
+            if self._waypoint_cb is not None:
+                try:
+                    self._waypoint_cb(np.radians(j))
+                except Exception:
+                    pass
 
-                if self._stop_flag.is_set():
-                    break
-
-            # 2. Update graph callbacks at EXACT wall-clock time
-            while graph_idx < n and (frames[graph_idx]["timeStamp"] - t0_traj) <= elapsed:
-                fr = frames[graph_idx]
-                j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
-                if self._waypoint_cb is not None:
-                    try:
-                        self._waypoint_cb(np.radians(j))
-                    except Exception:
-                        pass
-                graph_idx += 1
-
-            # Sleep briefly to prevent CPU spinning
-            time.sleep(0.01)
+            # ── Wait until wall-clock reaches the NEXT waypoint's time ───
+            if i < n - 1:
+                next_wall = t_wall_start + (frames[i + 1]["timeStamp"] - t0_traj)
+                while time.perf_counter() < next_wall:
+                    if self._stop_flag.is_set():
+                        break
+                    time.sleep(0.005)
 
         self.is_playing = False
         if self._stop_flag.is_set():
