@@ -106,6 +106,11 @@ COL_PRED   = "#a855f7"
 COL_SENT   = "#ef4444"
 COL_ACTUAL = "#0ea5e9"
 
+# T&R playback mode — professional blue/green/red palette (race.py style)
+COL_TR_TARGET   = "#3b82f6"  # vivid blue   — interpolated target
+COL_TR_WAYPOINT = "#22c55e"  # emerald green — queued waypoints
+COL_TR_ACTUAL   = "#ef4444"  # red           — robot actual
+
 LOG_BG  = "#0d1f1a"
 LOG_GRN = "#86efac"
 
@@ -350,6 +355,8 @@ class RobotData:
         self._prev_err  = -1
         # sim
         self._sim_t       = 0.0
+        # T&R playback mode flag (set by ROS callback or UDP bridge)
+        self.tr_active    = False
 
         # Message counts for Data Flow tab
         self.msg_counts = {
@@ -428,6 +435,7 @@ class RosNode(Node if ROS_AVAILABLE else object):
     def _cb_unity_playback(self, msg):
         """T&R playback waypoint — always accepted; suppresses /unity/joint_cmd for 0.5s."""
         self._last_playback_t = time.perf_counter()
+        self.data.tr_active = True
         self.data.msg_counts["UNITY TARGET"] += 1
         if len(msg.position) >= 4:
             self.data.unity = list(np.degrees(msg.position[:4]))
@@ -522,6 +530,7 @@ class UdpBridgeNode:
                     if 0 < lat_ms < 500:   # filter implausible values (clock skew)
                         d.bridge_latency_ms = lat_ms
 
+                d.tr_active  = pkt.get("tr_active",  False)
                 d.actual     = pkt.get("actual",     d.actual)
                 d.unity      = pkt.get("unity",      d.unity)
                 d.predicted  = pkt.get("predicted",  d.predicted)
@@ -939,6 +948,7 @@ class MonitorWindow(QMainWindow):
         self.p_buf    = [deque(maxlen=MAX_PTS) for _ in range(4)]
         self.s_buf    = [deque(maxlen=MAX_PTS) for _ in range(4)]
         self.a_buf    = [deque(maxlen=MAX_PTS) for _ in range(4)]
+        self._was_tr  = False  # previous T&R state, for detecting transitions
         self.tgt_trail= deque(maxlen=TRAIL_LEN)
         self.act_trail= deque(maxlen=TRAIL_LEN)
         self.snt_trail= deque(maxlen=20)
@@ -1500,6 +1510,7 @@ class MonitorWindow(QMainWindow):
         self._lines_j = []    # (l_u, l_p, l_s, l_a)
         self._live_tx = []
         self._canvas_list = []
+        self._legend_items_j = []  # per graph: [(dot_widget, txt_widget), ...]
 
         positions = [(0,0),(0,1),(1,0),(1,1)]
 
@@ -1527,7 +1538,8 @@ class MonitorWindow(QMainWindow):
             
             hl.addWidget(t1); hl.addSpacing(10); hl.addWidget(val); hl.addStretch()
             
-            # Legend
+            # Legend (widgets stored so T&R mode can update them live)
+            per_legend = []
             for clr, lbl in [(COL_UNITY,"Unity"),(COL_SENT,"Sent"),(COL_ACTUAL,"Actual")]:
                 dot = QLabel("—")
                 dot.setFont(font(FONT_SANS, 14, bold=True))
@@ -1536,6 +1548,8 @@ class MonitorWindow(QMainWindow):
                 txt.setFont(font(FONT_SANS, 10, bold=True))
                 txt.setStyleSheet(f"color:{MUTED}; border:none;")
                 hl.addWidget(dot); hl.addWidget(txt); hl.addSpacing(6)
+                per_legend.append((dot, txt))
+            self._legend_items_j.append(per_legend)
                 
             cl.addWidget(hdr)
             
@@ -1554,9 +1568,9 @@ class MonitorWindow(QMainWindow):
             ax.grid(True, axis='y', color="#e2e8f0", lw=0.8)
             ax.grid(False, axis='x')
             
-            lu, = ax.plot([], [], color=COL_UNITY,  lw=2.0, ls="-", alpha=0.85)
-            ls, = ax.plot([], [], color=COL_SENT,   lw=0, marker='o', ms=2.5, alpha=0.85)
-            la, = ax.plot([], [], color=COL_ACTUAL, lw=2.0)
+            lu, = ax.plot([], [], color=COL_UNITY,  lw=2.0, ls="-", alpha=0.85, zorder=2)
+            ls, = ax.plot([], [], color=COL_SENT,   lw=0, marker='o', ms=2.5, alpha=0.85, zorder=1)
+            la, = ax.plot([], [], color=COL_ACTUAL, lw=2.5, zorder=3)
             
             self._axes_j.append(ax)
             self._lines_j.append((lu,ls,la))
@@ -1653,12 +1667,58 @@ class MonitorWindow(QMainWindow):
         self._fig_3d.tight_layout(pad=0.5)
 
     # ──────────────────────────────────────────────────────────────────────────
+    #  GRAPH STYLE  (switch between normal VR-teleop and T&R playback palettes)
+    # ──────────────────────────────────────────────────────────────────────────
+    def _apply_graph_style(self, tr_mode: bool):
+        """Update matplotlib line colors + Qt legend widgets for all 4 joint graphs."""
+        if tr_mode:
+            u_col, u_lbl = COL_TR_TARGET,   "Target"
+            s_col, s_lbl = COL_TR_WAYPOINT, "Waypoints"
+            a_col, a_lbl = COL_TR_ACTUAL,   "Actual"
+        else:
+            u_col, u_lbl = COL_UNITY,  "Unity"
+            s_col, s_lbl = COL_SENT,   "Sent"
+            a_col, a_lbl = COL_ACTUAL, "Actual"
+
+        for i in range(4):
+            lu, ls, la = self._lines_j[i]
+            lu.set_color(u_col)
+            ls.set_color(s_col)
+            la.set_color(a_col)
+            for (dot, txt), (clr, lbl) in zip(
+                self._legend_items_j[i],
+                [(u_col, u_lbl), (s_col, s_lbl), (a_col, a_lbl)]
+            ):
+                dot.setStyleSheet(f"color:{clr}; border:none;")
+                txt.setText(lbl)
+
+    # ──────────────────────────────────────────────────────────────────────────
     #  GRAPH UPDATE  (called by QTimer at 20 Hz)
     # ──────────────────────────────────────────────────────────────────────────
     def _update_graphs(self):
         d   = self.data
         now = time.time()
         rel = now - self.g_start
+
+        # ── T&R mode detection ─────────────────────────────────────────────
+        # ROS mode: clear tr_active when no playback message for 1.5 s
+        if ROS_AVAILABLE and hasattr(self, 'ros_node') and hasattr(self.ros_node, '_last_playback_t'):
+            if (time.perf_counter() - self.ros_node._last_playback_t) > 1.5:
+                d.tr_active = False
+        # Detect mode transition → clear buffers + update graph style
+        if d.tr_active != self._was_tr:
+            self._was_tr = d.tr_active
+            self.t_buf.clear()
+            self.g_start = now
+            rel = 0.0
+            for i in range(4):
+                self.u_buf[i].clear()
+                self.s_buf[i].clear()
+                self.a_buf[i].clear()
+            self.tgt_trail.clear()
+            self.act_trail.clear()
+            self.snt_trail.clear()
+            self._apply_graph_style(d.tr_active)
 
         # Capture fresh flag BEFORE the loop resets it (also used for 3D snt_trail)
         had_fresh = any(d.sent_fresh)

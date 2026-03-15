@@ -165,6 +165,10 @@ class MonitorBridge(Node):
         if len(msg.position) >= 4:
             self.unity = list(np.degrees(msg.position[:4]))
 
+    @property
+    def _tr_active(self):
+        return (time.perf_counter() - self._last_playback_t) < 1.5
+
     def _cb_sent(self, msg):
         self._counts["SENT COMMAND"] += 1
         if len(msg.position) >= 4:
@@ -211,6 +215,7 @@ class MonitorBridge(Node):
             try:
                 pkt = json.dumps({
                     "ts":         time.time(),
+                    "tr_active":  self._tr_active,
                     "actual":     self.actual,
                     "unity":      self.unity,
                     "predicted":  self.unity,
