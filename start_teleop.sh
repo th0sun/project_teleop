@@ -13,18 +13,16 @@ echo "1. หุ่นจริง + Simulator (rviz & unity_simulator)"
 echo "2. แบบจำลอง (Mock+Docker) + Simulator"
 echo "3. หุ่นจริง + Unity (ros_tcp_endpoint)"
 echo "4. แบบจำลอง (Mock+Docker) + Unity"
-echo "5. หุ่นจริง + 3D Simulator (PyQt5)"
-echo "6. แบบจำลอง (Mock+Docker) + 3D Simulator (PyQt5)"
 echo "=========================================="
-read -p "Select Mode (1-6): " MODE
+read -p "Select Mode (1-4): " MODE
 
-if [[ ! "$MODE" =~ ^[1-6]$ ]]; then
+if [[ ! "$MODE" =~ ^[1-4]$ ]]; then
     echo "❌ Invalid. Exiting."
     exit 1
 fi
 
 # 2. Network & Docker
-if [ "$MODE" = "2" ] || [ "$MODE" = "4" ] || [ "$MODE" = "6" ]; then
+if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
     echo "🐳 Starting Docker Mock..."
     export ROBOT_IP="172.10.0.2"
     docker compose -f MG400_Mock/docker/docker-compose.yml up -d
@@ -45,9 +43,6 @@ CMD_BRIDGE="$_src && python3 $WS/monitor_bridge.py; exec bash"
 
 if [ "$MODE" = "3" ] || [ "$MODE" = "4" ]; then
     CMD_EXTRA="$_src && ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0; exec bash"
-elif [ "$MODE" = "5" ] || [ "$MODE" = "6" ]; then
-    CMD_EXTRA="$_src && ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0; exec bash"
-    CMD_3D_SIM="cd $WS/project_teleop/tools/mg400_simulator && chmod +x run.sh && ./run.sh; exec bash"
 else
     CMD_EXTRA="$_src && ros2 run mg400_simulator unity_simulator; exec bash"
 fi
@@ -82,18 +77,12 @@ tmux send-keys -t "$PANE_B" "$CMD_RVIZ" Enter
 PANE_C=$(tmux split-window -v -t "$PANE_B" -P -F '#{pane_id}')
 tmux send-keys -t "$PANE_C" "$CMD_EXTRA" Enter
 
-# Pane F: 3D Simulator (เฉพาะ Mode 5/6)
-if [ "$MODE" = "5" ] || [ "$MODE" = "6" ]; then
-    PANE_F=$(tmux split-window -v -t "$PANE_C" -P -F '#{pane_id}')
-    tmux send-keys -t "$PANE_F" "$CMD_3D_SIM" Enter
-fi
-
 # Pane D: Monitor Bridge (ซ้ายล่าง) — UDP telemetry → Mac
 PANE_D=$(tmux split-window -v -t "$PANE_A" -l 12 -P -F '#{pane_id}')
 tmux send-keys -t "$PANE_D" "$CMD_BRIDGE" Enter
 
 # Pane E: Docker Logs (Mock mode เท่านั้น)
-if [ "$MODE" = "2" ] || [ "$MODE" = "4" ] || [ "$MODE" = "6" ]; then
+if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
     PANE_E=$(tmux split-window -v -t "$PANE_A" -l 8 -P -F '#{pane_id}')
     tmux send-keys -t "$PANE_E" "docker compose -f MG400_Mock/docker/docker-compose.yml logs -f; exec bash" Enter
 fi
@@ -104,13 +93,8 @@ tmux set -g pane-border-status top
 tmux set -g pane-border-format " #{pane_index}: #{pane_title} "
 tmux select-pane -t "$PANE_A" -T "🤖 Teleop"
 tmux select-pane -t "$PANE_B" -T "📐 RViz"
-if [ "$MODE" = "5" ] || [ "$MODE" = "6" ]; then
-    tmux select-pane -t "$PANE_C" -T "🌐 TCP Endpoint"
-    tmux select-pane -t "$PANE_F" -T "🖥️ 3D Simulator"
-else
-    tmux select-pane -t "$PANE_C" -T "🔌 TCP/Sim"
-fi
-tmux select-pane -t "$PANE_D" -T "🔀 UDP Bridge"
+tmux select-pane -t "$PANE_C" -T "🔌 TCP/Sim"
+tmux select-pane -t "$PANE_D" -T "� UDP Bridge"
 
 tmux set -g status-right " 💡 Ctrl+C=stop | ↑Enter=restart | Shift+drag=copy | Ctrl+D=close pane | kill-server=exit all "
 tmux set -g status-right-length 90
@@ -121,7 +105,7 @@ tmux select-pane -t "$PANE_A"
 tmux attach -t "$SESSION"
 
 # เมื่อ detach ออก
-if [ "$MODE" = "2" ] || [ "$MODE" = "4" ] || [ "$MODE" = "6" ]; then
+if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
     echo ""
     read -p "🛑 Stop Docker Mock? (y/N): " STOP_DOCKER
     if [[ "$STOP_DOCKER" =~ ^[Yy]$ ]]; then

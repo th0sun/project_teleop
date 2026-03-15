@@ -398,7 +398,6 @@ class RosNode(Node if ROS_AVAILABLE else object):
         def sub(topic, typ, cb, qos=10): return self.create_subscription(typ, topic, cb, qos)
         sub(ACTUAL_TOPIC,    JointState,        self._cb_actual)
         sub(UNITY_TOPIC,     JointState,        self._cb_unity, qos_be)
-        sub("/teleop/playback_unity", JointState, self._cb_unity, qos_be)
         sub(PREDICTED_TOPIC, JointState,        self._cb_pred)
         sub(SENT_TOPIC,      JointState,        self._cb_sent)
         sub(TOOL_ACT_TOPIC,  Float64MultiArray, lambda m: self._f64(m, 'tool_act'))
