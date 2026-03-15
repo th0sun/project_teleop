@@ -38,11 +38,15 @@ class MotionTcpInterface(TcpInterfaceBase):
             connection, _ = socket.accept()
             self.__socket_pool.put(connection)
             with connection:
+                buffer = ""
                 while True:
                     recv = connection.recv(max_receive_bytes).decode()
                     if not recv:
                         break
-                    for cmd in recv.strip().split('\n'):
+                    buffer += recv
+                    while '\n' in buffer:
+                        cmd, buffer = buffer.split('\n', 1)
+                        cmd = cmd.strip()
                         if not cmd:
                             continue
                         self.logger.info(cmd)

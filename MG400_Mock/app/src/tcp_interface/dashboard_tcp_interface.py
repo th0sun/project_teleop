@@ -36,13 +36,17 @@ class DashboardTcpInterface(TcpInterfaceBase):
         while True:
             connection, _ = socket.accept()
             with connection:
+                buffer = ""
                 while True:
                     recv = connection.recv(max_receive_bytes).decode()
                     if not recv:
                         break
                     
+                    buffer += recv
                     return_str = ""
-                    for cmd in recv.strip().split('\n'):
+                    while '\n' in buffer:
+                        cmd, buffer = buffer.split('\n', 1)
+                        cmd = cmd.strip()
                         if not cmd:
                             continue
                         self.logger.info(cmd)
@@ -54,5 +58,6 @@ class DashboardTcpInterface(TcpInterfaceBase):
                             res = ""
                         return_str += res + cmd + ";"
                         
-                    print("RETURN: " + return_str)
-                    connection.send((return_str).encode())
+                    if return_str:
+                        print("RETURN: " + return_str)
+                        connection.send((return_str).encode())
