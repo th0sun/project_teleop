@@ -289,6 +289,7 @@ class TeleopNode(Node):
         self.trajectory_recorder = TrajectoryRecorder(
             command_send_fn=self.sender.send,
             logger=self.get_logger(),
+            dashboard_send_fn=self.connection.send_dashboard_cmd,
             get_position_fn=self.feedback.get_current_position,
             waypoint_callback=self._playback_waypoint_callback,
         )

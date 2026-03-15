@@ -53,8 +53,10 @@ class TrajectoryRecorder:
     Parameters
     ----------
     command_send_fn : callable(str) -> bool
-        Function that sends a raw TCP command string to the robot
-        (e.g. ``sender.send``).
+        Sends a motion command to port 30003 (e.g. ``sender.send``).
+    dashboard_send_fn : callable(str) -> bool
+        Sends a dashboard command to port 29999 (e.g. ``connection.send_dashboard_cmd``).
+        Used for ``wait(ms)`` timing commands.
     logger
         ROS-compatible logger with .info / .warn / .error methods.
     get_position_fn : callable() -> np.ndarray | None, optional
@@ -65,9 +67,11 @@ class TrajectoryRecorder:
     """
 
     def __init__(self, command_send_fn: Callable, logger,
+                 dashboard_send_fn: Optional[Callable] = None,
                  get_position_fn: Optional[Callable] = None,
                  waypoint_callback: Optional[Callable] = None):
         self._send = command_send_fn
+        self._send_dash = dashboard_send_fn
         self._log  = logger
         self._get_pos = get_position_fn
         self._waypoint_cb = waypoint_callback
@@ -239,12 +243,14 @@ class TrajectoryRecorder:
         self._play_thread.start()
 
     def _play_worker(self):
-        """One-at-a-time sequencer: sends JointMovJ per waypoint and paces
-        by wall-clock to match recorded timestamps exactly.
+        """Batch sequencer: queues ALL JointMovJ + wait(dt) into the robot's
+        internal command queue at once, then fires graph callbacks at
+        wall-clock time in a polling loop.
 
-        CP=0 ensures the robot fully stops at each waypoint for deterministic
-        timing.  SpeedJ is computed with 25% headroom so the robot arrives
-        BEFORE the next waypoint's scheduled time.
+        Phase 1 — BATCH: push every waypoint as
+            JointMovJ(j1,j2,j3,j4, SpeedJ=100, AccJ=100, CP=100)
+            wait(dt_ms)   ← dashboard queue cmd, delays next motion
+        Phase 2 — GRAPH: fire waypoint_callback at exact wall-clock times
         """
         frames = self.loaded_frames
         n = len(frames)
@@ -252,12 +258,12 @@ class TrajectoryRecorder:
             return
 
         t0_traj = frames[0]["timeStamp"]
-        t_wall_start = time.perf_counter()
-        MG400_MAX_DPS = 300.0  # max joint speed (deg/s)
+        total_dur = frames[-1]["timeStamp"] - t0_traj
 
-        self._log.info(f"▶️  Preview start — {n} waypoints, "
-                       f"{frames[-1]['timeStamp'] - t0_traj:.1f}s")
+        self._log.info(f"▶️  Preview start — {n} waypoints, {total_dur:.1f}s")
 
+        # ── Phase 1: Batch ALL commands into robot queue ─────────────────
+        self._log.info(f"📤 Batching {n} JointMovJ + wait() into robot queue...")
         for i in range(n):
             if self._stop_flag.is_set():
                 break
@@ -265,38 +271,40 @@ class TrajectoryRecorder:
             fr = frames[i]
             j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
 
-            # ── Compute SpeedJ for this segment ──────────────────────────
-            if i < n - 1:
-                fr_next = frames[i + 1]
-                dt = max(fr_next["timeStamp"] - fr["timeStamp"], 0.02)
-                j_next = [fr_next["j1"], fr_next["j2"], fr_next["j3"], fr_next["j4"]]
-                max_delta = max(abs(j_next[k] - j[k]) for k in range(4))
-                required_dps = max_delta / dt
-                # 1.25x headroom so robot arrives BEFORE next timestamp
-                speed_pct = max(1, min(100, int(math.ceil(
-                    (required_dps / MG400_MAX_DPS) * 100 * 1.25))))
-            else:
-                speed_pct = 30  # gentle stop at final frame
-
-            # ── Send JointMovJ (CP=0 for deterministic stop) ─────────────
+            # JointMovJ at MAX speed with CP=100 for smooth blending
             cmd = (f"JointMovJ({j[0]:.4f},{j[1]:.4f},{j[2]:.4f},{j[3]:.4f},"
-                   f"SpeedJ={speed_pct},AccJ=100,CP=0)")
+                   f"SpeedJ=100,AccJ=100,CP=100)")
             self._send(cmd)
 
-            # ── Fire graph callback immediately ──────────────────────────
-            if self._waypoint_cb is not None:
-                try:
-                    self._waypoint_cb(np.radians(j))
-                except Exception:
-                    pass
+            # Insert wait(dt_ms) between waypoints (not after last)
+            if i < n - 1 and self._send_dash is not None:
+                dt_ms = int((frames[i + 1]["timeStamp"] - fr["timeStamp"]) * 1000)
+                dt_ms = max(1, dt_ms)
+                self._send_dash(f"wait({dt_ms})")
 
-            # ── Wait until wall-clock reaches the NEXT waypoint's time ───
-            if i < n - 1:
-                next_wall = t_wall_start + (frames[i + 1]["timeStamp"] - t0_traj)
-                while time.perf_counter() < next_wall:
-                    if self._stop_flag.is_set():
-                        break
-                    time.sleep(0.005)
+        batch_time = time.perf_counter()
+        self._log.info(f"📤 Queue sent ({n} cmds) in "
+                       f"{(batch_time - time.perf_counter() + 0.001)*1000:.0f}ms, "
+                       f"starting graph playback...")
+
+        # ── Phase 2: Fire graph callbacks at wall-clock time ─────────────
+        t_wall_start = time.perf_counter()
+        graph_idx = 0
+
+        while graph_idx < n and not self._stop_flag.is_set():
+            elapsed = time.perf_counter() - t_wall_start
+
+            while graph_idx < n and (frames[graph_idx]["timeStamp"] - t0_traj) <= elapsed:
+                fr = frames[graph_idx]
+                j = [fr["j1"], fr["j2"], fr["j3"], fr["j4"]]
+                if self._waypoint_cb is not None:
+                    try:
+                        self._waypoint_cb(np.radians(j))
+                    except Exception:
+                        pass
+                graph_idx += 1
+
+            time.sleep(0.008)  # ~125 Hz poll for smooth graph updates
 
         self.is_playing = False
         if self._stop_flag.is_set():
@@ -321,10 +329,15 @@ class TrajectoryRecorder:
             self._play_thread.join(timeout=2.0)
         self.is_playing = False
 
+        if was_playing:
+            # Flush robot's queued commands so it stops immediately
+            if self._send_dash is not None:
+                self._send_dash("ResetRobot()")
+                time.sleep(0.2)
+                self._send_dash("EnableRobot()")
+            self._log.info("⏹️  Playback stopped (queue flushed)")
         if was_recording:
             self._log.info("⏹️  Recording stopped")
-        if was_playing:
-            self._log.info("⏹️  Playback stopped")
 
         if go_home:
             self._go_home()
