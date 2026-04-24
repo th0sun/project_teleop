@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='th0sun',
     maintainer_email='m.hassunofficial@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='ROS2 Unity-like simulator node for Dobot MG400 teleoperation.',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',
