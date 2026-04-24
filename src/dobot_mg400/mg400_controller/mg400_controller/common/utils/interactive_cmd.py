@@ -47,7 +47,6 @@ class InteractiveCommandHandler:
         print("   's' = Emergency Stop")
         print("   'p' = Pause")
         print("   'u' = Continue (Unpause)")
-        print("   'hz <num>' = Set send frequency for Raw Data mode (e.g., 'hz 20')")
         print("   'q' = Quit")
         print()
     
@@ -72,22 +71,6 @@ class InteractiveCommandHandler:
                             self.logger.info(msg)
                     else:
                         self.logger.error(f"❌ Failed to send command: {robot_cmd}")
-                
-                elif cmd.startswith('hz'):
-                    try:
-                        parts = cmd.split()
-                        if len(parts) >= 2:
-                            new_hz = int(parts[1])
-                            if new_hz > 0:
-                                import mg400_controller.common.config.robot_config as cfg
-                                cfg.RAW_HZ = new_hz
-                                self.logger.info(f"⚙️ Raw Data Mode Hz set to: {new_hz} Hz")
-                            else:
-                                self.logger.warn("Hz must be > 0")
-                        else:
-                            self.logger.warn("Usage: hz <num>")
-                    except ValueError:
-                        self.logger.warn("Invalid Hz value. Must be an integer.")
                 
                 elif cmd:
                     self.logger.warn(f"❓ Unknown command: '{cmd}'")
