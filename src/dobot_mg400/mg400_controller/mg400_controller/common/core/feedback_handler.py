@@ -29,7 +29,10 @@ class FeedbackHandler:
         
         self.kinematics = KinematicsCalculator()
         self.current_position = np.zeros(4)  # Active joints only
+        self.target_position = np.zeros(4)
         self.last_valid_joints = np.zeros(4)
+        self.run_queued_cmd = 0
+        self.command_id = 0
         
         self.thread = None
     
@@ -42,6 +45,18 @@ class FeedbackHandler:
     def get_current_position(self):
         """ดึงตำแหน่งปัจจุบัน (thread-safe)"""
         return self.current_position.copy()
+
+    def get_target_position(self):
+        """ดึงตำแหน่งเป้าหมายใน queue ของหุ่น (thread-safe)"""
+        return self.target_position.copy()
+
+    def get_queue_backlog(self):
+        """ดึงระยะ backlog ระหว่าง QTarget และ QActual ของ 4 แกนหลัก"""
+        return float(np.max(np.abs(self.target_position - self.current_position)))
+
+    def get_run_queued_cmd(self):
+        """ดึงสถานะว่าหุ่นกำลัง execute motion queue อยู่หรือไม่"""
+        return int(getattr(self, 'run_queued_cmd', 0))
     
     def _run(self):
         """Main loop รับข้อมูล feedback"""
@@ -132,6 +147,13 @@ class FeedbackHandler:
             
             self.last_valid_joints = q_rad
             self.current_position = q_rad
+
+            # 1.5 Parse queue target and running-state feedback for backlog-aware gating.
+            OFFSET_JOINT_TARGET = 192
+            OFFSET_RUN_QUEUED = 1014
+            q_target_all = struct.unpack_from('<6d', data, OFFSET_JOINT_TARGET)
+            self.target_position = np.radians(q_target_all[0:4])
+            self.run_queued_cmd = data[OFFSET_RUN_QUEUED]
             
             # 2. Parse Robot Mode (Offset 24)
             OFFSET_ROBOT_MODE = 24

@@ -12,7 +12,6 @@
 """
 
 # ⚡ Speed & Acceleration Settings
-MAX_SPEED_DEG = 300.0  # Maximum joint speed (degrees/sec)
 ACC_VALUE = 100        # Acceleration value (0-100)
 CP_VALUE = 100         # Continuous Path value (smoothness: 0-100)
 
@@ -35,7 +34,8 @@ TARGET_CHANGE_THRESHOLD = 0.02   # rad (~1.1°) - Target ต้องเปล�
 # กำหนดค่าสำหรับ Dynamic Proximity
 DYNAMIC_PROXIMITY_BASE_RAD = 0.02    # rad (~1.1°) - ระยะพื้นฐานขั้นต่ำ
 DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำหรับคำนวณระยะเพิ่มตามความเร็ว
-RATE_FLOOR_SEC = 0.02                  # seconds (Not used by restored 24 Feb logic)
+QUEUE_BACKLOG_GATE_RAD = 0.01          # rad (~0.57°) - queue must nearly drain before sending next motion
+QUEUE_BUSY_ESCAPE_SEC = 0.30           # seconds - allow stuck recovery if queue state stays busy while motion stops
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection
@@ -55,6 +55,20 @@ RVIZ_TOPIC  = "/joint_states"     # ส่งสถานะไปแสดง�
 DEBUG_TOPIC = "/teleop/debug"     # Debug messages
 SAFETY_TOPIC = "/mg400/safety_status" # Safety status reporting
 HAPTIC_TOPIC = "/mg400/haptic_feedback" # Collision-based haptic feedback for VR
+ROS_PING_TOPIC = "/teleop/ros_ping"
+UNITY_PONG_TOPIC = "/teleop/unity_pong"
+PREDICTED_TARGET_TOPIC = "/teleop/predicted_target"
+SENT_COMMAND_TOPIC = "/teleop/sent_command"
+UNITY_XYZ_TOPIC = "/teleop/unity_xyz"
+PLAYBACK_UNITY_TOPIC = "/teleop/playback_unity"
+TRAJ_PREVIEW_TOPIC = "/teleop/traj_preview"
+TEACH_STATUS_TOPIC = "/unity/teach_status"
+TRAJECTORY_DATA_TOPIC = "/unity/trajectory_data"
+TOOL_ACTUAL_TOPIC = "/mg400/tool_vector_actual"
+TOOL_TARGET_TOPIC = "/mg400/tool_vector_target"
+FLANGE_ACTUAL_TOPIC = "/robot/flange_actual"
+TOOL_INDEX_TOPIC = "/robot/tool_index"
+DASHBOARD_CMD_TOPIC = "/robot/dashboard_cmd"
 SUCTION_TOPIC = "/vr/suction_cmd" # สั่งเปิด/ปิดหัวดูดจาก Unity (std_msgs/Bool)
 LIGHT_TOPIC = "/mg400/light_cmd"     # สั่งเปิด/ปิดไฟสัญญาณ (std_msgs/Int32MultiArray: [port, status])
 DO_STATUS_TOPIC = "/mg400/do_status" # รับสถานะของ Digital Output (std_msgs/Int64)

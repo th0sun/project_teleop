@@ -13,27 +13,25 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray, Int64, Int32
+from std_msgs.msg import String, Float64MultiArray, Int64, Int32
 import threading
 import numpy as np
 import time
 import datetime
-import csv
-import queue
 import json
 
 # Import configuration
 from mg400_controller.common.config.robot_config import (
-    CONTROL_MODE, 
     ENABLE_GET_ERROR,
     JOINT_LIMITS,
-    ELBOW_ANGLE_LIMIT,
-    LOGIC_MODE
+    ELBOW_ANGLE_LIMIT
 )
 from mg400_controller.common.config.motion_config import (
-    UNITY_TOPIC, RVIZ_TOPIC, DEBUG_TOPIC, SAFETY_TOPIC, HAPTIC_TOPIC, 
-    SUCTION_TOPIC, LIGHT_TOPIC, VACUUM_DO_PORT, BLOW_DO_PORT, 
-    SUCTION_ACTIVATION_THRESHOLD, SMART_SUCTION_ENABLED
+    UNITY_TOPIC,
+    VACUUM_DO_PORT,
+    BLOW_DO_PORT,
+    SUCTION_ACTIVATION_THRESHOLD,
+    SMART_SUCTION_ENABLED,
 )
 import mg400_controller.common.config.motion_config as motion_config
 
@@ -45,6 +43,7 @@ from mg400_controller.common.core.command_sender import CommandSender
 # Import logic modules
 from mg400_controller.common.logic.joint_validator import JointValidator
 from mg400_controller.common.logic.motion_planner import MotionPlanner
+from mg400_controller.common.logic.target_compensator import TargetLatencyCompensator
 
 # Import utilities
 from mg400_controller.common.utils.interactive_cmd import InteractiveCommandHandler
@@ -54,80 +53,15 @@ from mg400_controller.common.trajectory.trajectory_recorder import TrajectoryRec
 from mg400_controller.common.utils.teleop_logger import TeleopLogger
 from mg400_controller.common.logic.safety_monitor import SafetyMonitor
 from mg400_controller.common.logic.teleop_controller import TeleopController
-from mg400_controller.common.logic.target_predictor import TargetPredictor
 from mg400_controller.common.utils.latency_analyzer import LatencyAnalyzer
 from mg400_controller.common.utils.clock_calibrator import ClockCalibrator
-
-# =========================
-# === MODE SELECTION =====
-# =========================
-
-def select_control_mode():
-    """ให้ผู้ใช้เลือกโหมดควบคุม"""
-    print("\n" + "="*50)
-    print("🤖 MG400 VR Teleop Controller")
-    print("="*50)
-    print("\nSelect control mode:")
-    print("1 = JointMovJ (recommended - fast & accurate)")
-    print("2 = MovJ (joint space with Cartesian planning)")
-    print("3 = MovL (linear Cartesian motion)")
-    
-    mode_in = input("> ").strip()
-    
-    modes = {
-        "1": "jointmovj",
-        "2": "movj",
-        "3": "movl"
-    }
-    
-    selected = modes.get(mode_in, "jointmovj")
-    print(f"\n[INFO] Control Mode = {selected.upper()}")
-    
-    # Update config
-    import mg400_controller.common.config.robot_config as cfg
-    cfg.CONTROL_MODE = selected
-    
-    # ── 🧪 Experimental Logic Mode Selection (TEMPORARY) ──
-    print("\n" + "-"*50)
-    print("🧪 Select Teleop Logic Mode:")
-    print("0 = Default (current production logic)")
-    print("1 = M11_Stable  (เสถียรสุด ทนทานทุกแพตเทิร์น)")
-    print("2 = M14_Smooth  (ลื่นไหว ดีที่สุดสำหรับ circle/sine)")
-    print("3 = M15_Sharp   (คมกริบ ดีที่สุดสำหรับ square/zigzag)")
-    print("4 = M8_RawData  (ส่งข้อมูลดิบตามความถี่ ปรับ Hz ผ่าน Terminal ได้)")
-    print("5 = M16_AdaptCP  (LPF+FF+StepLimit+AdaptiveCP)")
-    print("6 = M17_CleanFF  (⭐ แนะนำ — 25Hz+LPF+FF+CP100 เส้นราบไม่สั่น ไม่มี lag spike)", flush=True)
-    print("-"*50)
-    
-    logic_in = input("Logic> ").strip()
-    
-    logic_modes = {
-        "0": "default",
-        "1": "m11",
-        "2": "m14",
-        "3": "m15",
-        "4": "m8_raw",
-        "5": "m16",
-        "6": "m17",
-    }
-    
-    selected_logic = logic_modes.get(logic_in, "default")
-    cfg.LOGIC_MODE = selected_logic
-    
-    if selected_logic == "m8_raw":
-        hz_in = input("Enter Raw Hz [1-50] (default 25): ").strip()
-        if hz_in.isdigit() and int(hz_in) > 0:
-            cfg.RAW_HZ = int(hz_in)
-        else:
-            cfg.RAW_HZ = 25
-        print(f"[INFO] Raw Frequency set to {cfg.RAW_HZ} Hz")
-    
-    logic_names = {"default": "Default (Production)", "m11": "M11_Stable",
-                   "m14": "M14_Smooth", "m15": "M15_Sharp", "m8_raw": f"M8_RawData ({cfg.RAW_HZ}Hz)",
-                   "m16": "M16_AdaptCP", "m17": "M17_CleanFF"}
-    print(f"[INFO] Logic Mode = {logic_names.get(selected_logic, selected_logic)}")
-    
-    return selected
+from mg400_controller.common.utils.mode_selection import select_control_mode
+from mg400_controller.common.utils.async_event_logger import AsyncEventLogger
+from mg400_controller.common.ros.teleop_interfaces import (
+    create_publishers,
+    create_subscriptions,
+    attach_unity_subscription,
+)
 
 # =========================
 # ===== MAIN NODE ========
@@ -146,25 +80,12 @@ class TeleopNode(Node):
         # 1. Initialize logic modules
         self.validator = JointValidator(JOINT_LIMITS, ELBOW_ANGLE_LIMIT, self.get_logger())
         self.planner = MotionPlanner(cfg.CONTROL_MODE, self.get_logger())
+        self.target_compensator = TargetLatencyCompensator(self.validator)
         
         # Teleop Controller (The Brain)
         self.controller = TeleopController(self.validator, self.planner, self.get_logger())
-        self.predictor = TargetPredictor(default_dt=0.02, prediction_horizon_sec=0.08, logger=self.get_logger())
-        
-        # 🧪 Experimental Logic (TEMPORARY — if LOGIC_MODE != "default")
-        # ⚠️ Experimental modes BYPASS TeleopController + MotionPlanner + TargetPredictor.
-        #    They receive raw validated targets and format commands directly.
-        self._experimental_strategy = None
-        if cfg.LOGIC_MODE != "default":
-            from mg400_controller.common.logic.experimental_logic import ExperimentalStrategy
-            self._experimental_strategy = ExperimentalStrategy(
-                cfg.LOGIC_MODE, cfg.CONTROL_MODE, self.get_logger()
-            )
-            self.get_logger().info(f"🧪 EXPERIMENTAL MODE: {self._experimental_strategy.mode_name} (bypasses Controller/Planner/Predictor)")
         
         self.latest_target = None
-        self.latest_raw_target = None  # Raw validated (no Kalman prediction)
-        self.current_cmd_target = np.zeros(4)
         
         # 1. Initialize logic modules
         # Import MotionConfig for thresholds and Analyzer
@@ -174,26 +95,12 @@ class TeleopNode(Node):
         self.clock_calibrator = ClockCalibrator(window_size=50) # Now estimates drift automatically
         
         # Level 3: RTT Heartbeat (ROS-side ping)
-        self.pub_heartbeat = self.create_publisher(Int64, "/teleop/ros_ping", 10)
-        self.sub_pong = self.create_subscription(String, "/teleop/unity_pong", self._unity_pong_callback, 10)
+        self.publishers = create_publishers(self)
         self.create_timer(1.0, self._publish_heartbeat) # 1Hz Ping
         
         # --- Analytics Logging (Async) ---
-        self.log_queue = queue.Queue()
         self.csv_filename = f"teleop_analytics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        self.csv_file = open(self.csv_filename, mode='w', newline='')
-        self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow([
-            'Timestamp_ROS', 'Timestamp_Unity', 
-            'Raw_J1', 'Raw_J2', 'Raw_J3', 'Raw_J4',
-            'Pred_J1', 'Pred_J2', 'Pred_J3', 'Pred_J4'
-        ])
-        
-        # Start Log Worker Thread
-        self.log_worker = threading.Thread(target=self._log_worker_loop, daemon=True)
-        self.log_worker.start()
-        
-        self.get_logger().info(f"📊 Logging analytics to: {self.csv_filename} (Async Thread Started)")
+        self.analytics_logger = None
         
         # State Tracking
         self.target_recv_time = 0.0  # T2
@@ -203,6 +110,19 @@ class TeleopNode(Node):
 
         # File Logger
         self.teleop_logger = TeleopLogger("~/project_teleop_ws/logs")
+        self.analytics_logger = AsyncEventLogger(
+            csv_path=self.csv_filename,
+            csv_header=[
+                'Timestamp_ROS', 'Timestamp_Unity',
+                'Raw_J1', 'Raw_J2', 'Raw_J3', 'Raw_J4',
+                'Pred_J1', 'Pred_J2', 'Pred_J3', 'Pred_J4',
+            ],
+            handlers={
+                'TELEOP_LATENCY': self.teleop_logger.log_latency_breakdown,
+                'TELEOP_PERF': self.teleop_logger.log_performance_metrics,
+            },
+        )
+        self.get_logger().info(f"📊 Logging analytics to: {self.csv_filename} (Async Thread Started)")
         self.get_logger().info(f" Logging to: {self.teleop_logger.log_dir}")
         
         # 2. Setup ROS Interfaces
@@ -213,29 +133,15 @@ class TeleopNode(Node):
         )
         
         # Subscriptions (Delayed UNITY to avoid race condition)
-        self.sub_unity = None
-        
-        self.pub_rviz = self.create_publisher(JointState, RVIZ_TOPIC, 10)
-        self.pub_debug = self.create_publisher(String, DEBUG_TOPIC, 10)
-        self.pub_safety = self.create_publisher(String, SAFETY_TOPIC, 10)
-        self.pub_do_status = self.create_publisher(Int64, motion_config.DO_STATUS_TOPIC, 10)
-        self.pub_robot_mode = self.create_publisher(Int32, motion_config.ROBOT_MODE_TOPIC, 10)
-        self.pub_error_status = self.create_publisher(Int32, motion_config.ERROR_STATUS_TOPIC, 10)
-        
-        # Tool Vector Publishers (XYZ Reading)
-        self.pub_tool_actual = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_actual", 10)
-        self.pub_tool_target = self.create_publisher(Float64MultiArray, "/mg400/tool_vector_target", 10)
-        self.pub_flange_actual = self.create_publisher(Float64MultiArray, "/robot/flange_actual", 10)
-        self.pub_tool_index = self.create_publisher(Int32, "/robot/tool_index", 10)
-        
-        # 📊 Graph Data Publishers (for monitor_gui.py visualization)
-        self.pub_predicted_target = self.create_publisher(JointState, "/teleop/predicted_target", 10)
-        self.pub_sent_command = self.create_publisher(JointState, "/teleop/sent_command", 10)
-        self.pub_unity_xyz = self.create_publisher(Float64MultiArray, "/teleop/unity_xyz", 10)
-        # Teach & Repeat playback publisher — feeds monitor graphs during playback
-        self.pub_playback_unity = self.create_publisher(JointState, "/teleop/playback_unity", 10)
-        # Full trajectory preview (published once at Preview start for background dots)
-        self.pub_traj_preview = self.create_publisher(String, "/teleop/traj_preview", 10)
+        self.subscriptions = create_subscriptions(
+            self,
+            unity_pong_callback=self._unity_pong_callback,
+            suction_callback=self._suction_callback,
+            light_callback=self._light_callback,
+            dashboard_cmd_callback=self._dashboard_cmd_callback,
+            teach_status_callback=self._teach_status_callback,
+            traj_data_callback=self._traj_data_callback,
+        )
         
         # Suction Cup Control (Smart Trigger)
         self.suction_state = False
@@ -243,20 +149,6 @@ class TeleopNode(Node):
         self.suction_requested_state = False
         self.suction_target_q = None
         self.last_do_status = 0 # For debugging changes
-        self.sub_suction = self.create_subscription(
-            Bool, SUCTION_TOPIC, self._suction_callback, 10
-        )
-        
-        # Light Control
-        self.sub_lights = self.create_subscription(
-            Int32MultiArray, LIGHT_TOPIC, self._light_callback, 10
-        )
-        
-        # Dashboard Command Control (From GUI)
-        self.sub_dashboard_cmd = self.create_subscription(
-            String, "/robot/dashboard_cmd", self._dashboard_cmd_callback, 10
-        )
-        
         # 3. Connect to Robot
         if not self.connection.connect():
             self.get_logger().error("Failed to connect to robot")
@@ -268,7 +160,7 @@ class TeleopNode(Node):
         # PASS FEEDBACK HANDLER TO SENDER FOR SYNC
         self.feedback = FeedbackHandler(
             self.connection,
-            self.pub_rviz,
+            self.publishers.rviz,
             self.get_clock(),
             self.get_logger(),
             self.stop_event
@@ -285,8 +177,7 @@ class TeleopNode(Node):
             self.get_logger().info("⚠️  ErrorHandler disabled (set ENABLE_GET_ERROR=True for real robot)")
         
         # Collision-based Haptic Feedback for Quest 3 VR
-        self.pub_haptic = self.create_publisher(String, HAPTIC_TOPIC, 10)
-        self.collision_haptic = CollisionHaptic(self.pub_haptic, self.get_logger())
+        self.collision_haptic = CollisionHaptic(self.publishers.haptic, self.get_logger())
         
         # Trajectory Recorder (teach-and-repeat sequencer)
         self.trajectory_recorder = TrajectoryRecorder(
@@ -298,12 +189,6 @@ class TeleopNode(Node):
             target_callback=self._playback_target_callback,
         )
 
-        # Teach & Repeat ROS topics
-        self.sub_teach_status = self.create_subscription(
-            String, "/unity/teach_status", self._teach_status_callback, 10)
-        self.sub_traj_data = self.create_subscription(
-            String, "/unity/trajectory_data", self._traj_data_callback, 10)
-        
         self.interactive = InteractiveCommandHandler(
             self.connection,
             self.get_logger(),
@@ -312,14 +197,16 @@ class TeleopNode(Node):
         
         
         # 5. Initialize Helpers
-        self.safety_monitor = SafetyMonitor(self.pub_safety, self.get_logger(), self.error_handler)
+        self.safety_monitor = SafetyMonitor(self.publishers.safety, self.get_logger(), self.error_handler)
         
         # 6. Start Threads
         self.feedback.start()
         
         # 5. Start Unity Subscriber (End of init to prevent race condition)
-        self.sub_unity = self.create_subscription(
-            JointState, UNITY_TOPIC, self._unity_callback, qos_profile
+        self.subscriptions.unity = attach_unity_subscription(
+            self,
+            self._unity_callback,
+            qos_profile,
         )
         
         self.get_logger().info("✅ Teleop Node fully initialized and listening.")
@@ -343,37 +230,11 @@ class TeleopNode(Node):
         self.get_logger().info(f"⏱️  Stuck Time Threshold: {motion_config.STUCK_TIME_THRESHOLD:.1f} s")
         self.get_logger().info(f"🚫 No Timeout - Pure Real-Time Control")
 
-    def _log_worker_loop(self):
-        """Background thread to handle disk I/O and non-critical logging"""
-        import queue
-        while not self.stop_event.is_set() or not self.log_queue.empty():
-            try:
-                # Get log item from queue (blocking with timeout)
-                try:
-                    log_data = self.log_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-
-                if log_data[0] == 'CSV':
-                    self.csv_writer.writerow(log_data[1])
-                    # Flush occasionally
-                    if self.log_queue.qsize() == 0:
-                        self.csv_file.flush()
-                elif log_data[0] == 'TELEOP_LATENCY':
-                    self.teleop_logger.log_latency_breakdown(*log_data[1])
-                elif log_data[0] == 'TELEOP_PERF':
-                    self.teleop_logger.log_performance_metrics(*log_data[1])
-                
-                self.log_queue.task_done()
-            except Exception as e:
-                # We don't use logger here as it might be dead or recursively called
-                print(f"Error in Log Worker: {e}")
-    
     def _publish_heartbeat(self):
         """Level 3: Send Ping to Unity to measure RTT"""
         msg = Int64()
         msg.data = int(self.get_clock().now().nanoseconds)
-        self.pub_heartbeat.publish(msg)
+        self.publishers.heartbeat.publish(msg)
 
     def _unity_pong_callback(self, msg):
         """
@@ -431,52 +292,30 @@ class TeleopNode(Node):
             # Level 2 & 3: Filtered Min-Window + Drift Compensation
             corrected_unity_time = self.clock_calibrator.calibrate(unity_send_time_sec, now_ros_sec)
             
-            # 3. Latency Compensation (replaces Kalman prediction)
-            # Use raw validated target directly — compensate by timing, not by
-            # projecting into the future.  Measure network latency and let the
-            # control loop send promptly instead of adding overshoot-prone prediction.
-            network_latency_sec = max(0.0, now_ros_sec - corrected_unity_time)
-            
-            # Simple velocity estimation for latency comp (EMA over last targets)
-            if not hasattr(self, '_prev_target_q'):
-                self._prev_target_q = q_safe.copy()
-                self._prev_target_t = corrected_unity_time
-                self._ema_target_vel = np.zeros(4)
-            
-            dt_target = corrected_unity_time - self._prev_target_t
-            if 0.002 < dt_target < 0.5:
-                raw_vel = (q_safe[:4] - self._prev_target_q[:4]) / dt_target
-                alpha = 0.3
-                self._ema_target_vel = alpha * raw_vel + (1.0 - alpha) * self._ema_target_vel
-            self._prev_target_q = q_safe.copy()
-            self._prev_target_t = corrected_unity_time
-            
-            # Apply latency compensation: shift target forward by measured latency
-            latency_comp_sec = min(network_latency_sec, 0.08)  # cap at 80ms
-            q_compensated = q_safe[:4] + self._ema_target_vel * latency_comp_sec
-            
-            # Re-validate compensated target
-            q_compensated_full = np.concatenate([q_compensated, q_safe[4:]])
-            q_compensated_safe, _ = self.validator.validate_and_clamp(q_compensated_full)
+            # 3. Latency compensation based on measured Unity-to-ROS timing.
+            q_compensated_safe = self.target_compensator.compensate(
+                q_safe,
+                corrected_unity_time,
+                now_ros_sec,
+            )
             
             # 📊 Publish Unity Input XYZ (FK of raw Unity joint angles, degrees)
             try:
                 unity_xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_safe))
                 xyz_msg = Float64MultiArray()
                 xyz_msg.data = unity_xyz.tolist()
-                self.pub_unity_xyz.publish(xyz_msg)
+                self.publishers.unity_xyz.publish(xyz_msg)
             except Exception:
                 pass
             
             # --- Log to CSV (Async) ---
-            self.log_queue.put(('CSV', [
+            self.analytics_logger.put('CSV', [
                 now_ros_sec, corrected_unity_time,
                 q_safe[0], q_safe[1], q_safe[2], q_safe[3],
                 q_compensated_safe[0], q_compensated_safe[1], q_compensated_safe[2], q_compensated_safe[3]
-            ]))
+            ])
                 
             # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
-            self.latest_raw_target = q_safe                  # Raw validated (no compensation)
             self.latest_target = q_compensated_safe          # Latency-compensated target
             self.target_recv_time = now_ros_sec          # T2: ROS receive time
             self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
@@ -584,7 +423,7 @@ class TeleopNode(Node):
                     "q": [[f["j1"], f["j2"], f["j3"], f["j4"]] for f in tr.loaded_frames]
                 }
                 pmsg = String(); pmsg.data = json.dumps(preview)
-                self.pub_traj_preview.publish(pmsg)
+                self.publishers.traj_preview.publish(pmsg)
             tr.start_preview()
         else:
             self.get_logger().warn(f"⚠️ Unknown teach status: {status}")
@@ -604,7 +443,7 @@ class TeleopNode(Node):
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.position = list(q_rad)
-        self.pub_sent_command.publish(js)
+        self.publishers.sent_command.publish(js)
 
     def _playback_target_callback(self, q_rad):
         """Called by TrajectoryRecorder at ~100Hz with the perfectly interpolated 
@@ -615,21 +454,21 @@ class TeleopNode(Node):
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.position = list(q_rad)
-        self.pub_playback_unity.publish(js)
+        self.publishers.playback_unity.publish(js)
         
         try:
             xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_rad))
             xyz_msg = Float64MultiArray()
             xyz_msg.data = xyz.tolist()
-            self.pub_unity_xyz.publish(xyz_msg)
+            self.publishers.unity_xyz.publish(xyz_msg)
         except Exception:
             pass
 
     def _high_precision_control_loop(self):
         """
         Runs the control loop in a dedicated thread to avoid ROS executor jitter.
-        Runs at 200Hz (5ms) so that experimental logic timers (e.g., 25Hz or 50Hz)
-        can trigger precisely when they are due without beat-frequency aliasing.
+        Runs at 200Hz (5ms) so queue-aware decisions can react quickly while
+        ROS callbacks stay responsive.
         """
         target_hz = 200.0
         period = 1.0 / target_hz
@@ -694,23 +533,23 @@ class TeleopNode(Node):
             
             msg_act = Float64MultiArray()
             msg_act.data = tool_act.tolist()
-            self.pub_tool_actual.publish(msg_act)
+            self.publishers.tool_actual.publish(msg_act)
             
             msg_tgt = Float64MultiArray()
             msg_tgt.data = tool_tgt.tolist()
-            self.pub_tool_target.publish(msg_tgt)
+            self.publishers.tool_target.publish(msg_tgt)
             
             # Flange actual = FK of actual joints (no tool offset)
             flange = self.feedback.get_flange_actual()
             msg_flange = Float64MultiArray()
             msg_flange.data = flange.tolist()
-            self.pub_flange_actual.publish(msg_flange)
+            self.publishers.flange_actual.publish(msg_flange)
             
             # === PUBLISH DO STATUS (Bitmask) ===
             do_status = self.feedback.get_do_status()
             do_msg = Int64()
             do_msg.data = int(do_status)
-            self.pub_do_status.publish(do_msg)
+            self.publishers.do_status.publish(do_msg)
             
             if do_status != self.last_do_status:
                 self.get_logger().info(f"📣 DO STATUS CHANGED: {bin(do_status)} (Hex: {hex(do_status)})")
@@ -720,12 +559,12 @@ class TeleopNode(Node):
             current_mode = int(self.feedback.get_robot_mode())
             mode_msg = Int32()
             mode_msg.data = current_mode
-            self.pub_robot_mode.publish(mode_msg)
+            self.publishers.robot_mode.publish(mode_msg)
             
             err_info = self.feedback.get_error_status()
             err_msg = Int32()
             err_msg.data = int(err_info['error_status'])
-            self.pub_error_status.publish(err_msg)
+            self.publishers.error_status.publish(err_msg)
 
             # === PERIODIC TOOL INDEX QUERY (every ~5s at 50Hz = 250 cycles) ===
             self._tool_query_counter += 1
@@ -740,7 +579,7 @@ class TeleopNode(Node):
                             tidx = int(m.group(1))
                             ti_msg = Int32()
                             ti_msg.data = tidx
-                            self.pub_tool_index.publish(ti_msg)
+                            self.publishers.tool_index.publish(ti_msg)
                 except Exception:
                     pass
 
@@ -783,14 +622,14 @@ class TeleopNode(Node):
                         self.get_logger().info(report)
                         
                         # CSV Log (Async)
-                        self.log_queue.put(('TELEOP_LATENCY', [
+                        self.analytics_logger.put('TELEOP_LATENCY', [
                             now_abs, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
                             metrics['network_ms'], metrics['decision_ms'], metrics['command_ms'],
                             metrics['response_ms'], metrics['motion_time_ms'], metrics['execution_ms'],
                             metrics['e2e_ms'],
                             metrics['target'], metrics['final_q'],
                             metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
-                        ]))
+                        ])
             
             # === SKIP TELEOP COMMANDS DURING PLAYBACK / POST-STOP HOMING ===
             if is_blocked:
@@ -800,39 +639,18 @@ class TeleopNode(Node):
             # 🧠 TELEOP CONTROLLER DECISION
             # ---------------------------------------------------------
             
-            # 🧪 EXPERIMENTAL PATH (only active if user selected m11/m14/m15/m8_raw)
-            # Uses RAW validated target — bypasses Kalman predictor entirely
-            # Pass 'now' (perf_counter) for high-precision loop timing, not 'now_abs'
-            if self._experimental_strategy is not None:
-                should_send, cmd_str, q_safe, exp_reason = self._experimental_strategy.process(
-                    self.latest_raw_target, q_current, now, robot_mode=current_mode
-                )
-                if should_send and cmd_str:
-                    t3_cmd_send = time.time()  # Absolute time for Latency Analyzer T3
-                    if self.sender.send(cmd_str):
-                        self.latency_analyzer.start_tracking(
-                            self.unity_send_time, self.target_recv_time,
-                            t3_cmd_send, q_safe, current_q=q_current
-                        )
-                        self.get_logger().info(f"🧪 {exp_reason}")
-                        
-                        sent_msg = JointState()
-                        sent_msg.header.stamp = self.get_clock().now().to_msg()
-                        sent_msg.position = q_safe.tolist()
-                        self.pub_sent_command.publish(sent_msg)
-                        
-                        # Keep default controller state updated for monitors
-                        self.controller.last_sent_target = q_safe
-                        self.controller.last_sent_time = t3_cmd_send
-                return  # ← Skip default logic entirely when in experimental mode
-            
             # ──────────────────────────────────────────────────────
-            # DEFAULT PRODUCTION LOGIC (unchanged)
+            # DEFAULT QUEUE-AWARE PRODUCTION LOGIC
             # ──────────────────────────────────────────────────────
+            queue_backlog_rad = self.feedback.get_queue_backlog()
+            run_queued_cmd = self.feedback.get_run_queued_cmd()
             
             should_send, send_reason = self.controller.should_send_command(
                 self.latest_target, 
-                q_current
+                q_current,
+                now=now,
+                queue_backlog_rad=queue_backlog_rad,
+                run_queued_cmd=run_queued_cmd,
             )
             
             if should_send:
@@ -847,8 +665,6 @@ class TeleopNode(Node):
 
                 # 2. Timing Stats
                 t3_cmd_send = time.time()
-                decision_delay_ms = (t3_cmd_send - self.target_recv_time) * 1000
-                
                 # 3. Send to Robot
                 if self.sender.send(cmd_str):
                     # Start Tracking (T1-T3)
@@ -862,7 +678,8 @@ class TeleopNode(Node):
                                     
                     # File Log (CSV)
                     dist_to_last = np.max(np.abs(q_current - q_safe))
-                    time_since_last = t3_cmd_send - self.controller.last_sent_time
+                    sent_mono = time.perf_counter()
+                    time_since_last = sent_mono - self.controller.last_sent_time
                     velocity_mag = np.max(self.controller.robot_velocity)
                     
                     robot_status = self.feedback.get_error_status()
@@ -873,7 +690,8 @@ class TeleopNode(Node):
                         self.controller.last_sent_target, self.controller.last_sent_time,
                         self.controller.robot_velocity,
                         robot_mode=robot_status['robot_mode'],
-                        error_status=robot_status['error_status']
+                        error_status=robot_status['error_status'],
+                        time_since_last=time_since_last,
                     )
                     self.get_logger().info(msg)
                     
@@ -881,36 +699,32 @@ class TeleopNode(Node):
                     sent_msg = JointState()
                     sent_msg.header.stamp = self.get_clock().now().to_msg()
                     sent_msg.position = q_safe.tolist()
-                    self.pub_sent_command.publish(sent_msg)
+                    self.publishers.sent_command.publish(sent_msg)
                     
                     # Update State in Controller
-                    self.controller.last_sent_target = q_safe
-                    self.controller.last_sent_time = t3_cmd_send
+                    self.controller.mark_command_sent(q_safe, sent_mono)
                     
-                    self.log_queue.put(('TELEOP_PERF', [
+                    self.analytics_logger.put('TELEOP_PERF', [
                         now, self.unity_send_time, self.target_recv_time, t3_cmd_send,
                         0.0, 0.0, # Network delay calculated in analyzer report
                         q_current, self.latest_target,
                         dist_to_last, send_reason,
                         time_since_last, velocity_mag, self.controller.robot_velocity
-                    ]))
+                    ])
     
     def shutdown(self):
         """ปิดทุกอย่างอย่างเรียบร้อย"""
         self.get_logger().info("Shutting down...")
         self.stop_event.set()
         
-        # Wait for log queue to drain
-        if hasattr(self, 'log_worker'):
-            self.log_worker.join(timeout=1.0)
+        if self.analytics_logger:
+            self.analytics_logger.close(timeout=1.0)
         
         self.feedback.stop()
         self.interactive.stop()
         self.connection.disconnect()
         
-        if hasattr(self, 'csv_file') and not self.csv_file.closed:
-            self.csv_file.close()
-            self.get_logger().info(f"📊 Closed analytics log: {self.csv_filename}")
+        self.get_logger().info(f"📊 Closed analytics log: {self.csv_filename}")
 
     def execute_motion_command(self, q_target):
         """
@@ -935,12 +749,9 @@ class TeleopNode(Node):
         
         if success:
              self.get_logger().info("✅ Motion Complete (Synced)")
+             self.controller.mark_command_sent(q_safe, time.perf_counter())
         else:
              self.get_logger().warn("⚠️ Motion Time-out or Failed")
-            
-        # Update State
-        self.controller.last_sent_target = q_safe
-
     
     def _publish_haptic_feedback(self):
         """

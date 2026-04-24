@@ -172,7 +172,19 @@ class LatencyAnalyzer:
         
         return metrics, report
 
-    def format_sent_report(self, should_send, reason, q_current, target, prev_target, prev_time, velocity, robot_mode=None, error_status=None):
+    def format_sent_report(
+        self,
+        should_send,
+        reason,
+        q_current,
+        target,
+        prev_target,
+        prev_time,
+        velocity,
+        robot_mode=None,
+        error_status=None,
+        time_since_last=None,
+    ):
         """Generate CLI report for SEND event"""
         if not should_send: return ""
         
@@ -184,7 +196,8 @@ class LatencyAnalyzer:
         
         err_deg = np.degrees(target - q_current)
         dist_to_last = np.linalg.norm(q_current - prev_target) if prev_target is not None else 0.0
-        time_since_last = (now - prev_time) if prev_time > 0 else 0.0
+        if time_since_last is None:
+            time_since_last = (now - prev_time) if prev_time > 0 else 0.0
         velocity_mag = np.linalg.norm(velocity)
         velocity_deg = np.degrees(velocity)
         

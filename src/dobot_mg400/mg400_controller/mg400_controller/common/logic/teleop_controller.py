@@ -15,13 +15,12 @@ Responsibilities:
 Extracted from vr_teleop_node.py for Clean Architecture.
 """
 
-import time
 import numpy as np
-import math
 from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import ( PROXIMITY_THRESHOLD,
      STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
-    TARGET_CHANGE_THRESHOLD, MAX_SPEED_DEG, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC
+    TARGET_CHANGE_THRESHOLD, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC,
+    QUEUE_BACKLOG_GATE_RAD, QUEUE_BUSY_ESCAPE_SEC
 )
 
 class TeleopController:
@@ -51,6 +50,7 @@ class TeleopController:
         self.stuck_start_time = 0.0
         self.is_stuck = False
         self.last_stuck_check_time = 0.0
+        self.queue_busy_start_time = 0.0
         
     def update_robot_state(self, q_current, now):
         """
@@ -88,28 +88,48 @@ class TeleopController:
             
         return False
 
-    def should_send_command(self, latest_target, q_current):
+    def should_send_command(self, latest_target, q_current, now=None, queue_backlog_rad=None, run_queued_cmd=None):
         """
         The Core Decision Logic: Should we send a command?
+
+        Args:
+            latest_target: newest target joint position in radians
+            q_current: current robot joint position in radians
+            now: monotonic timestamp from the control loop (perf_counter)
         
         Returns:
             (bool, str): (Should Send?, Reason)
         """
-        now = time.time()
+        if now is None:
+            now = self.last_robot_time
         
         # 0. First Run Check
         if self.last_sent_target is None:
-            self.last_sent_target = latest_target
-            self.last_sent_time = now
             return True, "Init"
-            
-        # 1. Update State
-        self.update_robot_state(q_current, now)
+
+        # 1. Read the velocity already computed by the control loop using the
+        # same monotonic clock source.
         velocity_mag = np.max(self.robot_velocity)
         
         # Calculate Distances
         dist_to_last = np.max(np.abs(q_current - self.last_sent_target))
         change_in_target = np.max(np.abs(latest_target - self.last_sent_target))
+
+        if queue_backlog_rad is not None and run_queued_cmd is not None:
+            queue_busy = bool(run_queued_cmd and queue_backlog_rad > QUEUE_BACKLOG_GATE_RAD)
+            if queue_busy:
+                if self.queue_busy_start_time == 0:
+                    self.queue_busy_start_time = now
+
+                queue_busy_duration = now - self.queue_busy_start_time
+                can_check_stuck = (
+                    velocity_mag < STUCK_VELOCITY_THRESHOLD and
+                    queue_busy_duration > QUEUE_BUSY_ESCAPE_SEC
+                )
+                if not can_check_stuck:
+                    return False, f"QueueBusy_Backlog{queue_backlog_rad:.3f}"
+            else:
+                self.queue_busy_start_time = 0
         
         # ========================================================
         # 🚀 STRATEGY A: VELOCITY-BASED DYNAMIC PROXIMITY
@@ -121,9 +141,6 @@ class TeleopController:
         
         if dist_to_last < trigger_distance:
             if change_in_target > SPATIAL_THRESHOLD:
-                self.last_sent_target = latest_target
-                self.last_sent_time = now
-                self.stuck_start_time = 0 # Reset stuck timer
                 return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
         
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
@@ -139,12 +156,16 @@ class TeleopController:
                 # Only trigger if user REALLY moved their hand OR if the robot is far from the current target
                 if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > PROXIMITY_THRESHOLD:
                     self.logger.warn(f"⚠️ Stuck Detected (Vel: {velocity_mag:.4f}) - Retriggering")
-                    self.last_sent_target = latest_target
-                    self.last_sent_time = now
-                    self.stuck_start_time = 0
                     return True, f"Stuck_Vel{velocity_mag:.4f}_Delta{change_in_target:.3f}"
 
         return False, "Wait"
+
+    def mark_command_sent(self, q_target, sent_time):
+        """Update controller state only after the motion socket accepts the command."""
+        self.last_sent_target = q_target.copy()
+        self.last_sent_time = sent_time
+        self.stuck_start_time = 0
+        self.queue_busy_start_time = 0
 
     def format_command_string(self, q_target, q_current=None, force_send=False):
         """

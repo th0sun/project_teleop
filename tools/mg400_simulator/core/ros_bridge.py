@@ -7,6 +7,7 @@ Gracefully degrades to a no-op when rclpy is not found.
 
 import json
 import threading
+import math
 from typing import Optional, Callable, List
 
 from core.unity_tcp_bridge import UnityTcpBridge
@@ -14,6 +15,7 @@ from core.unity_tcp_bridge import UnityTcpBridge
 try:
     import rclpy
     from rclpy.node import Node
+    from sensor_msgs.msg import JointState
     from std_msgs.msg import Float64MultiArray, String
     _ROS_AVAILABLE = True
 except ImportError:
@@ -101,15 +103,21 @@ class ROSBridge:
             self.on_connection_change(False)
 
     def publish_joint_cmd(self, joints_deg: List[float]):
-        """Publish joint command to /unity/joint_cmd (degrees)."""
+        """Publish joint command to /unity/joint_cmd.
+
+        The simulator UI stores joint angles in degrees, while the teleop node
+        consumes sensor_msgs/JointState positions in radians.
+        """
         if self._tcp_bridge:
             self._tcp_bridge.publish_joint_cmd(joints_deg)
             return
             
         if not self.connected or self._node is None:
             return
-        msg = Float64MultiArray()
-        msg.data = [float(j) for j in joints_deg]
+        msg = JointState()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.name = ['joint1', 'joint2', 'joint3', 'joint4']
+        msg.position = [math.radians(float(j)) for j in joints_deg[:4]]
         self._node.pub_joint_cmd.publish(msg)
 
     def publish_dashboard_cmd(self, cmd: str):
@@ -183,7 +191,7 @@ if _ROS_AVAILABLE:
             self.on_status_update = on_status_update
 
             # Publishers
-            self.pub_joint_cmd    = self.create_publisher(Float64MultiArray,
+            self.pub_joint_cmd    = self.create_publisher(JointState,
                                         '/unity/joint_cmd', 10)
             self.pub_dashboard    = self.create_publisher(String,
                                         '/teleop/dashboard_cmd', 10)
