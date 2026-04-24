@@ -2,6 +2,10 @@
 
 This repository contains a ROS2 workspace for teleoperation and simulation of the Dobot MG400 robot.
 
+Before going deeper into the runtime details, read the project objective:
+
+- `docs/project_objective.md`
+
 The workspace integrates:
 - ROS2 control and description packages for MG400
 - Unity–ROS communication via ROS-TCP-Endpoint
@@ -107,6 +111,7 @@ Unity-like GUI / VR
 
 See:
 
+- `docs/project_objective.md`
 - `docs/teleop_command_logic.md`
 - `docs/setup_guide.md`
 - `docs/controller_continuation_guide.md`

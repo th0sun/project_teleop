@@ -920,7 +920,7 @@ Regression coverage:
 To compare `default`-path behavior before trying the real robot, a small
 benchmark harness was added at:
 
-- `tools/queue_logic_mock_benchmark.py`
+- `docs/report_materials/archive/queue_logic_mock_benchmark.py`
 
 This script runs against the upstream Dockerized `MG400_Mock` submodule and
 drives a shared target trajectory for three strategy families:

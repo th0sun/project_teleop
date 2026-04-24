@@ -177,7 +177,7 @@ Key files to cite:
 - `teleop_controller.py`: queue-aware decision logic
 - `motion_config.py`: thresholds and control constants
 - `motion_planner.py`: command string formatting
-- `tools/queue_logic_mock_benchmark.py`: mock benchmark script
+- `docs/report_materials/archive/queue_logic_mock_benchmark.py`: mock benchmark script
 
 Important implementation decisions:
 

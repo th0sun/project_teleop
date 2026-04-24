@@ -577,7 +577,7 @@ Docker setup before trying the real robot.
 
 ### What Was Added
 
-- `tools/queue_logic_mock_benchmark.py`
+- `docs/report_materials/archive/queue_logic_mock_benchmark.py`
 
 This benchmark replays one scripted joint trajectory and compares:
 

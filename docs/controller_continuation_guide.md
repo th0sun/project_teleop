@@ -6,6 +6,10 @@ MG400 teleoperation runtime.
 It is intentionally operational: where the production path lives now, what to
 touch first, what not to break, and how to validate changes quickly.
 
+Read this first for project intent:
+
+- `docs/project_objective.md`
+
 ## Scope
 
 This guide covers:
