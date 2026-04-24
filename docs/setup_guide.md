@@ -22,7 +22,7 @@ python3 -m venv venv_monitor
 source venv_monitor/bin/activate
 
 # Install PyQt6 and dependencies
-pip install PyQt6 matplotlib numpy rclpy
+pip install -r project_teleop/tools/monitor/requirements.txt
 
 # Install ROS 2 Humble for macOS (optional, for simulation mode only)
 brew install ros-humble
@@ -42,7 +42,7 @@ echo 'export ROS_DOMAIN_ID=0' >> ~/.zshrc
 cd ~/project_teleop_ws/project_teleop
 source ../venv_monitor/bin/activate
 export ROS_DOMAIN_ID=0
-python3 mg400_monitor_pyqt6.py
+python3 tools/monitor/mg400_monitor_pyqt6.py
 ```
 
 ### 4. GUI Features
@@ -156,7 +156,7 @@ RosPort: 10000
 ```
 
 ### 3. Topics Configuration
-ตาม `ros_interface.json`:
+ตาม `tools/monitor/ros_interface.json`:
 - **Publish:** `/unity/joint_cmd`, `/vr/suction_cmd`
 - **Subscribe:** `/joint_states`, `/mg400/tool_vector_actual`
 
@@ -219,7 +219,7 @@ ros2 run mg400_controller vr_teleop_node
 cd ~/project_teleop_ws/project_teleop
 source ../venv_monitor/bin/activate
 export ROS_DOMAIN_ID=0
-python3 mg400_monitor_pyqt6.py
+python3 tools/monitor/mg400_monitor_pyqt6.py
 ```
 
 ### Step 3: Unity (Simulator)
@@ -333,7 +333,7 @@ htop
 1. ตรวจสอบ log files ใน `~/project_teleop_ws/session_logs/`
 2. ตรวจสอบ ROS 2 topics ด้วย `ros2 topic list`
 3. ตรวจสอบ network connectivity
-4. ดูที่ `mg400_monitor_pyqt6.py` สำหรับ GUI issues
+4. ดูที่ `tools/monitor/mg400_monitor_pyqt6.py` สำหรับ GUI issues
 5. ดูที่ `vr_teleop_node.py` สำหรับ ROS node issues
 
 **Happy Teleoping! 🚀**

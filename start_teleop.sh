@@ -25,21 +25,26 @@ fi
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
     echo "🐳 Starting Docker Mock..."
     export ROBOT_IP="172.10.0.2"
-    docker compose -f MG400_Mock/docker/docker-compose.yml up -d
+    MOCK_COMPOSE="MG400_Mock/docker-compose.yml"
+    if [ ! -f "$MOCK_COMPOSE" ]; then
+        MOCK_COMPOSE="MG400_Mock/docker/docker-compose.yml"
+    fi
+    docker compose -f "$MOCK_COMPOSE" up -d
 else
     echo "🌍 Connecting to Real Robot..."
     export ROBOT_IP="192.168.1.6"
 fi
 
 # 3. Commands
-WS="$HOME/project_teleop_ws"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="$(cd "$REPO_DIR/.." && pwd)"
 _src="cd $WS && source install/setup.bash"
 _ip="export ROBOT_IP=$ROBOT_IP"
 
 # note: exec bash ทำให้ pane ค้างไว้หลัง node หยุด, กด ↑ Enter รันใหม่ได้
 CMD_NODE="$_ip && $_src && ros2 run mg400_controller vr_teleop_node; exec bash"
 CMD_RVIZ="$_src && ros2 launch mg400_bringup main.launch.py; exec bash"
-CMD_BRIDGE="$_src && python3 $WS/monitor_bridge.py; exec bash"
+CMD_BRIDGE="$_src && python3 $REPO_DIR/tools/monitor/monitor_bridge.py; exec bash"
 
 if [ "$MODE" = "3" ] || [ "$MODE" = "4" ]; then
     CMD_EXTRA="$_src && ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0; exec bash"
@@ -84,7 +89,7 @@ tmux send-keys -t "$PANE_D" "$CMD_BRIDGE" Enter
 # Pane E: Docker Logs (Mock mode เท่านั้น)
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
     PANE_E=$(tmux split-window -v -t "$PANE_A" -l 8 -P -F '#{pane_id}')
-    tmux send-keys -t "$PANE_E" "docker compose -f MG400_Mock/docker/docker-compose.yml logs -f; exec bash" Enter
+    tmux send-keys -t "$PANE_E" "docker compose -f \"$MOCK_COMPOSE\" logs -f; exec bash" Enter
 fi
 
 # 5. Settings
@@ -109,7 +114,7 @@ if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
     echo ""
     read -p "🛑 Stop Docker Mock? (y/N): " STOP_DOCKER
     if [[ "$STOP_DOCKER" =~ ^[Yy]$ ]]; then
-        docker compose -f MG400_Mock/docker/docker-compose.yml down
+        docker compose -f "$MOCK_COMPOSE" down
         echo "🐳 Docker stopped."
     fi
 fi

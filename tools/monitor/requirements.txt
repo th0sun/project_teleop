@@ -1,0 +1,13 @@
+# Requirements for MG400 Monitor (PyQt6) on macOS
+# Install with: pip install -r tools/monitor/requirements.txt
+
+PyQt6>=6.5.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+
+# ROS 2 (install via RoboStack conda, NOT pip):
+#   conda install -c robostack-staging ros-humble-desktop
+#   conda install -c robostack-staging ros-humble-sensor-msgs ros-humble-std-msgs
+#
+# Or if using colcon workspace on macOS:
+#   source /opt/ros/humble/setup.bash
