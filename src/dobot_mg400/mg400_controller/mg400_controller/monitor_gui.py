@@ -11,19 +11,11 @@ and Auto-Session Logging.
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
 import tkinter as tk
 from tkinter import ttk
 import threading
-import numpy as np
 import sys
 import time
-import math
-import csv
-import datetime
-import os
-from collections import deque
 
 # --- Matplotlib ---
 import matplotlib
@@ -32,33 +24,29 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.animation as animation
 
-# Import Configuration
-from mg400_controller.common.config.motion_config import (
-    RVIZ_TOPIC, UNITY_TOPIC,
-    VACUUM_DO_PORT, BLOW_DO_PORT,
-    GREEN_LIGHT_DO_PORT, YELLOW_LIGHT_DO_PORT, RED_LIGHT_DO_PORT,
-    SUCTION_TOPIC, LIGHT_TOPIC, DO_STATUS_TOPIC, ROBOT_MODE_TOPIC, ERROR_STATUS_TOPIC
-)
-from std_msgs.msg import Bool, Int32MultiArray, Int64, Int32
+from std_msgs.msg import Bool, Int32MultiArray
 from mg400_controller.common.utils.error_decoder import RobotErrorDecoder
-
-# Configuration
-ACTUAL_TOPIC_NAME   = "/joint_states"
-TARGET_TOPIC_NAME   = UNITY_TOPIC
-TOOL_ACTUAL_TOPIC   = "/mg400/tool_vector_actual"
-TOOL_TARGET_TOPIC   = "/mg400/tool_vector_target"
-PREDICTED_TOPIC     = "/teleop/predicted_target"
-SENT_CMD_TOPIC      = "/teleop/sent_command"
-UNITY_XYZ_TOPIC     = "/teleop/unity_xyz"
-FLANGE_ACTUAL_TOPIC = "/robot/flange_actual"
-TOOL_INDEX_TOPIC    = "/robot/tool_index"
-
-# Colors for Lights
-COLOR_OFF = "#d0d0d0"
-COLOR_GREEN = "#2ecc71"
-COLOR_YELLOW = "#f1c40f"
-COLOR_RED = "#e74c3c"
-COLOR_VACUUM = "#3498db"
+from mg400_controller.common.utils.monitor_logging import (
+    SessionLogger,
+    ManualMonitorLogger,
+)
+from mg400_controller.common.monitor.control_panel_state import (
+    COLOR_OFF,
+    LIGHT_SPECS,
+    MonitorControlPanelState,
+)
+from mg400_controller.common.monitor.execution_metrics import ExecutionMonitor
+from mg400_controller.common.monitor.joint_graph_buffer import JointGraphBuffer
+from mg400_controller.common.monitor.presentation_state import (
+    build_cartesian_display_state,
+    build_joint_display_rows,
+    build_status_display_state,
+)
+from mg400_controller.common.ros.monitor_interfaces import (
+    MonitorTelemetryState,
+    create_control_publishers,
+    create_monitor_subscriptions,
+)
 
 # Graph colors
 COL_UNITY = "#ff7f0e"      # Matplotlib standard orange
@@ -78,265 +66,23 @@ FONT_STATS = ("Helvetica", 11)
 GRAPH_WINDOW_SEC = 10.0   # Rolling window (seconds)
 GRAPH_UPDATE_HZ = 20      # Update rate
 
-# Motion Detection Thresholds
-START_THRESHOLD = 2.0  # degrees (Start timer if error > this)
-STOP_THRESHOLD = 0.5   # degrees (Stop timer if error < this)
-
-class SessionLogger:
-    """
-    Auto-starts on GUI launch.
-    Creates ~/project_teleop_ws/session_logs/YYYYMMDD_HHMMSS/ per session.
-    Logs all 4 joint streams (Unity, Predicted, Sent, Actual) + XYZ to CSV.
-    Timestamp = real wall-clock time (UTC+7 or system local time), accurate.
-    Runs on a precise background thread independent of Tkinter GUI.
-    """
-    BASE_DIR = os.path.expanduser("~/project_teleop_ws/session_logs")
-
-    def __init__(self, node, gui):
-        self.node = node
-        self.gui = gui
-        # Create session folder e.g. session_logs/20260225_032100/
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.session_dir = os.path.join(self.BASE_DIR, ts)
-        os.makedirs(self.session_dir, exist_ok=True)
-
-        # --- joints_tracking.csv ---
-        jt_path = os.path.join(self.session_dir, "joints_tracking.csv")
-        self._jt_file = open(jt_path, 'w', newline='')
-        self._jt_writer = csv.writer(self._jt_file)
-        self._jt_writer.writerow([
-            "timestamp", "elapsed_s",
-            "unity_j1", "unity_j2", "unity_j3", "unity_j4",
-            "predicted_j1", "predicted_j2", "predicted_j3", "predicted_j4",
-            "sent_j1", "sent_j2", "sent_j3", "sent_j4",
-            "actual_j1", "actual_j2", "actual_j3", "actual_j4",
-            "robot_mode", "error_status",
-        ])
-
-        xyz_path = os.path.join(self.session_dir, "xyz_tracking.csv")
-        self._xyz_file = open(xyz_path, 'w', newline='')
-        self._xyz_writer = csv.writer(self._xyz_file)
-        self._xyz_writer.writerow([
-            "timestamp", "elapsed_s",
-            "target_x", "target_y", "target_z",
-            "actual_x", "actual_y", "actual_z",
-            "diff_x", "diff_y", "diff_z",
-        ])
-
-        self._start_time = time.time()
-        self._lock = threading.Lock()
-        self._log_flush_counter = 0
-        self._is_running = True
-        print(f"[SessionLogger] Logging to: {self.session_dir}")
-
-        # Start precise background thread for 20Hz logging
-        self._log_thread = threading.Thread(target=self._logging_loop, daemon=True)
-        self._log_thread.start()
-
-    def _logging_loop(self):
-        target_hz = 20.0
-        period = 1.0 / target_hz
-        next_time = time.perf_counter() + period
-
-        while self._is_running:
-            try:
-                unity   = list(self.node.latest_raw_unity_joints)
-                predicted = list(self.node.latest_predicted_joints)
-                sent    = list(self.node.latest_sent_joints)
-                actual  = list(self.node.latest_actual_joints)
-
-                xyz_tgt = self.node.latest_unity_xyz[:3] if any(v != 0 for v in self.node.latest_unity_xyz) \
-                          else self.node.latest_tool_target[:3]
-                xyz_act = list(self.node.latest_tool_actual[:3])
-
-                robot_mode = self.node.latest_robot_mode
-                error_status = self.node.latest_error_status
-
-                self._log_joints(unity, predicted, sent, actual, robot_mode, error_status)
-                self._log_xyz(xyz_tgt, xyz_act)
-
-                self._log_flush_counter += 1
-                if self._log_flush_counter >= 100:
-                    self.flush()
-                    self._log_flush_counter = 0
-            except Exception as e:
-                print(f"[SessionLogger] Error in logging loop: {e}")
-
-            now = time.perf_counter()
-            sleep_time = next_time - now
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-            next_time += period
-            # If severely behind (>2 periods), resync to now to avoid burst catch-up
-            if time.perf_counter() > next_time + period:
-                next_time = time.perf_counter() + period
-
-
-    def _log_joints(self, unity, predicted, sent, actual, robot_mode, error_status):
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        elapsed = round(time.time() - self._start_time, 3)
-        row = [ts, elapsed] + \
-              [round(v, 4) for v in unity] + \
-              [round(v, 4) for v in predicted] + \
-              [round(v, 4) for v in sent] + \
-              [round(v, 4) for v in actual] + \
-              [robot_mode, error_status]
-        with self._lock:
-            self._jt_writer.writerow(row)
-
-    def _log_xyz(self, target, actual):
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        elapsed = round(time.time() - self._start_time, 3)
-        diff = [round(actual[i] - target[i], 3) for i in range(3)]
-        row = [ts, elapsed] + \
-              [round(v, 3) for v in target] + \
-              [round(v, 3) for v in actual] + diff
-        with self._lock:
-            self._xyz_writer.writerow(row)
-
-    def flush(self):
-        with self._lock:
-            self._jt_file.flush()
-            self._xyz_file.flush()
-
-    def close(self):
-        self._is_running = False
-        if hasattr(self, '_log_thread'):
-            self._log_thread.join(timeout=1.0)
-        with self._lock:
-            self._jt_file.close()
-            self._xyz_file.close()
-
-
-class ExecutionMonitor:
-    def __init__(self):
-        self.state = "IDLE" # IDLE, MOVING, ARRIVED
-        self.start_time = 0.0
-        self.end_time = 0.0
-        self.last_duration = 0.0
-        self.durations = []
-        
-    def update(self, total_error):
-        now = time.time()
-        if self.state == "IDLE" or self.state == "ARRIVED":
-            if total_error > START_THRESHOLD:
-                self.state = "MOVING"
-                self.start_time = now
-                return "STARTED"
-        elif self.state == "MOVING":
-            if total_error < STOP_THRESHOLD:
-                self.state = "ARRIVED"
-                self.end_time = now
-                self.last_duration = self.end_time - self.start_time
-                self.durations.append(self.last_duration)
-                return "FINISHED"
-        return self.state
-
-    def get_stats(self):
-        if not self.durations:
-            return 0.0, 0.0, 0.0
-        return np.mean(self.durations), np.min(self.durations), np.max(self.durations)
-
 
 class JointMonitorNode(Node):
     def __init__(self):
         super().__init__('mg400_joint_monitor')
-        
-        # Publishers for Controls
-        self.pub_suction = self.create_publisher(Bool, SUCTION_TOPIC, 10)
-        self.pub_light = self.create_publisher(Int32MultiArray, LIGHT_TOPIC, 10)
-        
-        # Joint variables
-        self.latest_actual_joints = [0.0, 0.0, 0.0, 0.0]
-        self.latest_target_joints = [0.0, 0.0, 0.0, 0.0]
-        self.latest_predicted_joints = [0.0, 0.0, 0.0, 0.0]
-        self.latest_sent_joints = [0.0, 0.0, 0.0, 0.0]
-        self.sent_fresh = [False, False, False, False]
-        self.latest_raw_unity_joints = [0.0, 0.0, 0.0, 0.0]
-        self.latest_tool_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.latest_tool_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.latest_unity_xyz   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of Unity input
-        self.latest_flange_actual = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # FK of actual joints (no tool offset)
-        self.latest_tool_index = -1  # active tool index from GetTool()
-        self.latest_do_status = 0
-        self.latest_robot_mode = 0
-        self.latest_error_status = 0
-        self.last_target_time = 0.0
-        self.last_actual_time = 0.0
-
-        # Subscriptions
-        self.sub_actual = self.create_subscription(JointState, ACTUAL_TOPIC_NAME, self.listener_callback_actual, 10)
-        self.sub_target = self.create_subscription(JointState, TARGET_TOPIC_NAME, self.listener_callback_target, 10)
-        self.sub_predicted = self.create_subscription(JointState, PREDICTED_TOPIC, self.listener_callback_predicted, 10)
-        self.sub_sent = self.create_subscription(JointState, SENT_CMD_TOPIC, self.listener_callback_sent, 10)
-        self.sub_raw_unity = self.create_subscription(JointState, UNITY_TOPIC, self.listener_callback_raw_unity, 10)
-        self.sub_tool_actual = self.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, self.listener_callback_tool_actual, 10)
-        self.sub_tool_target = self.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, self.listener_callback_tool_target, 10)
-        self.sub_unity_xyz = self.create_subscription(Float64MultiArray, UNITY_XYZ_TOPIC, self.listener_callback_unity_xyz, 10)
-        self.sub_flange_actual = self.create_subscription(Float64MultiArray, FLANGE_ACTUAL_TOPIC, self.listener_callback_flange_actual, 10)
-        self.sub_tool_index = self.create_subscription(Int32, TOOL_INDEX_TOPIC, self.listener_callback_tool_index, 10)
-        self.sub_do_status = self.create_subscription(Int64, DO_STATUS_TOPIC, self.listener_callback_do_status, 10)
-        self.sub_robot_mode = self.create_subscription(Int32, ROBOT_MODE_TOPIC, self.listener_callback_robot_mode, 10)
-        self.sub_error_status = self.create_subscription(Int32, ERROR_STATUS_TOPIC, self.listener_callback_error_status, 10)
+        self.control_publishers = create_control_publishers(self)
+        self.telemetry = MonitorTelemetryState()
+        self.subscriptions = create_monitor_subscriptions(self, self.telemetry)
 
     def request_suction(self, state):
         msg = Bool()
         msg.data = state
-        self.pub_suction.publish(msg)
+        self.control_publishers.suction.publish(msg)
 
     def request_light(self, port, state):
         msg = Int32MultiArray()
         msg.data = [port, int(state)]
-        self.pub_light.publish(msg)
-
-    def listener_callback_actual(self, msg):
-        if len(msg.position) >= 9:
-            q_rad = [msg.position[0], msg.position[1], msg.position[3], msg.position[8]]
-            self.latest_actual_joints = list(np.degrees(q_rad))
-            self.last_actual_time = time.time()
-
-    def listener_callback_target(self, msg):
-        if len(msg.position) >= 4:
-            self.latest_target_joints = list(np.degrees(msg.position[:4]))
-            self.last_target_time = time.time()
-
-    def listener_callback_raw_unity(self, msg):
-        if len(msg.position) >= 4:
-            self.latest_raw_unity_joints = list(np.degrees(msg.position[:4]))
-
-    def listener_callback_predicted(self, msg):
-        if len(msg.position) >= 4:
-            self.latest_predicted_joints = list(np.degrees(msg.position[:4]))
-
-    def listener_callback_sent(self, msg):
-        if len(msg.position) >= 4:
-            self.latest_sent_joints = list(np.degrees(msg.position[:4]))
-            self.sent_fresh = [True, True, True, True]
-            
-    def listener_callback_tool_actual(self, msg):
-        if len(msg.data) >= 6: self.latest_tool_actual = list(msg.data)
-            
-    def listener_callback_tool_target(self, msg):
-        if len(msg.data) >= 6: self.latest_tool_target = list(msg.data)
-
-    def listener_callback_unity_xyz(self, msg):
-        if len(msg.data) >= 6: self.latest_unity_xyz = list(msg.data)
-
-    def listener_callback_flange_actual(self, msg):
-        if len(msg.data) >= 6: self.latest_flange_actual = list(msg.data)
-
-    def listener_callback_tool_index(self, msg):
-        self.latest_tool_index = int(msg.data)
-
-    def listener_callback_do_status(self, msg):
-        self.latest_do_status = int(msg.data)
-        
-    def listener_callback_robot_mode(self, msg):
-        self.latest_robot_mode = int(msg.data)
-        
-    def listener_callback_error_status(self, msg):
-        self.latest_error_status = int(msg.data)
+        self.control_publishers.light.publish(msg)
 
 
 class MonitorGUI:
@@ -344,12 +90,11 @@ class MonitorGUI:
         self.root = root
         self.node = node
         self.monitor = ExecutionMonitor()
-        
-        # 🛡️ Sync Lockout
-        self.lockout = {}
+        self.control_panel = MonitorControlPanelState()
         
         self.root.title("MG400 Extended Monitor")
         self.root.configure(bg="#1a1a2e")
+        self.manual_logger = ManualMonitorLogger()
 
         # ===== MAIN LAYOUT =====
         # Left panel: existing controls + tables
@@ -477,22 +222,21 @@ class MonitorGUI:
         suction_row = ttk.Frame(control_frame)
         suction_row.pack(fill=tk.X, pady=5)
         ttk.Label(suction_row, text="Suction:", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        self.suction_state = False
-        self.btn_suction = tk.Button(suction_row, text="OFF", font=FONT_VALUE, width=10, bg=COLOR_OFF, command=self.toggle_suction)
+        self.btn_suction = tk.Button(suction_row, text="OFF", font=FONT_VALUE, width=10, command=self.toggle_suction)
         self.btn_suction.pack(side=tk.LEFT, padx=5)
 
         light_row = ttk.Frame(control_frame)
         light_row.pack(fill=tk.X, pady=10)
         ttk.Label(light_row, text="Lights:", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        
-        self.light_states = { "GREEN": False, "YELLOW": False, "RED": False }
         self.btns_light = {}
-        
-        for name, port, color in [("GREEN", GREEN_LIGHT_DO_PORT, COLOR_GREEN), ("YELLOW", YELLOW_LIGHT_DO_PORT, COLOR_YELLOW), ("RED", RED_LIGHT_DO_PORT, COLOR_RED)]:
+
+        for name, _, _ in LIGHT_SPECS:
             btn = tk.Button(light_row, text=name, font=("Helvetica", 10, "bold"), width=8, bg=COLOR_OFF, 
-                            command=lambda n=name, p=port, c=color: self.toggle_light(n, p, c))
+                            command=lambda n=name: self.toggle_light(n))
             btn.pack(side=tk.LEFT, padx=2)
             self.btns_light[name] = btn
+
+        self._apply_control_panel_sync(self.control_panel.build_initial_sync())
 
         ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
 
@@ -571,19 +315,10 @@ class MonitorGUI:
         joint_labels = ["J1 (°)", "J2 (°)", "J3 (°)", "J4 (°)"]
         self.axes = []
         self.graph_lines = []  # list of (unity_line, pred_line, sent_line, actual_line) per joint
-        
-        # Rolling time axis (relative time in seconds)
-        max_points = int(GRAPH_WINDOW_SEC * 50)  # 50Hz max data rate => 500 pts
-        self.time_buffer = deque(maxlen=max_points)
-        self.unity_buffers = [deque(maxlen=max_points) for _ in range(4)]
-        self.pred_buffers = [deque(maxlen=max_points) for _ in range(4)]
-        self.sent_buffers = [deque(maxlen=max_points) for _ in range(4)]
-        self.actual_buffers = [deque(maxlen=max_points) for _ in range(4)]
-        self.last_sent_values = [0.0] * 4  # Hold-last for staircase sent line
-        self.graph_start_time = time.time()
+        self.graph_buffer = JointGraphBuffer(window_sec=GRAPH_WINDOW_SEC)
         
         # ✅ Auto-start precise session logger
-        self.session_logger = SessionLogger(self.node, self)
+        self.session_logger = SessionLogger(self._build_session_snapshot)
         
         for i in range(4):
             ax = self.fig.add_subplot(4, 1, i + 1)
@@ -623,36 +358,13 @@ class MonitorGUI:
 
     def _update_graphs(self, frame):
         """Called by matplotlib animation to refresh graph lines."""
-        now = time.time()
-        rel_t = now - self.graph_start_time
-        
-        # Push new samples into buffers
-        self.time_buffer.append(rel_t)
-        for i in range(4):
-            self.unity_buffers[i].append(self.node.latest_target_joints[i])
-            self.pred_buffers[i].append(self.node.latest_predicted_joints[i])
-            
-            # For "Sent" commands, we only want to plot dots exactly when a command was sent.
-            # If no new command was sent, append NaN so no dot is drawn.
-            if self.node.sent_fresh[i]:
-                self.sent_buffers[i].append(self.node.latest_sent_joints[i])
-                self.node.sent_fresh[i] = False
-            else:
-                self.sent_buffers[i].append(np.nan)
-                
-            self.actual_buffers[i].append(self.node.latest_actual_joints[i])
-
-        t_arr = np.array(self.time_buffer)
+        rel_t = self.graph_buffer.append_telemetry(self.node.telemetry)
         
         all_lines = []
         for i in range(4):
             l_unity, l_pred, l_sent, l_actual = self.graph_lines[i]
             ax = self.axes[i]
-            
-            u = np.array(self.unity_buffers[i])
-            p = np.array(self.pred_buffers[i])
-            s = np.array(self.sent_buffers[i])
-            a = np.array(self.actual_buffers[i])
+            t_arr, u, p, s, a = self.graph_buffer.get_joint_arrays(i)
             
             l_unity.set_data(t_arr, u)
             l_pred.set_data(t_arr, p)
@@ -660,130 +372,86 @@ class MonitorGUI:
             l_actual.set_data(t_arr, a)
             
             # Auto-scale axes
-            ax.set_xlim(max(0, rel_t - GRAPH_WINDOW_SEC), rel_t + 0.5)
+            ax.set_xlim(*self.graph_buffer.get_x_limits(rel_t))
             
             if len(a) > 0:
-                all_vals = np.concatenate([u, p, s, a])
-                # Use nanmin/nanmax because 's' (sent) contains np.nan
-                mn, mx = np.nanmin(all_vals), np.nanmax(all_vals)
-                if not np.isnan(mn) and not np.isnan(mx):
-                    pad = max(2.0, (mx - mn) * 0.15)
-                    ax.set_ylim(mn - pad, mx + pad)
+                limits = self.graph_buffer.get_y_limits(u, p, s, a)
+                if limits is not None:
+                    ax.set_ylim(*limits)
             
             all_lines.extend([l_unity, l_pred, l_sent, l_actual])
         
         return all_lines
 
     def toggle_suction(self):
-        self.suction_state = not self.suction_state
-        self.node.request_suction(self.suction_state)
-        self.lockout[VACUUM_DO_PORT] = time.time() + 2.0
-        if self.suction_state:
-            self.btn_suction.config(text="VACUUM (WAIT)", bg="orange", fg="white")
-        else:
-            self.btn_suction.config(text="OFF (WAIT)", bg="orange", fg="black")
+        update = self.control_panel.toggle_suction()
+        self.node.request_suction(update.state)
+        self._apply_button_display(self.btn_suction, update.display)
 
-    def toggle_light(self, name, port, color):
-        self.light_states[name] = not self.light_states[name]
-        status = self.light_states[name]
-        self.node.request_light(port, status)
-        self.lockout[port] = time.time() + 2.0
-        self.btns_light[name].config(bg="orange", text=f"{name}...")
+    def toggle_light(self, name):
+        update = self.control_panel.toggle_light(name)
+        self.node.request_light(update.port, update.state)
+        self._apply_button_display(self.btns_light[name], update.display)
 
     def toggle_logging(self):
-        self.is_logging = not self.is_logging
-        if self.is_logging:
+        if not self.manual_logger.is_active:
             self.btn_log.config(text="⏹ Stop Logging", bg="yellow")
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.fn_target = f"teleop_target_{timestamp}.csv"
-            self.fn_actual = f"teleop_actual_{timestamp}.csv"
-            with open(self.fn_target, 'w', newline='') as f:
-                csv.writer(f).writerow(["Time", "X", "Y", "Z", "Reach", "J1", "J2", "J3", "J4", "DiffTotal"])
-            with open(self.fn_actual, 'w', newline='') as f:
-                csv.writer(f).writerow(["Time", "X", "Y", "Z", "Reach", "J1", "J2", "J3", "J4"])
-            self.log_start_time = time.time()
-            self.node.get_logger().info(f"Started manual logging to {self.fn_target}")
+            self.manual_logger.start_session()
+            self.node.get_logger().info(f"Started manual logging to {self.manual_logger.target_path}")
         else:
+            self.manual_logger.stop_session()
             self.btn_log.config(text="▶ Start Logging", bg="#f0f0f0")
             self.node.get_logger().info("Stopped manual logging.")
 
+    def _build_session_snapshot(self):
+        return self.node.telemetry.build_session_snapshot()
+
+    def _apply_button_display(self, button, display):
+        button.config(text=display.text, bg=display.bg, fg=display.fg)
+
+    def _apply_control_panel_sync(self, sync):
+        if sync.suction is not None:
+            self._apply_button_display(self.btn_suction, sync.suction)
+        for name, display in sync.lights.items():
+            self._apply_button_display(self.btns_light[name], display)
+
     def update_gui(self):
         # Get latest data
-        tgt = self.node.latest_target_joints
-        act = self.node.latest_actual_joints
+        telemetry = self.node.telemetry
+        tgt = telemetry.latest_target_joints
+        act = telemetry.latest_actual_joints
+        joint_rows, total_diff = build_joint_display_rows(tgt, act)
+        cartesian_state = build_cartesian_display_state(telemetry)
+        status_state = build_status_display_state(telemetry, self.error_decoder)
         
         # --- Update Joint Data ---
-        total_diff = 0.0
-        for i in range(4):
-            self.vars_target[i].set(f"{tgt[i]:.2f}")
-            self.vars_actual[i].set(f"{act[i]:.2f}")
-            diff = act[i] - tgt[i]
-            self.vars_diff[i].set(f"{diff:+.2f}")
-            total_diff += abs(diff)
-            if abs(diff) > 2.0:
-                self.lbls_diff[i].configure(foreground="red")
-            elif abs(diff) > 0.5:
-                self.lbls_diff[i].configure(foreground="orange")
-            else:
-                self.lbls_diff[i].configure(foreground="green")
+        for i, row in enumerate(joint_rows):
+            self.vars_target[i].set(row["target"])
+            self.vars_actual[i].set(row["actual"])
+            self.vars_diff[i].set(row["diff"])
+            self.lbls_diff[i].configure(foreground=row["color"])
 
         # --- Update System Info ---
-        mode = self.node.latest_robot_mode
-        error = self.node.latest_error_status
-        mode_names = {1: "INIT", 4: "DISABLED", 5: "ENABLE", 6: "DRAG", 7: "RUN", 9: "ERROR", 11: "COLLISION"}
-        mode_str = mode_names.get(mode, str(mode))
-        
-        # Color coding for mode
-        mode_color = "red" if mode == 9 or mode == 11 else "black"
-        self.var_mode.set(f"🤖 MODE: {mode_str}")
-        
-        if error != 0:
-            desc, _, _ = self.error_decoder.decode_error(error)
-            err_text = desc if desc else "Unknown Error"
-            self.var_error.set(f"❌ ERR {error:02X}: {err_text}")
-            self.lbl_error.configure(fg="red")
-        else:
-            self.var_error.set("✅ ERR: 00 (Clear)")
-            self.lbl_error.configure(fg="gray")
+        self.var_mode.set(status_state["mode_text"])
+        self.var_error.set(status_state["error_text"])
+        self.lbl_error.configure(fg=status_state["error_color"])
         
         # --- Update Button States (DO Status Sync) ---
-        do_status = self.node.latest_do_status
-        now = time.time()
-        
-        if now > self.lockout.get(VACUUM_DO_PORT, 0):
-            actual_suction = bool((do_status >> (VACUUM_DO_PORT - 1)) & 1)
-            self.suction_state = actual_suction
-            if self.suction_state:
-                self.btn_suction.config(text="VACUUM", bg=COLOR_VACUUM, fg="white")
-            else:
-                self.btn_suction.config(text="OFF", bg=COLOR_OFF, fg="black")
-        
-        for name, port, color in [("GREEN", GREEN_LIGHT_DO_PORT, COLOR_GREEN), ("YELLOW", YELLOW_LIGHT_DO_PORT, COLOR_YELLOW), ("RED", RED_LIGHT_DO_PORT, COLOR_RED)]:
-            if now > self.lockout.get(port, 0):
-                actual_light = bool((do_status >> (port - 1)) & 1)
-                self.light_states[name] = actual_light
-                bg_color = color if actual_light else COLOR_OFF
-                fg_color = "white" if actual_light else "black"
-                self.btns_light[name].config(bg=bg_color, fg=fg_color, text=name)
+        do_status = telemetry.latest_do_status
+        self._apply_control_panel_sync(self.control_panel.sync_from_do_status(do_status))
 
         # --- Update Cartesian Data ---
-        xyz_unity  = self.node.latest_unity_xyz[:3]       # FK of Unity input joints (orange)
-        xyz_flange = self.node.latest_flange_actual[:3]    # FK of actual joints, no tool offset (blue)
-        xyz_tcp    = self.node.latest_tool_actual[:3]       # firmware TCP with tool offset (green)
+        xyz_unity = cartesian_state["unity_xyz"]
+        xyz_flange = cartesian_state["flange_xyz"]
+        xyz_tcp = cartesian_state["tcp_xyz"]
         for i in range(3):
             self.vars_xyz_tgt[i].set(f"{xyz_unity[i]:.1f}")
             self.vars_xyz_flange[i].set(f"{xyz_flange[i]:.1f}")
             self.vars_xyz_act[i].set(f"{xyz_tcp[i]:.1f}")
-            # Tool offset = TCP - Flange (live, no preconfig needed)
-            tool_delta = xyz_tcp[i] - xyz_flange[i]
-            self.vars_xyz_tool[i].set(f"{tool_delta:+.1f}")
+            self.vars_xyz_tool[i].set(f"{cartesian_state['tool_delta'][i]:+.1f}")
 
         # Tool index label
-        tidx = self.node.latest_tool_index
-        if tidx >= 0:
-            self.var_tool_index.set(f"Tool {tidx}")
-        else:
-            self.var_tool_index.set("— (querying...)")
+        self.var_tool_index.set(cartesian_state["tool_index_text"])
 
         # --- Execution Monitor ---
         status = self.monitor.update(total_diff)
@@ -805,25 +473,17 @@ class MonitorGUI:
         self.var_stats.set(f"Avg: {avg_t:.2f}s | Min: {min_t:.2f}s | Max: {max_t:.2f}s | Count: {len(self.monitor.durations)}")
 
         # --- Latency ---
-        now = time.time()
-        time_since_target = now - self.node.last_target_time
-        time_since_actual = now - self.node.last_actual_time
-        if self.node.last_target_time == 0:
-            self.var_latency.set("Status: No Target Received")
-        else:
-            self.var_latency.set(f"Cmd Age: {time_since_target*1000:.0f}ms | Feed Age: {time_since_actual*1000:.0f}ms")
-            
-        self.var_do_hex.set(f"DO: 0x{self.node.latest_do_status:04X} | Bits: {bin(self.node.latest_do_status)}")
+        self.var_latency.set(status_state["latency_text"])
+        self.var_do_hex.set(status_state["do_hex_text"])
             
         # --- CSV Logging ---
-        if self.is_logging:
-            t = time.time() - self.log_start_time
-            reach_tgt = math.sqrt(xyz_tgt[0]**2 + xyz_tgt[1]**2)
-            with open(self.fn_target, 'a', newline='') as f:
-                csv.writer(f).writerow([f"{t:.3f}", f"{xyz_tgt[0]:.3f}", f"{xyz_tgt[1]:.3f}", f"{xyz_tgt[2]:.3f}", f"{reach_tgt:.3f}", f"{tgt[0]:.3f}", f"{tgt[1]:.3f}", f"{tgt[2]:.3f}", f"{tgt[3]:.3f}", f"{total_diff:.3f}"])
-            reach_act = math.sqrt(xyz_act[0]**2 + xyz_act[1]**2)
-            with open(self.fn_actual, 'a', newline='') as f:
-                csv.writer(f).writerow([f"{t:.3f}", f"{xyz_act[0]:.3f}", f"{xyz_act[1]:.3f}", f"{xyz_act[2]:.3f}", f"{reach_act:.3f}", f"{act[0]:.3f}", f"{act[1]:.3f}", f"{act[2]:.3f}", f"{act[3]:.3f}"])
+        self.manual_logger.log_sample(
+            target_xyz=xyz_unity,
+            actual_xyz=xyz_tcp,
+            target_joints=tgt,
+            actual_joints=act,
+            total_diff=total_diff,
+        )
 
         # ✅ Session Logger runs in its own background thread internally
 
@@ -850,6 +510,10 @@ def main():
         try:
             gui.session_logger.close()
             print("[SessionLogger] Log closed.")
+        except Exception:
+            pass
+        try:
+            gui.manual_logger.stop_session()
         except Exception:
             pass
         node.destroy_node()
