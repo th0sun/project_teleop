@@ -67,6 +67,11 @@ The next phase should focus on:
 3. separating robot-neutral teaching logic from robot-specific adapters
 4. treating MG400 as the first adapter, not the whole system definition
 
+Useful kickoff files for that phase:
+
+- `docs/ai_handoffs/next_phase_architecture_brief.md`
+- `docs/skills/multi_robot_architecture/SKILL.md`
+
 ## Short Decision Rule
 
 If a proposed change mostly improves tidiness inside the current MG400 runtime,
