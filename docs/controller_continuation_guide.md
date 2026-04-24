@@ -9,6 +9,7 @@ touch first, what not to break, and how to validate changes quickly.
 Read this first for project intent:
 
 - `docs/project_objective.md`
+- `docs/current_refactor_status.md`
 
 ## Scope
 

@@ -5,6 +5,7 @@ This repository contains a ROS2 workspace for teleoperation and simulation of th
 Before going deeper into the runtime details, read the project objective:
 
 - `docs/project_objective.md`
+- `docs/current_refactor_status.md`
 
 The workspace integrates:
 - ROS2 control and description packages for MG400
@@ -112,6 +113,7 @@ Unity-like GUI / VR
 See:
 
 - `docs/project_objective.md`
+- `docs/current_refactor_status.md`
 - `docs/teleop_command_logic.md`
 - `docs/setup_guide.md`
 - `docs/controller_continuation_guide.md`
