@@ -711,6 +711,12 @@ line-count reduction in `vr_teleop_node.py`.
   `MonitorControlPanelState` in `common/monitor/control_panel_state.py`.
 - monitor logging now goes through `SessionLogger` and
   `ManualMonitorLogger` in `common/utils/monitor_logging.py`.
+- Teach & Repeat playback start alignment now goes through small reusable
+  helpers inside `TrajectoryRecorder`, including go-to-start command
+  formatting, wait-until-near-target polling, and playback-complete checks.
+- `TrajectoryRecorder` now also accepts injected `traj_dir`, `time_fn`, and
+  `sleep_fn` so playback behavior can be unit-tested without touching the
+  default filesystem path.
 - the old monitor manual logging path also had a GUI-level bug where
   `update_gui()` referenced `xyz_tgt` and `xyz_act`; the new reusable logger API
   now receives the correct Cartesian values explicitly.
@@ -723,6 +729,7 @@ line-count reduction in `vr_teleop_node.py`.
 Validation commands that passed:
 
 ```bash
+PYTHONPATH=src/dobot_mg400/mg400_controller python3 -m unittest src/dobot_mg400/mg400_controller/test/test_trajectory_recorder.py
 PYTHONPATH=src/dobot_mg400/mg400_controller python3 -m unittest src/dobot_mg400/mg400_controller/test/test_monitor_control_panel.py
 PYTHONPATH=src/dobot_mg400/mg400_controller python3 -m unittest src/dobot_mg400/mg400_controller/test/test_monitor_presentation_state.py
 PYTHONPATH=src/dobot_mg400/mg400_controller python3 -m unittest src/dobot_mg400/mg400_controller/test/test_monitor_logging.py
@@ -733,5 +740,6 @@ PYTHONPATH=src/dobot_mg400/mg400_controller python3 -m unittest src/dobot_mg400/
 PYTHONPATH=src/dobot_mg400/mg400_controller python3 -m unittest src/dobot_mg400/mg400_controller/test/test_async_event_logger.py src/dobot_mg400/mg400_controller/test/test_queue_aware_logic.py
 python3 -m py_compile src/dobot_mg400/mg400_controller/mg400_controller/vr_teleop_node.py src/dobot_mg400/mg400_controller/mg400_controller/common/logic/target_compensator.py src/dobot_mg400/mg400_controller/mg400_controller/common/utils/async_event_logger.py src/dobot_mg400/mg400_controller/mg400_controller/common/utils/mode_selection.py
 python3 -m py_compile src/dobot_mg400/mg400_controller/mg400_controller/vr_teleop_node.py src/dobot_mg400/mg400_controller/mg400_controller/monitor_gui.py src/dobot_mg400/mg400_controller/mg400_controller/common/config/motion_config.py
+python3 -m py_compile src/dobot_mg400/mg400_controller/mg400_controller/common/trajectory/trajectory_recorder.py
 python3 -m py_compile src/dobot_mg400/mg400_controller/mg400_controller/monitor_gui.py src/dobot_mg400/mg400_controller/mg400_controller/common/utils/monitor_logging.py src/dobot_mg400/mg400_controller/mg400_controller/common/ros/monitor_interfaces.py src/dobot_mg400/mg400_controller/mg400_controller/common/ros/teleop_interfaces.py src/dobot_mg400/mg400_controller/mg400_controller/common/monitor/control_panel_state.py src/dobot_mg400/mg400_controller/mg400_controller/common/monitor/execution_metrics.py src/dobot_mg400/mg400_controller/mg400_controller/common/monitor/joint_graph_buffer.py src/dobot_mg400/mg400_controller/mg400_controller/common/monitor/presentation_state.py
 ```

@@ -45,6 +45,20 @@ TRAJ_DIR = os.path.expanduser("~/project_teleop_ws/trajectories")
 RECORD_MIN_DT    = 0.10   # seconds — max ~10 Hz recording rate
 RECORD_MIN_DELTA = 0.5    # degrees — minimum joint movement to store a frame
 
+# ── Playback / arrival thresholds ────────────────────────────────────────────
+PREVIEW_START_SPEEDJ = 20
+PREVIEW_START_ACCJ = 50
+PREVIEW_START_CP = 0
+PREVIEW_STREAM_SPEEDJ = 100
+PREVIEW_STREAM_CP = 20
+PREVIEW_START_TIMEOUT_SEC = 6.0
+PREVIEW_START_TOLERANCE_DEG = 3.0
+PREVIEW_FINAL_TOLERANCE_DEG = 2.0
+PREVIEW_FINAL_EXTRA_TIMEOUT_SEC = 2.0
+PREVIEW_ABSOLUTE_TIMEOUT_SEC = 10.0
+PREVIEW_POLL_SEC = 0.01
+PREVIEW_WAIT_POLL_SEC = 0.05
+
 
 class TrajectoryRecorder:
     """
@@ -70,13 +84,19 @@ class TrajectoryRecorder:
                  dashboard_send_fn: Optional[Callable] = None,
                  get_position_fn: Optional[Callable] = None,
                  waypoint_callback: Optional[Callable] = None,
-                 target_callback: Optional[Callable] = None):
+                 target_callback: Optional[Callable] = None,
+                 traj_dir: Optional[str] = None,
+                 time_fn: Optional[Callable] = None,
+                 sleep_fn: Optional[Callable] = None):
         self._send = command_send_fn
         self._send_dash = dashboard_send_fn
         self._log  = logger
         self._get_pos = get_position_fn
         self._waypoint_cb = waypoint_callback
         self._target_cb = target_callback
+        self._traj_dir = TRAJ_DIR if traj_dir is None else traj_dir
+        self._time_fn = time.time if time_fn is None else time_fn
+        self._sleep_fn = time.sleep if sleep_fn is None else sleep_fn
 
         # ── State ────────────────────────────────────────────────────────────
         self.is_recording  = False
@@ -95,7 +115,7 @@ class TrajectoryRecorder:
         self.loaded_frames: List[Dict] = []
         self.loaded_name: str = ""
 
-        os.makedirs(TRAJ_DIR, exist_ok=True)
+        os.makedirs(self._traj_dir, exist_ok=True)
 
     # ═════════════════════════════════════════════════════════════════════════
     #  RECORD  (smart-sampled at ~8-10 Hz)
@@ -107,7 +127,7 @@ class TrajectoryRecorder:
         self.is_recording = True
         self._block_until = 0.0
         self._frames = []
-        self._rec_t0 = time.time()
+        self._rec_t0 = self._time_fn()
         self._last_rec_t = -999.0
         self._last_rec_q = np.full(4, np.nan)
         self._log.info("🔴 Recording started (smart-sample ≤10 Hz, Δ≥0.5°)")
@@ -123,7 +143,7 @@ class TrajectoryRecorder:
             return
 
         q_deg = np.degrees(target_q_rad[:4])
-        now = time.time() - self._rec_t0
+        now = self._time_fn() - self._rec_t0
 
         # Always store the first frame
         if not self._frames:
@@ -159,7 +179,7 @@ class TrajectoryRecorder:
             try:
                 q = self._get_pos()
                 if q is not None:
-                    now = time.time() - self._rec_t0
+                    now = self._time_fn() - self._rec_t0
                     if now - self._last_rec_t > 0.05:
                         self._append_frame(now, np.degrees(q[:4]))
             except Exception:
@@ -176,14 +196,14 @@ class TrajectoryRecorder:
     # ═════════════════════════════════════════════════════════════════════════
     def save_temp(self) -> str:
         """Save last recording to temp_trajectory.json and return the path."""
-        path = os.path.join(TRAJ_DIR, "temp_trajectory.json")
+        path = os.path.join(self._traj_dir, "temp_trajectory.json")
         return self._save_json(path, self._frames)
 
     def save_as(self, name: str) -> str:
         """Save last recording with a user-supplied name."""
         if not name.endswith(".json"):
             name += ".json"
-        path = os.path.join(TRAJ_DIR, name)
+        path = os.path.join(self._traj_dir, name)
         return self._save_json(path, self._frames)
 
     def save_from_unity_json(self, json_str: str) -> str:
@@ -203,7 +223,7 @@ class TrajectoryRecorder:
         """Load a trajectory file by name from TRAJ_DIR."""
         if not name.endswith(".json"):
             name += ".json"
-        path = os.path.join(TRAJ_DIR, name)
+        path = os.path.join(self._traj_dir, name)
         if not os.path.isfile(path):
             self._log.error(f"Trajectory file not found: {path}")
             return False
@@ -226,7 +246,7 @@ class TrajectoryRecorder:
     def list_files(self) -> List[str]:
         """Return list of .json trajectory files."""
         try:
-            return sorted(f for f in os.listdir(TRAJ_DIR) if f.endswith(".json"))
+            return sorted(f for f in os.listdir(self._traj_dir) if f.endswith(".json"))
         except Exception:
             return []
 
@@ -246,6 +266,74 @@ class TrajectoryRecorder:
         self._play_thread = threading.Thread(target=self._play_worker, daemon=True)
         self._play_thread.start()
 
+    def _build_jointmovj_command(self, joints_deg, speed_j, cp, acc_j=None):
+        values = ",".join(f"{float(joint):.6f}" for joint in joints_deg[:4])
+        cmd = f"JointMovJ({values},SpeedJ={speed_j}"
+        if acc_j is not None:
+            cmd += f",AccJ={acc_j}"
+        cmd += f",CP={cp})"
+        return cmd
+
+    def _get_current_position_deg(self):
+        if self._get_pos is None:
+            return None
+        pos = self._get_pos()
+        if pos is None:
+            return None
+        return np.degrees(np.asarray(pos[:4], dtype=float))
+
+    def _wait_until_near_target(self, target_q_deg, tolerance_deg, timeout_sec):
+        if self._get_pos is None:
+            self._sleep_fn(timeout_sec)
+            return not self._stop_flag.is_set()
+
+        deadline = self._time_fn() + timeout_sec
+        target = np.asarray(target_q_deg[:4], dtype=float)
+        while self._time_fn() < deadline and not self._stop_flag.is_set():
+            pos_deg = self._get_current_position_deg()
+            if pos_deg is not None:
+                err = float(np.max(np.abs(pos_deg - target)))
+                if err < tolerance_deg:
+                    return True
+            self._sleep_fn(PREVIEW_WAIT_POLL_SEC)
+        return False
+
+    def _send_go_to_start(self, first_frame):
+        start_q = [first_frame["j1"], first_frame["j2"], first_frame["j3"], first_frame["j4"]]
+        cmd_start = self._build_jointmovj_command(
+            start_q,
+            speed_j=PREVIEW_START_SPEEDJ,
+            cp=PREVIEW_START_CP,
+            acc_j=PREVIEW_START_ACCJ,
+        )
+        self._log.info(
+            f"🏁 Go-to-start: ({first_frame['j1']:.1f},{first_frame['j2']:.1f},"
+            f"{first_frame['j3']:.1f},{first_frame['j4']:.1f})"
+        )
+        self._send(cmd_start)
+        return self._wait_until_near_target(
+            start_q,
+            tolerance_deg=PREVIEW_START_TOLERANCE_DEG,
+            timeout_sec=PREVIEW_START_TIMEOUT_SEC,
+        )
+
+    def _playback_complete(self, idx, elapsed, total_dur, target_q):
+        if elapsed >= total_dur + PREVIEW_ABSOLUTE_TIMEOUT_SEC:
+            return True
+
+        if idx < len(target_q):
+            return False
+
+        if self._get_pos is not None:
+            pos_deg = self._get_current_position_deg()
+            if pos_deg is None:
+                return False
+            final_q = np.asarray(target_q[-1], dtype=float)
+            err = float(np.max(np.abs(pos_deg - final_q)))
+            return err < PREVIEW_FINAL_TOLERANCE_DEG
+
+        return elapsed >= total_dur + PREVIEW_FINAL_EXTRA_TIMEOUT_SEC
+
     def _play_worker(self):
         """Sequencer: dynamically queues commands ahead of time while firing
         graph callbacks at wall-clock time in a polling loop.
@@ -260,21 +348,36 @@ class TrajectoryRecorder:
 
         self._log.info(f"▶️  Preview start — {n} waypoints, {total_dur:.1f}s")
         LOOKAHEAD = 0.25
-        CP_VAL    = 20
         
         # Prepare for smooth real-time interpolation for the monitor graphs
         target_t = np.array([f["timeStamp"] - t0_traj for f in frames])
         target_q = np.array([[f['j1'], f['j2'], f['j3'], f['j4']] for f in frames])
 
+        # ── 0. Move to trajectory start position before playing ────────────────
+        first = frames[0]
+        arrived_at_start = self._send_go_to_start(first)
+
+        if self._stop_flag.is_set():
+            self.is_playing = False
+            return
+        if not arrived_at_start:
+            self.is_playing = False
+            self._log.warn("⚠️  Preview aborted: robot did not reach trajectory start in time")
+            return
+
         idx = 0
-        t_start = time.time()
+        t_start = self._time_fn()
         while not self._stop_flag.is_set():
-            elapsed = time.time() - t_start
+            elapsed = self._time_fn() - t_start
             
             # 1. Pre-send any waypoints that fall within the current lookahead window
             while idx < len(frames) and target_t[idx] <= elapsed + LOOKAHEAD:
                 fr = frames[idx]
-                cmd = f"JointMovJ({fr['j1']},{fr['j2']},{fr['j3']},{fr['j4']},SpeedJ=100,CP={CP_VAL})"
+                cmd = self._build_jointmovj_command(
+                    [fr['j1'], fr['j2'], fr['j3'], fr['j4']],
+                    speed_j=PREVIEW_STREAM_SPEEDJ,
+                    cp=PREVIEW_STREAM_CP,
+                )
                 self._send(cmd)
                 
                 # Publish the discrete command sent for the red dots graph
@@ -287,17 +390,21 @@ class TrajectoryRecorder:
                 idx += 1
                 
             # 2. Publish smooth real-time target for accurate graphing (like race.py)
-            if hasattr(self, '_target_cb') and self._target_cb is not None and elapsed <= total_dur:
+            if self._target_cb is not None:
                 try:
-                    q_curr = [np.interp(elapsed, target_t, target_q[:, i]) for i in range(4)]
+                    if elapsed <= total_dur:
+                        q_curr = [np.interp(elapsed, target_t, target_q[:, i]) for i in range(4)]
+                    else:
+                        q_curr = target_q[-1]
                     self._target_cb(np.radians(q_curr))
                 except Exception:
                     pass
                     
-            if elapsed >= total_dur + LOOKAHEAD + 0.1:
+            # 3. Check loop termination
+            if self._playback_complete(idx, elapsed, total_dur, target_q):
                 break
                 
-            time.sleep(0.01) # 100Hz interpolation and polling loop
+            self._sleep_fn(PREVIEW_POLL_SEC) # 100Hz interpolation and polling loop
 
         self.is_playing = False
         if self._stop_flag.is_set():
@@ -326,7 +433,7 @@ class TrajectoryRecorder:
             # Flush robot's queued commands so it stops immediately
             if self._send_dash is not None:
                 self._send_dash("ResetRobot()")
-                time.sleep(0.2)
+                self._sleep_fn(0.2)
                 self._send_dash("EnableRobot()")
             self._log.info("⏹️  Playback stopped (queue flushed)")
         if was_recording:

@@ -198,12 +198,23 @@ These are higher-risk areas:
 - motion socket sync behavior
 - changing the semantics of `last_sent_target` or `last_sent_time`
 
+Recent progress on `TrajectoryRecorder`:
+
+- playback start alignment now goes through a dedicated go-to-start step before
+  queued playback begins
+- arrival waiting and playback-complete checks are split into small helper
+  methods instead of living only inside the main playback loop
+- `traj_dir`, `time_fn`, and `sleep_fn` can now be injected for testing and
+  reuse in non-default runtime environments
+- the playback boundary is covered by `test_trajectory_recorder.py`
+
 ## Validation Checklist
 
 Fast checks after logic changes:
 
 ```bash
 PYTHONPATH=src/dobot_mg400/mg400_controller python3 -m unittest \
+  src/dobot_mg400/mg400_controller/test/test_trajectory_recorder.py \
   src/dobot_mg400/mg400_controller/test/test_monitor_control_panel.py \
   src/dobot_mg400/mg400_controller/test/test_monitor_presentation_state.py \
   src/dobot_mg400/mg400_controller/test/test_monitor_domain_state.py \
@@ -217,6 +228,7 @@ PYTHONPATH=src/dobot_mg400/mg400_controller python3 -m unittest \
 python3 -m py_compile \
   src/dobot_mg400/mg400_controller/mg400_controller/vr_teleop_node.py \
   src/dobot_mg400/mg400_controller/mg400_controller/monitor_gui.py \
+  src/dobot_mg400/mg400_controller/mg400_controller/common/trajectory/trajectory_recorder.py \
   src/dobot_mg400/mg400_controller/mg400_controller/common/config/motion_config.py \
   src/dobot_mg400/mg400_controller/mg400_controller/common/logic/teleop_controller.py \
   src/dobot_mg400/mg400_controller/mg400_controller/common/logic/target_compensator.py \
