@@ -79,7 +79,8 @@ Nothing in `project_teleop` was deleted for that organization step.
 
 `project_teleop` had existing dirty state before this cleanup branch:
 
-- `Dobot_TCP_IP_Python_V4` had submodule/untracked state.
+- `Dobot_TCP_IP_Python_V4` had submodule/untracked state at the start of the
+  cleanup branch.
 - `canvas_test.py`, `flow_canvas.py`, `test_dual_db.py`,
   `test_teach_repeat.py` were already deleted.
 - `src/dobot_mg400/mg400_controller/mg400_controller/common/trajectory/trajectory_recorder.py`
@@ -557,8 +558,8 @@ Preserved existing unrelated dirty state:
 
 - Deleted root test/canvas files remained deleted.
 - `trajectory_recorder.py` had pre-existing modifications and was not cleaned up.
-- `Dobot_TCP_IP_Python_V4` still has untracked local files inside its submodule
-  working tree, such as PDFs, `.DS_Store`, and `__pycache__`.
+- Dobot manuals were moved out of `Dobot_TCP_IP_Python_V4` into
+  `docs/reference_manuals/dobot/` so the submodule working tree is clean again.
 
 ## Suggested Continuation Order
 

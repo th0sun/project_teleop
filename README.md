@@ -54,6 +54,10 @@ project_teleop/
 - **`Dobot_TCP_IP_Python_V4/`** (submodule)  
   Official Dobot TCP/IP Python examples and API reference client.
 
+- **`docs/reference_manuals/dobot/`**
+  Project-owned copy of Dobot reference manuals used during development and
+  report writing.
+
 - **`MG400_Mock/`** (submodule)  
   Dobot MG400 mock server from HarvestX (Docker-based simulator).
 
@@ -106,6 +110,7 @@ See:
 - `docs/teleop_command_logic.md`
 - `docs/setup_guide.md`
 - `docs/controller_continuation_guide.md`
+- `docs/reference_manuals/dobot/README.md`
 
 ---
 

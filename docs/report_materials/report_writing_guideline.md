@@ -95,7 +95,8 @@ Mention the main folders:
 - `src/dobot_mg400/mg400_description`: robot model and meshes
 - `tools/mg400_simulator`: Unity-like Python GUI simulator
 - `MG400_Mock`: Docker-based external mock server
-- `Dobot_TCP_IP_Python_V4`: Dobot reference TCP/IP files and 4-axis guide
+- `Dobot_TCP_IP_Python_V4`: Dobot reference TCP/IP Python examples
+- `docs/reference_manuals/dobot`: project-owned Dobot manuals and 4-axis guide
 
 ### Chapter 4: Teleoperation Command Logic
 

@@ -259,6 +259,11 @@ gone.
 ## Queue Semantics From 4-Axis Guide
 
 The `4axis` TCP/IP guide is the authoritative source for MG400 behavior.
+The project-owned copy is kept under:
+
+```text
+docs/reference_manuals/dobot/TCP_IP Remote Control Interface Guide (4axis)_20240419_en.pdf
+```
 
 Important queue facts from the guide:
 
