@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Tuple
+from typing import Any, Dict, List, Literal, Tuple
 
 import numpy as np
 
@@ -130,3 +130,21 @@ def translate_program(
             raise UnsupportedStep(f"unsupported canonical step: {step!r}")
 
     return MG400CommandPlan(commands=tuple(commands), control_mode=control_mode)
+
+
+def plan_to_dict(plan: MG400CommandPlan) -> Dict[str, Any]:
+    """Serialise an MG400CommandPlan to a JSON-safe dict (for export/debug)."""
+    def _cmd(c: MG400NativeCommand) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"kind": c.kind}
+        if c.command:
+            out["command"] = c.command
+        if c.duration_ms:
+            out["duration_ms"] = c.duration_ms
+        return out
+
+    return {
+        "robot_id": "dobot_mg400",
+        "control_mode": plan.control_mode,
+        "command_count": len(plan.commands),
+        "commands": [_cmd(c) for c in plan.commands],
+    }
