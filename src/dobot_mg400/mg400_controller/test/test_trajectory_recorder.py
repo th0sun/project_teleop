@@ -186,6 +186,32 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertGreaterEqual(slow_speed, 15)
         self.assertLessEqual(fast_speed, 100)
 
+    def test_compile_loaded_plan_precomputes_commands_and_timing(self):
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        recorder.load_frames(
+            [
+                {"timeStamp": 0.0, "j1": 0.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+                {"timeStamp": 0.20, "j1": 2.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+                {"timeStamp": 0.30, "j1": 10.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+            ],
+            name="demo.json",
+        )
+
+        plan = recorder.compile_loaded_plan()
+
+        self.assertEqual(plan.source_name, "demo.json")
+        self.assertEqual(len(plan.waypoints), 3)
+        self.assertEqual(len(plan.queued_commands), 2)
+        self.assertAlmostEqual(plan.total_duration_s, 0.3)
+        self.assertTrue(plan.original_timing_feasible)
+        self.assertIn("JointMovJ(2.0000", plan.queued_commands[0].command)
+        self.assertEqual(plan.queued_commands[0].speed_j, 15)
+        self.assertEqual(plan.queued_commands[1].cp, 0)
+
     def test_play_worker_skips_duplicate_start_and_uses_segment_speed(self):
         sent_commands = []
         events = []
@@ -226,6 +252,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(events[0][0], "go_to_start_command")
         self.assertEqual(events[1][0], "playback_start")
         self.assertTrue(events[1][1]["original_timing_feasible"])
+        self.assertEqual(events[1][1]["execution_model"], "compiled_queue_plan")
         queued = [event for event in events if event[0] == "waypoint_queued"]
         self.assertEqual([event[1]["index"] for event in queued], [1, 2])
 

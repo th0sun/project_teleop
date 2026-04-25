@@ -29,7 +29,8 @@ import json
 import math
 import threading
 import numpy as np
-from typing import List, Dict, Optional, Callable
+from dataclasses import dataclass
+from typing import List, Dict, Optional, Callable, Tuple
 
 from mg400_protocol.commands import joint_mov_j
 from mg400_protocol.dashboard import enable_robot, reset_robot
@@ -75,6 +76,30 @@ PREVIEW_LOOKAHEAD_FRAMES = 2.0
 PREVIEW_JOINT_SPEED_AT_100_DEG_S = 90.0
 PREVIEW_STREAM_REF_VEL_DEG_S = PREVIEW_JOINT_SPEED_AT_100_DEG_S
 MG400_ROBOT_MODE_RUNNING = 7
+
+
+@dataclass(frozen=True)
+class CompiledPlaybackCommand:
+    index: int
+    target_time_s: float
+    original_target_time_s: float
+    joints_deg: Tuple[float, float, float, float]
+    speed_j: int
+    cp: int
+    command: str
+
+
+@dataclass(frozen=True)
+class CompiledPlaybackPlan:
+    source_name: str
+    waypoints: Tuple[Dict, ...]
+    queued_commands: Tuple[CompiledPlaybackCommand, ...]
+    original_duration_s: float
+    retimed_duration_s: float
+    total_duration_s: float
+    time_scale: float
+    original_timing_feasible: bool
+    lookahead_s: float
 
 
 def frames_from_joint_trajectory_msg(msg) -> List[Dict]:
@@ -416,6 +441,62 @@ class TrajectoryRecorder:
         window = median_dt * PREVIEW_LOOKAHEAD_FRAMES
         return max(PREVIEW_LOOKAHEAD_MIN_SEC, min(PREVIEW_LOOKAHEAD_MAX_SEC, window))
 
+    def compile_loaded_plan(self) -> CompiledPlaybackPlan:
+        """Compile the loaded trajectory into a pre-timed MG400 playback job.
+
+        This is the boundary we want for teach-and-repeat: compile the full job
+        once, then let execution focus on dispatch/monitoring instead of
+        recomputing waypoint timing inside the playback loop.
+        """
+        if not self.loaded_frames:
+            raise ValueError("No trajectory loaded for playback compilation")
+
+        source_frames = list(self.loaded_frames)
+        frames, timing = self._retime_frames_for_playback(source_frames)
+        source_t0_traj = float(source_frames[0]["timeStamp"])
+        t0_traj = float(frames[0]["timeStamp"])
+        total_dur = float(frames[-1]["timeStamp"] - t0_traj)
+        target_t = np.array([float(f["timeStamp"]) - t0_traj for f in frames])
+        source_target_t = np.array(
+            [float(f["timeStamp"]) - source_t0_traj for f in source_frames]
+        )
+        lookahead = self._lookahead_seconds(target_t)
+
+        queued_commands = []
+        for idx in range(1, len(frames)):
+            frame = frames[idx]
+            prev_frame = frames[idx - 1]
+            speed_j = self._segment_speed_j(prev_frame, frame)
+            cp = PREVIEW_FINAL_CP if idx == len(frames) - 1 else PREVIEW_STREAM_CP
+            joints = self._frame_q_deg(frame)
+            queued_commands.append(
+                CompiledPlaybackCommand(
+                    index=idx,
+                    target_time_s=float(target_t[idx]),
+                    original_target_time_s=float(source_target_t[idx]),
+                    joints_deg=tuple(float(v) for v in joints),
+                    speed_j=int(speed_j),
+                    cp=int(cp),
+                    command=self._build_jointmovj_command(
+                        joints,
+                        speed_j=speed_j,
+                        cp=cp,
+                    ),
+                )
+            )
+
+        return CompiledPlaybackPlan(
+            source_name=self.loaded_name or "inline_trajectory",
+            waypoints=tuple(dict(frame) for frame in frames),
+            queued_commands=tuple(queued_commands),
+            original_duration_s=float(timing.original_duration_s),
+            retimed_duration_s=float(timing.retimed_duration_s),
+            total_duration_s=total_dur,
+            time_scale=float(timing.time_scale),
+            original_timing_feasible=bool(timing.is_original_timing_feasible),
+            lookahead_s=float(lookahead),
+        )
+
     def _wait_until_near_target(self, target_q_deg, tolerance_deg, timeout_sec):
         if self._get_pos is None:
             self._sleep_fn(timeout_sec)
@@ -488,26 +569,24 @@ class TrajectoryRecorder:
         return elapsed >= total_dur + PREVIEW_FINAL_EXTRA_TIMEOUT_SEC
 
     def _play_worker(self):
-        """Sequencer: dynamically queues commands ahead of time while firing
-        graph callbacks at wall-clock time in a polling loop.
-        """
-        source_frames = self.loaded_frames
-        n = len(source_frames)
-        if n == 0:
+        """Execute a precompiled playback job while publishing monitoring data."""
+        if not self.loaded_frames:
             return
+        plan = self.compile_loaded_plan()
+        frames = list(plan.waypoints)
+        n = len(frames)
+        total_dur = plan.total_duration_s
 
-        frames, timing = self._retime_frames_for_playback(source_frames)
-        source_t0_traj = source_frames[0]["timeStamp"]
-        t0_traj = frames[0]["timeStamp"]
-        total_dur = frames[-1]["timeStamp"] - t0_traj
+        self._log.info(
+            f"▶️  Preview start — {n} waypoints, {total_dur:.1f}s "
+            f"(compiled from {plan.source_name})"
+        )
 
-        self._log.info(f"▶️  Preview start — {n} waypoints, {total_dur:.1f}s")
-        LOOKAHEAD = self._lookahead_seconds(np.array([f["timeStamp"] - t0_traj for f in frames]))
-        
-        # Prepare for smooth real-time interpolation for the monitor graphs
-        source_target_t = np.array([f["timeStamp"] - source_t0_traj for f in source_frames])
-        target_t = np.array([f["timeStamp"] - t0_traj for f in frames])
-        target_q = np.array([[f['j1'], f['j2'], f['j3'], f['j4']] for f in frames])
+        target_t = np.array([float(f["timeStamp"]) - float(frames[0]["timeStamp"]) for f in frames])
+        source_target_t = np.array(
+            [0.0, *[cmd.original_target_time_s for cmd in plan.queued_commands]]
+        )
+        target_q = np.array([[f["j1"], f["j2"], f["j3"], f["j4"]] for f in frames])
 
         # ── 0. Move to trajectory start position before playing ────────────────
         first = frames[0]
@@ -526,43 +605,36 @@ class TrajectoryRecorder:
         self._emit_playback_event(
             "playback_start",
             total_duration_s=total_dur,
-            original_duration_s=timing.original_duration_s,
-            retimed_duration_s=timing.retimed_duration_s,
-            time_scale=timing.time_scale,
-            original_timing_feasible=timing.is_original_timing_feasible,
+            original_duration_s=plan.original_duration_s,
+            retimed_duration_s=plan.retimed_duration_s,
+            time_scale=plan.time_scale,
+            original_timing_feasible=plan.original_timing_feasible,
             waypoints=n,
+            execution_model="compiled_queue_plan",
         )
         while not self._stop_flag.is_set():
             elapsed = self._time_fn() - t_start
             
             # 1. Pre-send any waypoints that fall within the current lookahead window
-            while idx < len(frames) and target_t[idx] <= elapsed + LOOKAHEAD:
-                fr = frames[idx]
-                prev_fr = frames[idx - 1]
-                speed_j = self._segment_speed_j(prev_fr, fr)
-                cp = PREVIEW_FINAL_CP if idx == len(frames) - 1 else PREVIEW_STREAM_CP
-                cmd = self._build_jointmovj_command(
-                    [fr['j1'], fr['j2'], fr['j3'], fr['j4']],
-                    speed_j=speed_j,
-                    cp=cp,
-                )
-                self._send(cmd)
+            while idx - 1 < len(plan.queued_commands) and target_t[idx] <= elapsed + plan.lookahead_s:
+                compiled = plan.queued_commands[idx - 1]
+                self._send(compiled.command)
                 self._emit_playback_event(
                     "waypoint_queued",
-                    index=idx,
-                    command=cmd,
-                    target_time_s=float(target_t[idx]),
-                    original_target_time_s=float(source_target_t[idx]),
+                    index=compiled.index,
+                    command=compiled.command,
+                    target_time_s=compiled.target_time_s,
+                    original_target_time_s=compiled.original_target_time_s,
                     elapsed_s=float(elapsed),
-                    speed_j=speed_j,
-                    cp=cp,
-                    frame=fr,
+                    speed_j=compiled.speed_j,
+                    cp=compiled.cp,
+                    frame=frames[compiled.index],
                 )
                 
                 # Publish the discrete command sent for the red dots graph
                 if self._waypoint_cb is not None:
                     try:
-                        self._waypoint_cb(np.radians([fr['j1'], fr['j2'], fr['j3'], fr['j4']]))
+                        self._waypoint_cb(np.radians(compiled.joints_deg))
                     except Exception:
                         pass
                         

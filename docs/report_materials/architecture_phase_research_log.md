@@ -727,3 +727,55 @@ Next engineering implication:
 - For MG400 Mock, add a sequential compatibility mode or a queue-emulating test
   harness so dense Unity JSON files can be tested deterministically without
   pretending the Mock has real controller queue semantics.
+
+## 16. Teach-repeat should compile once, then execute
+
+Problem reframed:
+
+- The previous teach-repeat runtime still carried a "host keeps deciding while
+  playing" shape.
+- Even though the source trajectory was already known up front, the playback
+  loop was still deriving timing and command details inside the live execution
+  thread.
+- That shape is too close to live-stream teleop and is the wrong mental model
+  for a teach-and-repeat pipeline whose entire waypoint set already exists
+  before playback begins.
+
+Change made:
+
+- Added `compile_loaded_plan()` to `TrajectoryRecorder`.
+- The recorder now compiles the loaded trajectory into a
+  `CompiledPlaybackPlan` before playback begins:
+  - retimed waypoints
+  - per-waypoint `SpeedJ`
+  - final-settle `CP`
+  - prebuilt `JointMovJ(...)` command strings
+  - lookahead window
+  - timing metadata (`original_duration_s`, `retimed_duration_s`, `time_scale`)
+- `_play_worker()` now executes that compiled job instead of recalculating the
+  playback plan on the fly.
+- `playback_start` events now publish `execution_model="compiled_queue_plan"`
+  so tooling can distinguish this path from true live streaming.
+
+Why this matters:
+
+- It does **not** yet mean the MG400 controller receives a single uploaded job
+  and starts it internally; the current TCP runtime still dispatches commands
+  from the host.
+- But it is the correct architecture boundary:
+  - capture/load
+  - compile once
+  - execute compiled job
+- That separation makes it much easier to replace the current MG400 executor
+  later with:
+  - controller-side queued execution,
+  - vendor offline-program upload, or
+  - a different robot adapter entirely,
+  without mixing planning math back into the runtime loop.
+
+Tests:
+
+- Added unit coverage that `compile_loaded_plan()` produces a stable prebuilt
+  command list with expected timing and final-settle behavior.
+- Existing playback tests still verify go-to-start, segment-speed scaling, and
+  final completion checks.
