@@ -12,22 +12,34 @@
 
 import threading
 
+from mg400_protocol.dashboard import (
+    clear_error,
+    continue_,
+    disable_robot,
+    emergency_stop,
+    enable_robot,
+    pause,
+    reset_robot,
+)
+
+
 class InteractiveCommandHandler:
     def __init__(self, robot_connection, logger, stop_event):
         self.connection = robot_connection
         self.logger = logger
         self.stop_event = stop_event
         self.thread = None
-        
-        # คำสั่งที่รองรับ
+
+        # Vendor-specific dashboard commands rendered through mg400_protocol
+        # so this file does not own MG400 ASCII strings.
         self.commands = {
-            'e': ('EnableRobot()', '✅ Enable command sent'),
-            'd': ('DisableRobot()', '🔴 Disable command sent'),
-            'c': ('ClearError()', '🧹 Clear error command sent'),
-            'r': ('ResetRobot()', '🔄 Reset command sent'),
-            's': ('EmergencyStop()', '🚨 EMERGENCY STOP sent'),
-            'p': ('Pause()', '⏸️  Pause command sent'),
-            'u': ('Continue()', '▶️  Continue command sent'),
+            'e': (enable_robot().render(), '✅ Enable command sent'),
+            'd': (disable_robot().render(), '🔴 Disable command sent'),
+            'c': (clear_error().render(), '🧹 Clear error command sent'),
+            'r': (reset_robot().render(), '🔄 Reset command sent'),
+            's': (emergency_stop().render(), '🚨 EMERGENCY STOP sent'),
+            'p': (pause().render(), '⏸️  Pause command sent'),
+            'u': (continue_().render(), '▶️  Continue command sent'),
         }
     
     def start(self):

@@ -35,6 +35,9 @@ from mg400_controller.common.config.motion_config import (
 )
 import mg400_controller.common.config.motion_config as motion_config
 
+# Vendor protocol surface (do not hardcode MG400 ASCII strings here).
+from mg400_protocol.dashboard import clear_error, get_tool
+
 # Import core modules
 from mg400_controller.common.core.robot_connection import RobotConnection
 from mg400_controller.common.core.feedback_handler import FeedbackHandler
@@ -571,7 +574,7 @@ class TeleopNode(Node):
             if self._tool_query_counter >= 250:
                 self._tool_query_counter = 0
                 try:
-                    resp = self.connection.send_and_wait("GetTool()", timeout=1.0)
+                    resp = self.connection.send_and_wait(get_tool().render(), timeout=1.0)
                     if resp:
                         import re
                         m = re.search(r'\{(\d+)\}', resp)
@@ -591,7 +594,7 @@ class TeleopNode(Node):
                     self.last_clear_error_time = 0.0
                 if now - self.last_clear_error_time > 3.0:
                     self.get_logger().error("🛑 Robot is in ERROR STATE (Mode 9). Auto-clearing error...")
-                    self.connection.send_and_wait("ClearError()")
+                    self.connection.send_and_wait(clear_error().render())
                     self.last_clear_error_time = now
             
             # === MOTION TRACKING (Latency Analyzer) ===

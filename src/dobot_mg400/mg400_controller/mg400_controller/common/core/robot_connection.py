@@ -15,6 +15,13 @@ import socket
 import time
 import threading
 from mg400_controller.common.config.network_config import *
+from mg400_protocol.dashboard import (
+    acc_j,
+    clear_error,
+    enable_robot as enable_robot_cmd,
+    speed_factor,
+    speed_j,
+)
 
 class RobotConnection:
     def __init__(self, logger):
@@ -60,15 +67,15 @@ class RobotConnection:
             return False
         with self.dash_lock:
             try:
-                self.dashboard.send(b"ClearError()\n")
+                self.dashboard.send((clear_error().render() + "\n").encode())
                 time.sleep(0.1)
-                self.dashboard.send(b"EnableRobot()\n")
+                self.dashboard.send((enable_robot_cmd().render() + "\n").encode())
                 time.sleep(0.1)
-                
-                # 🚀 UNLOCK MAX ROBOT SPEED LIMITS
-                self.dashboard.send(b"SpeedFactor(100)\n")
-                self.dashboard.send(b"AccJ(100)\n")
-                self.dashboard.send(b"SpeedJ(100)\n")
+
+                # Unlock max robot speed limits via dashboard scalers.
+                self.dashboard.send((speed_factor(100).render() + "\n").encode())
+                self.dashboard.send((acc_j(100).render() + "\n").encode())
+                self.dashboard.send((speed_j(100).render() + "\n").encode())
                 
                 self.logger.info("🟢 Robot Enabled and Speed Limits Unlocked")
                 return True

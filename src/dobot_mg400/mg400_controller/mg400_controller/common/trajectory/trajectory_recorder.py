@@ -31,6 +31,9 @@ import threading
 import numpy as np
 from typing import List, Dict, Optional, Callable
 
+from mg400_protocol.commands import joint_mov_j
+from mg400_protocol.dashboard import enable_robot, reset_robot
+
 
 # ── Home position (degrees) ──────────────────────────────────────────────────
 HOME_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0]
@@ -267,12 +270,12 @@ class TrajectoryRecorder:
         self._play_thread.start()
 
     def _build_jointmovj_command(self, joints_deg, speed_j, cp, acc_j=None):
-        values = ",".join(f"{float(joint):.6f}" for joint in joints_deg[:4])
-        cmd = f"JointMovJ({values},SpeedJ={speed_j}"
-        if acc_j is not None:
-            cmd += f",AccJ={acc_j}"
-        cmd += f",CP={cp})"
-        return cmd
+        return joint_mov_j(
+            joints_deg[:4],
+            speed_j=speed_j,
+            acc_j=acc_j,
+            cp=cp,
+        ).render()
 
     def _get_current_position_deg(self):
         if self._get_pos is None:
@@ -432,9 +435,9 @@ class TrajectoryRecorder:
         if was_playing:
             # Flush robot's queued commands so it stops immediately
             if self._send_dash is not None:
-                self._send_dash("ResetRobot()")
+                self._send_dash(reset_robot().render())
                 self._sleep_fn(0.2)
-                self._send_dash("EnableRobot()")
+                self._send_dash(enable_robot().render())
             self._log.info("⏹️  Playback stopped (queue flushed)")
         if was_recording:
             self._log.info("⏹️  Recording stopped")
@@ -445,8 +448,12 @@ class TrajectoryRecorder:
 
     def _go_home(self):
         """Send robot to Home position (0, 0, 0, 0)."""
-        h = HOME_JOINTS_DEG
-        cmd = f"JointMovJ({h[0]:.4f},{h[1]:.4f},{h[2]:.4f},{h[3]:.4f},SpeedJ=30,AccJ=50,CP=0)"
+        cmd = joint_mov_j(
+            HOME_JOINTS_DEG[:4],
+            speed_j=30,
+            acc_j=50,
+            cp=0,
+        ).render()
         self._log.info("🏠 Moving to Home (0, 0, 0, 0)")
         self._send(cmd)
 
