@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import socket
 import sys
 import threading
@@ -38,10 +39,10 @@ from mg400_controller.common.trajectory.trajectory_recorder import (  # noqa: E4
 )
 from tcp_interface.realtime_packet import RealtimePacketType  # noqa: E402
 
-MOCK_IP = "127.0.0.1"
-DASHBOARD_PORT = 29999
-MOTION_PORT = 30003
-FEEDBACK_PORT = 30004
+MOCK_IP = os.environ.get("MG400_MOCK_HOST", "172.10.0.2")
+DASHBOARD_PORT = int(os.environ.get("MG400_DASHBOARD_PORT", "29999"))
+MOTION_PORT = int(os.environ.get("MG400_MOTION_PORT", "30003"))
+FEEDBACK_PORT = int(os.environ.get("MG400_FEEDBACK_PORT", "30004"))
 PKT_SIZE = np.dtype(RealtimePacketType).itemsize
 
 MODE_ENABLE = 5
@@ -293,6 +294,7 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
 
 
 def run(out_path: Optional[Path]) -> Dict:
+    print(f"Connecting to MG400 Mock at {MOCK_IP} ...")
     dash = _connect_dashboard()
     motion = _connect_motion()
     monitor = FeedbackMonitor()
@@ -340,9 +342,25 @@ def run(out_path: Optional[Path]) -> Dict:
 
 
 def main():
+    global MOCK_IP, DASHBOARD_PORT, MOTION_PORT, FEEDBACK_PORT
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--host",
+        default=MOCK_IP,
+        help="MG400 Mock host/IP. Ubuntu compose default: 172.10.0.2. "
+             "macOS with published ports: 127.0.0.1.",
+    )
+    parser.add_argument("--dashboard-port", type=int, default=DASHBOARD_PORT)
+    parser.add_argument("--motion-port", type=int, default=MOTION_PORT)
+    parser.add_argument("--feedback-port", type=int, default=FEEDBACK_PORT)
     args = parser.parse_args()
+
+    MOCK_IP = args.host
+    DASHBOARD_PORT = args.dashboard_port
+    MOTION_PORT = args.motion_port
+    FEEDBACK_PORT = args.feedback_port
+
     result = run(args.out)
 
     print("\nReplay timing result")

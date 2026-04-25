@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 """TCP comparative execution study: baseline 9196b01 vs HEAD teaching path.
 
-Runs BOTH systems against the live MG400 Mock (Docker, 127.0.0.1).
+Runs BOTH systems against the live MG400 Mock Docker container.
 Collects real TCP feedback: q_target, q_actual, robot_mode,
 tool_vector_actual, timing at 8 ms intervals.
 
 Prerequisites:
-    docker compose -f MG400_Mock/docker-compose.yml -f - up -d <<EOF
-    services:
-      dobot:
-        ports:
-          - "29999:29999"
-          - "30003:30003"
-          - "30004:30004"
-    EOF
+    docker compose -f MG400_Mock/docker-compose.yml up -d
 
 Usage (from repo root):
     PYTHONPATH=src/robot_teaching_core:src/adapters/mg400:\\
               src/dobot_mg400/mg400_controller:\\
               src/dobot_mg400/mg400_protocol \\
-        python3 tools/demo_lift/compare_tcp.py
+        python3 tools/demo_lift/compare_tcp.py --host 172.10.0.2
+
+On macOS Docker Desktop, expose the Mock ports first and pass --host 127.0.0.1.
 """
 
 from __future__ import annotations
 
+import argparse
 import math
+import os
 import socket
 import sys
 import time
@@ -62,10 +59,10 @@ from dataclasses import replace as dc_replace  # noqa: E402
 # ---------------------------------------------------------------------------
 # Mock connection parameters
 # ---------------------------------------------------------------------------
-MOCK_IP = "127.0.0.1"
-DASHBOARD_PORT = 29999
-MOTION_PORT    = 30003
-FEEDBACK_PORT  = 30004
+MOCK_IP = os.environ.get("MG400_MOCK_HOST", "172.10.0.2")
+DASHBOARD_PORT = int(os.environ.get("MG400_DASHBOARD_PORT", "29999"))
+MOTION_PORT    = int(os.environ.get("MG400_MOTION_PORT", "30003"))
+FEEDBACK_PORT  = int(os.environ.get("MG400_FEEDBACK_PORT", "30004"))
 PKT_SIZE       = np.dtype(RealtimePacketType).itemsize
 FEEDBACK_HZ    = 125   # 8 ms period
 
@@ -525,8 +522,29 @@ def _print_comparison(baseline: RunResult, head: RunResult) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--host",
+        default=MOCK_IP,
+        help="MG400 Mock host/IP. Ubuntu compose default: 172.10.0.2. "
+             "macOS with published ports: 127.0.0.1.",
+    )
+    parser.add_argument("--dashboard-port", type=int, default=DASHBOARD_PORT)
+    parser.add_argument("--motion-port", type=int, default=MOTION_PORT)
+    parser.add_argument("--feedback-port", type=int, default=FEEDBACK_PORT)
+    return parser.parse_args()
+
+
 def main():
-    print("Connecting to MG400 Mock at 127.0.0.1 ...")
+    global MOCK_IP, DASHBOARD_PORT, MOTION_PORT, FEEDBACK_PORT
+    args = _parse_args()
+    MOCK_IP = args.host
+    DASHBOARD_PORT = args.dashboard_port
+    MOTION_PORT = args.motion_port
+    FEEDBACK_PORT = args.feedback_port
+
+    print(f"Connecting to MG400 Mock at {MOCK_IP} ...")
     dash = _connect_dashboard()
     motion = _connect_motion()
     fb = _connect_feedback()
@@ -593,8 +611,6 @@ def main():
         [],
         dash, motion, fb,
     )
-    baseline.non_motion_log = ["(no vacuum/tool logic in teleop path)"]
-    baseline.non_motion_unsupported = 1
 
     # Reset to home
     print("--- Resetting to home ---")
