@@ -1,7 +1,13 @@
-"""RobotAdapter Protocol — PR1 placeholder.
+"""Robot-neutral adapter API contracts."""
 
-The full Protocol surface (``plan`` + ``execute`` + ``AdaptedPlan``
-+ ``ExecutionMode``) lands in a later PR. PR1 only declares the
-package so the import-discipline test can confirm the seam exists.
-See proposal §4.5 / §4.6.
-"""
+from teaching_core.adapter_api.base import (  # noqa: F401
+    AdaptedPlan,
+    AdapterError,
+    CancelToken,
+    ExecutionMode,
+    ExecutionResult,
+    ProgressSink,
+    RobotAdapter,
+    UnsupportedStep,
+    profile_supports_execution_mode,
+)
