@@ -1064,6 +1064,15 @@ existing command sender. The current translator deliberately accepts
 adapter honest: the profile says MG400 is the first robot-specific
 case study, not that the whole retargeting problem is solved.
 
+Protocol-onboarding status: MG400 now also carries adapter-local
+vendor artifacts under `mg400_adapter/protocol/`: typed command
+builders, the 1440-byte feedback packet layout, and an alarm catalog
+loader backed by Dobot's controller/servo JSON files. This is the
+pattern for adding a robot: collect vendor command grammar, feedback
+state layout, error/alarm database, capability profile, kinematics
+contract, and translator mapping in the adapter. Do not hardcode
+vendor command strings or byte offsets in translator/executor code.
+
 ### Phase M4 — Lifter v0 (no MG400 FK bias)
 
 - the lifter consumes `*.session.mcap` and emits canonical
