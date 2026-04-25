@@ -33,6 +33,12 @@ from typing import List, Dict, Optional, Callable
 
 from mg400_protocol.commands import joint_mov_j
 from mg400_protocol.dashboard import enable_robot, reset_robot
+from teaching_core.trajectory import (
+    JointTimingLimits,
+    TimedJointPoint,
+    retime_joint_path,
+    speed_percent_for_segment,
+)
 
 
 # ── Home position (degrees) ──────────────────────────────────────────────────
@@ -58,7 +64,7 @@ PREVIEW_STREAM_CP = 20
 PREVIEW_FINAL_CP = 0
 PREVIEW_START_TIMEOUT_SEC = 6.0
 PREVIEW_START_TOLERANCE_DEG = 3.0
-PREVIEW_FINAL_TOLERANCE_DEG = 2.0
+PREVIEW_FINAL_TOLERANCE_DEG = 0.5
 PREVIEW_FINAL_EXTRA_TIMEOUT_SEC = 2.0
 PREVIEW_ABSOLUTE_TIMEOUT_SEC = 10.0
 PREVIEW_POLL_SEC = 0.01
@@ -66,7 +72,39 @@ PREVIEW_WAIT_POLL_SEC = 0.05
 PREVIEW_LOOKAHEAD_MIN_SEC = 0.10
 PREVIEW_LOOKAHEAD_MAX_SEC = 0.25
 PREVIEW_LOOKAHEAD_FRAMES = 2.0
-PREVIEW_STREAM_REF_VEL_DEG_S = 40.0
+PREVIEW_JOINT_SPEED_AT_100_DEG_S = 90.0
+PREVIEW_STREAM_REF_VEL_DEG_S = PREVIEW_JOINT_SPEED_AT_100_DEG_S
+
+
+def frames_from_joint_trajectory_msg(msg) -> List[Dict]:
+    """Convert a ROS ``trajectory_msgs/JointTrajectory``-like message to frames.
+
+    Unity's current `ROSPathPublisher` sends this message when the user presses
+    "Send To Real Robot".  The recorder stores degrees internally, while ROS
+    trajectory points use radians for revolute joints.
+    """
+    frames = []
+    last_t = None
+    for point in getattr(msg, "points", []):
+        positions = getattr(point, "positions", [])
+        if len(positions) < 4:
+            continue
+        duration = getattr(point, "time_from_start", None)
+        if duration is None:
+            continue
+        t = float(getattr(duration, "sec", 0)) + float(getattr(duration, "nanosec", 0)) * 1e-9
+        if last_t is not None and t <= last_t:
+            continue
+        q_deg = np.degrees(np.asarray(positions[:4], dtype=float))
+        frames.append({
+            "timeStamp": round(t, 6),
+            "j1": round(float(q_deg[0]), 6),
+            "j2": round(float(q_deg[1]), 6),
+            "j3": round(float(q_deg[2]), 6),
+            "j4": round(float(q_deg[3]), 6),
+        })
+        last_t = t
+    return frames
 
 
 class TrajectoryRecorder:
@@ -254,6 +292,17 @@ class TrajectoryRecorder:
             self._log.error(f"Failed to load trajectory: {e}")
             return False
 
+    def load_frames(self, frames: List[Dict], name: str = "inline_trajectory") -> bool:
+        """Load already-materialized trajectory frames for immediate playback."""
+        if not frames:
+            self._log.error("Trajectory frame list is empty")
+            return False
+        self.loaded_frames = frames
+        self.loaded_name = name
+        dur = frames[-1]["timeStamp"] - frames[0]["timeStamp"]
+        self._log.info(f"📂 Loaded {name}: {len(frames)} frames, {dur:.1f}s")
+        return True
+
     def list_files(self) -> List[str]:
         """Return list of .json trajectory files."""
         try:
@@ -301,16 +350,57 @@ class TrajectoryRecorder:
             return None
         return np.degrees(np.asarray(pos[:4], dtype=float))
 
+    def _frame_q_deg(self, frame):
+        return (
+            float(frame["j1"]),
+            float(frame["j2"]),
+            float(frame["j3"]),
+            float(frame["j4"]),
+        )
+
+    def _retime_frames_for_playback(self, frames):
+        """Return frames with preserved-or-stretched timestamps.
+
+        The waypoint positions are unchanged.  Timestamps are preserved if the
+        requested motion fits the configured effective MG400 joint speed; only
+        too-fast segments are stretched.
+        """
+        points = [
+            TimedJointPoint(time_s=float(frame["timeStamp"]), position=self._frame_q_deg(frame))
+            for frame in frames
+        ]
+        timing = retime_joint_path(
+            points,
+            JointTimingLimits(
+                max_velocity=(PREVIEW_JOINT_SPEED_AT_100_DEG_S,) * 4,
+            ),
+        )
+        first_t = float(frames[0]["timeStamp"])
+        retimed_frames = []
+        for frame, point in zip(frames, timing.points):
+            next_frame = dict(frame)
+            next_frame["timeStamp"] = round(first_t + point.time_s, 6)
+            retimed_frames.append(next_frame)
+
+        if not timing.is_original_timing_feasible:
+            self._log.warn(
+                "⚠️  Trajectory too fast for configured MG400 speed; "
+                f"retimed {timing.original_duration_s:.2f}s -> "
+                f"{timing.retimed_duration_s:.2f}s "
+                f"(x{timing.time_scale:.2f}, max segment x{timing.max_segment_stretch:.2f})"
+            )
+        return retimed_frames, timing
+
     def _segment_speed_j(self, prev_frame, frame):
-        prev_q = np.asarray([prev_frame["j1"], prev_frame["j2"], prev_frame["j3"], prev_frame["j4"]], dtype=float)
-        curr_q = np.asarray([frame["j1"], frame["j2"], frame["j3"], frame["j4"]], dtype=float)
         dt = max(float(frame["timeStamp"] - prev_frame["timeStamp"]), 1e-3)
-        delta = float(np.max(np.abs(curr_q - prev_q)))
-        if delta <= 1e-6:
-            return PREVIEW_STREAM_MIN_SPEEDJ
-        deg_per_sec = delta / dt
-        ratio = int(round((deg_per_sec / PREVIEW_STREAM_REF_VEL_DEG_S) * 100.0))
-        return max(PREVIEW_STREAM_MIN_SPEEDJ, min(PREVIEW_STREAM_SPEEDJ, ratio))
+        return speed_percent_for_segment(
+            self._frame_q_deg(prev_frame),
+            self._frame_q_deg(frame),
+            dt,
+            (PREVIEW_JOINT_SPEED_AT_100_DEG_S,) * 4,
+            min_percent=PREVIEW_STREAM_MIN_SPEEDJ,
+            max_percent=PREVIEW_STREAM_SPEEDJ,
+        )
 
     def _lookahead_seconds(self, target_t):
         if len(target_t) < 2:
@@ -380,11 +470,13 @@ class TrajectoryRecorder:
         """Sequencer: dynamically queues commands ahead of time while firing
         graph callbacks at wall-clock time in a polling loop.
         """
-        frames = self.loaded_frames
-        n = len(frames)
+        source_frames = self.loaded_frames
+        n = len(source_frames)
         if n == 0:
             return
 
+        frames, timing = self._retime_frames_for_playback(source_frames)
+        source_t0_traj = source_frames[0]["timeStamp"]
         t0_traj = frames[0]["timeStamp"]
         total_dur = frames[-1]["timeStamp"] - t0_traj
 
@@ -392,6 +484,7 @@ class TrajectoryRecorder:
         LOOKAHEAD = self._lookahead_seconds(np.array([f["timeStamp"] - t0_traj for f in frames]))
         
         # Prepare for smooth real-time interpolation for the monitor graphs
+        source_target_t = np.array([f["timeStamp"] - source_t0_traj for f in source_frames])
         target_t = np.array([f["timeStamp"] - t0_traj for f in frames])
         target_q = np.array([[f['j1'], f['j2'], f['j3'], f['j4']] for f in frames])
 
@@ -409,7 +502,15 @@ class TrajectoryRecorder:
 
         idx = 1
         t_start = self._time_fn()
-        self._emit_playback_event("playback_start", total_duration_s=total_dur, waypoints=n)
+        self._emit_playback_event(
+            "playback_start",
+            total_duration_s=total_dur,
+            original_duration_s=timing.original_duration_s,
+            retimed_duration_s=timing.retimed_duration_s,
+            time_scale=timing.time_scale,
+            original_timing_feasible=timing.is_original_timing_feasible,
+            waypoints=n,
+        )
         while not self._stop_flag.is_set():
             elapsed = self._time_fn() - t_start
             
@@ -430,6 +531,7 @@ class TrajectoryRecorder:
                     index=idx,
                     command=cmd,
                     target_time_s=float(target_t[idx]),
+                    original_target_time_s=float(source_target_t[idx]),
                     elapsed_s=float(elapsed),
                     speed_j=speed_j,
                     cp=cp,

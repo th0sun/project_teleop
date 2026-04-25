@@ -7,6 +7,8 @@ sensor_msgs = types.ModuleType("sensor_msgs")
 sensor_msgs_msg = types.ModuleType("sensor_msgs.msg")
 std_msgs = types.ModuleType("std_msgs")
 std_msgs_msg = types.ModuleType("std_msgs.msg")
+trajectory_msgs = types.ModuleType("trajectory_msgs")
+trajectory_msgs_msg = types.ModuleType("trajectory_msgs.msg")
 
 
 class _DummyMsg:
@@ -20,13 +22,17 @@ std_msgs_msg.Bool = _DummyMsg
 std_msgs_msg.Int32MultiArray = _DummyMsg
 std_msgs_msg.Int64 = _DummyMsg
 std_msgs_msg.Int32 = _DummyMsg
+trajectory_msgs_msg.JointTrajectory = _DummyMsg
 
 sensor_msgs.msg = sensor_msgs_msg
 std_msgs.msg = std_msgs_msg
+trajectory_msgs.msg = trajectory_msgs_msg
 sys.modules["sensor_msgs"] = sensor_msgs
 sys.modules["sensor_msgs.msg"] = sensor_msgs_msg
 sys.modules["std_msgs"] = std_msgs
 sys.modules["std_msgs.msg"] = std_msgs_msg
+sys.modules["trajectory_msgs"] = trajectory_msgs
+sys.modules["trajectory_msgs.msg"] = trajectory_msgs_msg
 
 from mg400_controller.common.config.motion_config import (  # noqa: E402
     DASHBOARD_CMD_TOPIC,
@@ -34,6 +40,7 @@ from mg400_controller.common.config.motion_config import (  # noqa: E402
     SAFETY_TOPIC,
     TOOL_ACTUAL_TOPIC,
     TRAJECTORY_DATA_TOPIC,
+    UNITY_TRAJECTORY_TOPIC,
     UNITY_PONG_TOPIC,
     UNITY_TOPIC,
 )
@@ -85,6 +92,7 @@ class TeleopRosWiringTest(unittest.TestCase):
             "dashboard_cmd_callback": lambda msg: None,
             "teach_status_callback": lambda msg: None,
             "traj_data_callback": lambda msg: None,
+            "joint_trajectory_callback": lambda msg: None,
         }
 
         subscriptions = create_subscriptions(node, **callbacks)
@@ -92,7 +100,8 @@ class TeleopRosWiringTest(unittest.TestCase):
         self.assertEqual(subscriptions.pong.topic, UNITY_PONG_TOPIC)
         self.assertEqual(subscriptions.dashboard_cmd.topic, DASHBOARD_CMD_TOPIC)
         self.assertEqual(subscriptions.traj_data.topic, TRAJECTORY_DATA_TOPIC)
-        self.assertEqual(len(node.subscription_calls), 6)
+        self.assertEqual(subscriptions.unity_trajectory.topic, UNITY_TRAJECTORY_TOPIC)
+        self.assertEqual(len(node.subscription_calls), 7)
 
     def test_attach_unity_subscription_uses_unity_topic(self):
         node = FakeNode()

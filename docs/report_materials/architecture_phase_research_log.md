@@ -487,3 +487,125 @@ requirement, separation between raw session capture and canonical task program,
 and introduction of a kinematics-provider seam from the first implementation
 milestone.
 ```
+
+## 13. Demo-Critical Teach-Repeat Timing Update
+
+Date: 2026-04-26
+
+The project has an immediate demonstration constraint: in the next project
+review, the system must convincingly show the MG400 responding to VR/Unity
+input and performing pick-and-place style work with suction.  This does not
+replace the multi-robot teaching objective, but it changes the implementation
+priority: the MG400 path must be robust enough for a live demo while still
+moving toward the reusable architecture.
+
+Important clarification:
+
+- Real-time MG400 control and teach-repeat playback are different execution
+  modes.
+- Real-time mode should follow the latest Unity/VR target as responsively as
+  possible.
+- Teach-repeat mode should preserve the demonstrated path and timing when the
+  robot can physically execute it.
+- If the demonstrated hand motion is faster than the robot can execute, the
+  correct behavior is not to discard waypoints or apply an arbitrary fixed
+  speed cap.  The correct behavior is to preserve all taught waypoints and
+  stretch the timeline only as much as needed by the robot limits.
+
+Implementation added:
+
+- `src/robot_teaching_core/teaching_core/trajectory/retiming.py`
+  - robot-neutral timed joint trajectory retimer
+  - preserves original timestamps when feasible
+  - stretches only segments that exceed configured joint velocity limits
+  - keeps the original geometric path unchanged
+- `src/dobot_mg400/mg400_controller/mg400_controller/common/trajectory/trajectory_recorder.py`
+  - uses the retimer during preview/playback
+  - computes MG400 `SpeedJ` from segment distance and segment duration
+  - emits playback metadata showing original duration, retimed duration, and
+    whether original timing was feasible
+  - can load already-materialized frames from Unity or other upstream
+    trajectory sources
+  - tightens final settle tolerance from 2.0 deg to 0.5 deg for better
+    pick/place accuracy
+- `src/dobot_mg400/mg400_controller/mg400_controller/vr_teleop_node.py`
+  - subscribes to Unity's `trajectory_msgs/JointTrajectory` topic
+    `/mg400/joint_trajectory_controller/command`
+  - converts ROS radians + `time_from_start` points into internal degree
+    frames
+  - starts MG400 TCP playback through the same retimed `TrajectoryRecorder`
+    path used by saved JSON playback
+- `tools/demo_lift/retiming_demo.py`
+  - software-only demonstration showing both feasible and too-fast hand motion
+
+Current software demo result:
+
+```text
+A. demo pick-and-place timing is preserved
+waypoints in/out: 7 / 7
+original duration: 3.000s
+retimed duration:  3.000s
+time scale:        x1.000
+original feasible: True
+
+B. too-fast hand motion is stretched, not decimated
+waypoints in/out: 3 / 3
+original duration: 0.100s
+retimed duration:  0.389s
+time scale:        x3.889
+original feasible: False
+```
+
+Current live MG400 Mock replay probe after final-settle tightening:
+
+```text
+planned_duration_s:   3.0
+measured_duration_s:  3.332
+max_error_deg:        6.7433
+mean_error_deg:       3.0829
+final_error_deg:      [0.0, 0.4444, 0.0, 0.0]
+final waypoint arrival: target 3.0s, arrival 3.281s, timing error +0.281s
+```
+
+Interpretation for the report:
+
+- The taught path can be preserved without waypoint decimation.
+- MG400 TCP playback cannot guarantee exact timestamp tracking in the same way
+  as a ROS2 `JointTrajectoryController`.
+- However, a retiming layer can make the behavior explainable: if the motion is
+  feasible, preserve timing; if not, report the minimum required slowdown.
+- For pick/place, final-settle tolerance matters more than ending exactly at
+  the nominal schedule.  The system now waits for a tighter final error before
+  declaring playback complete.
+
+Unity repository status:
+
+- Repository cloned as a sibling workspace:
+  `/Users/thesun/the_core/Robotics_and_PLC/project_teleop_ws/TeleOp`
+- Remote: `https://github.com/Bazedo/TeleOp.git`
+- Current checked-out branch: `master`
+- Latest observed commit:
+  `8b29b9c Merge pull request #2 from Bazedo/prevent-project-bom`
+  at `2026-04-26 00:18:05 +0700`
+- Relevant Unity scripts:
+  - `Assets/Scripts/ContinuousTeachAndRepeat.cs`
+  - `Assets/Scripts/ROSPathPublisher.cs`
+  - `Assets/Scripts/VacummRosControl.cs`
+- Unity already publishes:
+  - live joint commands on `/unity/joint_cmd`
+  - suction command on `/vr/suction_cmd`
+  - saved teach-repeat trajectory as `trajectory_msgs/JointTrajectory` on
+    `/mg400/joint_trajectory_controller/command`
+
+Next implementation implication:
+
+The ROS/MG400 side should add or adapt a bridge that consumes Unity's
+`trajectory_msgs/JointTrajectory`, converts it into the same retimed playback
+path used by `TrajectoryRecorder`, and then emits MG400 TCP commands.  This
+keeps the Unity-facing contract close to standard ROS practice while still
+handling MG400's queued TCP limitations.
+
+Status after this update: the first version of this bridge exists in
+`vr_teleop_node.py`.  It still needs a real Unity-to-ROS smoke test with the
+Quest/Unity scene, but unit tests now cover the conversion from Unity-style
+`JointTrajectory` points into internal degree frames.

@@ -26,6 +26,7 @@ import numpy as np
 
 _REPO = Path(__file__).resolve().parents[2]
 for _pkg in (
+    "src/robot_teaching_core",
     "src/dobot_mg400/mg400_controller",
     "src/dobot_mg400/mg400_protocol",
     "MG400_Mock/app/src",

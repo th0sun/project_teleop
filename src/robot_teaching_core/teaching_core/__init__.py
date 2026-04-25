@@ -10,6 +10,7 @@ Subpackages:
 - capture/      raw demo IO seam (Unity stream -> *.session.mcap)
 - calibration/  VR/task/robot frame binding + advisory workspace feedback
 - lifter/       segmentation + Cartesian lifting (consumes provider via DI)
+- trajectory/   timestamp preservation + robot-limit retiming utilities
 
 Hard rule: this package MUST NOT import from any `adapters.*` or
 robot-specific module. The import-discipline test in

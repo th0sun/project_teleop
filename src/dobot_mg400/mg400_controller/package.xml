@@ -9,6 +9,7 @@
 
   <exec_depend>mg400_protocol</exec_depend>
   <exec_depend>robot_teaching_core</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

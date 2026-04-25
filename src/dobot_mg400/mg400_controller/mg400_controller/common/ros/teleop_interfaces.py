@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray, Int64, Int32
+from trajectory_msgs.msg import JointTrajectory
 
 import mg400_controller.common.config.motion_config as motion_config
 from mg400_controller.common.config.motion_config import (
@@ -30,6 +31,7 @@ from mg400_controller.common.config.motion_config import (
     TRAJ_PREVIEW_TOPIC,
     TEACH_STATUS_TOPIC,
     TRAJECTORY_DATA_TOPIC,
+    UNITY_TRAJECTORY_TOPIC,
     TOOL_ACTUAL_TOPIC,
     TOOL_TARGET_TOPIC,
     FLANGE_ACTUAL_TOPIC,
@@ -68,6 +70,7 @@ class TeleopSubscriptions:
     dashboard_cmd: object
     teach_status: object
     traj_data: object
+    unity_trajectory: object
     unity: object = None
 
 
@@ -102,6 +105,7 @@ def create_subscriptions(
     dashboard_cmd_callback,
     teach_status_callback,
     traj_data_callback,
+    joint_trajectory_callback,
 ):
     return TeleopSubscriptions(
         pong=node.create_subscription(String, UNITY_PONG_TOPIC, unity_pong_callback, 10),
@@ -123,6 +127,12 @@ def create_subscriptions(
             String,
             TRAJECTORY_DATA_TOPIC,
             traj_data_callback,
+            10,
+        ),
+        unity_trajectory=node.create_subscription(
+            JointTrajectory,
+            UNITY_TRAJECTORY_TOPIC,
+            joint_trajectory_callback,
             10,
         ),
     )

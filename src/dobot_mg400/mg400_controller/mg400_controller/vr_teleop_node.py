@@ -53,6 +53,7 @@ from mg400_controller.common.utils.interactive_cmd import InteractiveCommandHand
 from mg400_controller.common.utils.error_handler import ErrorHandler
 from mg400_controller.common.utils.collision_haptic import CollisionHaptic
 from mg400_controller.common.trajectory.trajectory_recorder import TrajectoryRecorder
+from mg400_controller.common.trajectory.trajectory_recorder import frames_from_joint_trajectory_msg
 from mg400_controller.common.utils.teleop_logger import TeleopLogger
 from mg400_controller.common.logic.safety_monitor import SafetyMonitor
 from mg400_controller.common.logic.teleop_controller import TeleopController
@@ -144,6 +145,7 @@ class TeleopNode(Node):
             dashboard_cmd_callback=self._dashboard_cmd_callback,
             teach_status_callback=self._teach_status_callback,
             traj_data_callback=self._traj_data_callback,
+            joint_trajectory_callback=self._joint_trajectory_callback,
         )
         
         # Suction Cup Control (Smart Trigger)
@@ -226,7 +228,10 @@ class TeleopNode(Node):
         self.create_timer(0.05, self._publish_haptic_feedback)
         
         self.get_logger().info(f"✅ Teleop Node Ready")
-        self.get_logger().info(f"🎓 Teach & Repeat: /unity/teach_status + /unity/trajectory_data")
+        self.get_logger().info(
+            "🎓 Teach & Repeat: /unity/teach_status + /unity/trajectory_data "
+            f"+ {motion_config.UNITY_TRAJECTORY_TOPIC}"
+        )
         self.get_logger().info(f"📊 Control Strategy: Proximity + Velocity-Based Stuck Detection")
         self.get_logger().info(f"📏 Dyn Proximity Base: {motion_config.DYNAMIC_PROXIMITY_BASE_RAD:.3f} rad ({np.degrees(motion_config.DYNAMIC_PROXIMITY_BASE_RAD):.1f} deg)")
         self.get_logger().info(f"🎯 Target Change Threshold: {motion_config.TARGET_CHANGE_THRESHOLD:.3f} rad ({np.degrees(motion_config.TARGET_CHANGE_THRESHOLD):.1f} deg)")
@@ -438,6 +443,28 @@ class TeleopNode(Node):
             path = self.trajectory_recorder.save_from_unity_json(json_str)
             if path:
                 self.get_logger().info(f"🎓 Unity trajectory saved → {path}")
+
+    def _joint_trajectory_callback(self, msg):
+        """Handle Unity's saved teach-repeat JointTrajectory and play it."""
+        frames = frames_from_joint_trajectory_msg(msg)
+        if not frames:
+            self.get_logger().warn("⚠️ Unity JointTrajectory had no valid 4-joint points")
+            return
+
+        tr = self.trajectory_recorder
+        if tr.load_frames(frames, name="unity_joint_trajectory"):
+            t0 = frames[0]["timeStamp"]
+            preview = {
+                "t": [f["timeStamp"] - t0 for f in frames],
+                "q": [[f["j1"], f["j2"], f["j3"], f["j4"]] for f in frames]
+            }
+            pmsg = String(); pmsg.data = json.dumps(preview)
+            self.publishers.traj_preview.publish(pmsg)
+            self.get_logger().info(
+                f"🎓 Unity JointTrajectory received: {len(frames)} points, "
+                f"{frames[-1]['timeStamp'] - frames[0]['timeStamp']:.2f}s; starting playback"
+            )
+            tr.start_preview()
 
     def _playback_waypoint_callback(self, q_rad):
         """Called by TrajectoryRecorder when a waypoint is queued (sent to robot).
