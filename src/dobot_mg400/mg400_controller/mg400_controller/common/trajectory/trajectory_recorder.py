@@ -53,7 +53,9 @@ PREVIEW_START_SPEEDJ = 20
 PREVIEW_START_ACCJ = 50
 PREVIEW_START_CP = 0
 PREVIEW_STREAM_SPEEDJ = 100
+PREVIEW_STREAM_MIN_SPEEDJ = 15
 PREVIEW_STREAM_CP = 20
+PREVIEW_FINAL_CP = 0
 PREVIEW_START_TIMEOUT_SEC = 6.0
 PREVIEW_START_TOLERANCE_DEG = 3.0
 PREVIEW_FINAL_TOLERANCE_DEG = 2.0
@@ -61,6 +63,10 @@ PREVIEW_FINAL_EXTRA_TIMEOUT_SEC = 2.0
 PREVIEW_ABSOLUTE_TIMEOUT_SEC = 10.0
 PREVIEW_POLL_SEC = 0.01
 PREVIEW_WAIT_POLL_SEC = 0.05
+PREVIEW_LOOKAHEAD_MIN_SEC = 0.10
+PREVIEW_LOOKAHEAD_MAX_SEC = 0.25
+PREVIEW_LOOKAHEAD_FRAMES = 2.0
+PREVIEW_STREAM_REF_VEL_DEG_S = 50.0
 
 
 class TrajectoryRecorder:
@@ -285,6 +291,28 @@ class TrajectoryRecorder:
             return None
         return np.degrees(np.asarray(pos[:4], dtype=float))
 
+    def _segment_speed_j(self, prev_frame, frame):
+        prev_q = np.asarray([prev_frame["j1"], prev_frame["j2"], prev_frame["j3"], prev_frame["j4"]], dtype=float)
+        curr_q = np.asarray([frame["j1"], frame["j2"], frame["j3"], frame["j4"]], dtype=float)
+        dt = max(float(frame["timeStamp"] - prev_frame["timeStamp"]), 1e-3)
+        delta = float(np.max(np.abs(curr_q - prev_q)))
+        if delta <= 1e-6:
+            return PREVIEW_STREAM_MIN_SPEEDJ
+        deg_per_sec = delta / dt
+        ratio = int(round((deg_per_sec / PREVIEW_STREAM_REF_VEL_DEG_S) * 100.0))
+        return max(PREVIEW_STREAM_MIN_SPEEDJ, min(PREVIEW_STREAM_SPEEDJ, ratio))
+
+    def _lookahead_seconds(self, target_t):
+        if len(target_t) < 2:
+            return PREVIEW_LOOKAHEAD_MIN_SEC
+        diffs = np.diff(target_t)
+        positive = diffs[diffs > 1e-6]
+        if len(positive) == 0:
+            return PREVIEW_LOOKAHEAD_MIN_SEC
+        median_dt = float(np.median(positive))
+        window = median_dt * PREVIEW_LOOKAHEAD_FRAMES
+        return max(PREVIEW_LOOKAHEAD_MIN_SEC, min(PREVIEW_LOOKAHEAD_MAX_SEC, window))
+
     def _wait_until_near_target(self, target_q_deg, tolerance_deg, timeout_sec):
         if self._get_pos is None:
             self._sleep_fn(timeout_sec)
@@ -350,7 +378,7 @@ class TrajectoryRecorder:
         total_dur = frames[-1]["timeStamp"] - t0_traj
 
         self._log.info(f"▶️  Preview start — {n} waypoints, {total_dur:.1f}s")
-        LOOKAHEAD = 0.25
+        LOOKAHEAD = self._lookahead_seconds(np.array([f["timeStamp"] - t0_traj for f in frames]))
         
         # Prepare for smooth real-time interpolation for the monitor graphs
         target_t = np.array([f["timeStamp"] - t0_traj for f in frames])
@@ -368,7 +396,7 @@ class TrajectoryRecorder:
             self._log.warn("⚠️  Preview aborted: robot did not reach trajectory start in time")
             return
 
-        idx = 0
+        idx = 1
         t_start = self._time_fn()
         while not self._stop_flag.is_set():
             elapsed = self._time_fn() - t_start
@@ -376,10 +404,13 @@ class TrajectoryRecorder:
             # 1. Pre-send any waypoints that fall within the current lookahead window
             while idx < len(frames) and target_t[idx] <= elapsed + LOOKAHEAD:
                 fr = frames[idx]
+                prev_fr = frames[idx - 1]
+                speed_j = self._segment_speed_j(prev_fr, fr)
+                cp = PREVIEW_FINAL_CP if idx == len(frames) - 1 else PREVIEW_STREAM_CP
                 cmd = self._build_jointmovj_command(
                     [fr['j1'], fr['j2'], fr['j3'], fr['j4']],
-                    speed_j=PREVIEW_STREAM_SPEEDJ,
-                    cp=PREVIEW_STREAM_CP,
+                    speed_j=speed_j,
+                    cp=cp,
                 )
                 self._send(cmd)
                 
