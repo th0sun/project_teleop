@@ -1,5 +1,13 @@
 # Thai Prompt For Proposal Re-Check
 
+> Historical prompt.
+> This file was used during the architecture pressure-pass / proposal re-check
+> loop before `next_phase_architecture_proposal.md` stabilized as the main
+> source of truth. It is archived for traceability and report-writing support.
+> It is no longer the primary prompt for the next implementation step.
+> For the next build phase, use
+> `docs/ai_handoffs/implementation_pr1_prompt_th.md` instead.
+
 ไฟล์นี้คือ prompt ภาษาไทยสำหรับส่งกลับไปให้ AI อีกตัวตรวจ proposal
 สถาปัตยกรรมรอบล่าสุดใหม่อีกครั้ง โดยตั้งใจให้มัน **ไม่เชื่อ review findings
 หรือความเห็นใดๆ แบบอัตโนมัติ** แต่ต้องไปหาหลักฐานจริงจากทั้ง repository และ
