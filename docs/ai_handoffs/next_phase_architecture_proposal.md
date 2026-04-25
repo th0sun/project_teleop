@@ -12,8 +12,10 @@ Status: **proposal / draft v1.3** (second pressure-pass folded in:
 per-step orientation intent now required, KinematicsContract replaces
 URDF-required, two-tier capture model `*.session.mcap`/`*.program.json`,
 M4/M5 collapse; VR-to-robot calibration and delta-robot coverage added).
-PR1 core scaffold is implemented in `src/robot_teaching_core/` as of
-commit `843cb7b`; later migration phases are not implemented yet.
+PR1 core scaffold is implemented in `src/robot_teaching_core/`
+(`843cb7b`, with adapter contracts through `32cc739`). M2 runtime
+helper extraction is implemented in `c361f64`. Later adapter/lifter
+migration phases are not implemented yet.
 
 Scope: answer the design questions in
 `docs/ai_handoffs/next_phase_architecture_brief.md` with a concrete, testable
@@ -1026,6 +1028,14 @@ Move out of `mg400_controller/common/` into `teaching_core/`:
 
 Behavior change: zero (wrappers keep old imports working for one
 release).
+
+Implementation status (2026-04-25): target latency compensation,
+remote clock calibration, and generic joint clamp math have moved into
+`teaching_core` in commit `c361f64`. The old MG400 import paths remain
+as wrappers, and MG400-specific limits/elbow policy remain in
+`mg400_controller`. The `TrajectoryRecorder` cache relocation is
+deferred until the M3 adapter package reshape so today's playback
+surface does not move twice.
 
 ### Phase M3 — First adapter: wrap MG400 as `adapters/mg400/`
 
