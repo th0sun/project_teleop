@@ -42,3 +42,9 @@ from teaching_core.program.io import (  # noqa: F401
     program_to_dict,
     program_from_dict,
 )
+from teaching_core.program.validation import (  # noqa: F401
+    JointClampResult,
+    clamp_joint_positions,
+    clamp_joint_target,
+    clamp_relative_joint_angle,
+)
