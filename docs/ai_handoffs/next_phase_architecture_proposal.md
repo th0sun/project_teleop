@@ -8,10 +8,11 @@
 > disagree, this one wins; the revision file must be patched to
 > match.
 
-Status: **proposal / draft v1.2** (second pressure-pass folded in:
+Status: **proposal / draft v1.3** (second pressure-pass folded in:
 per-step orientation intent now required, KinematicsContract replaces
 URDF-required, two-tier capture model `*.session.mcap`/`*.program.json`,
-M4/M5 collapse). Not yet implemented.
+M4/M5 collapse; VR-to-robot calibration and delta-robot coverage added).
+Not yet implemented.
 
 Scope: answer the design questions in
 `docs/ai_handoffs/next_phase_architecture_brief.md` with a concrete, testable
@@ -329,6 +330,7 @@ src/
   robot_teaching_core/           # new, robot-neutral
     teaching_core/
       capture/                   # raw session IO (Unity stream → *.session.mcap)
+      calibration/               # VR/task/robot frame binding + feedback hints
       lifter/                    # segmentation + Cartesian lifting
       program/                   # canonical IR types + schema + IO
       capability/                # RobotCapabilityProfile dataclass + validation
@@ -375,6 +377,18 @@ lose information.
       "target_part": { "parent": "world", "pose": null }
     },
     "tool_offset_m": [0.0, 0.0, 0.0]
+  },
+  "calibration": {
+    "source_space": "openxr_stage",
+    "task_frame": "world",
+    "source_to_task_transform": {
+      "translation_m": [0.10, -0.03, 0.72],
+      "rotation_quat_xyzw": [0.0, 0.0, 0.7071, 0.7071],
+      "uniform_scale": 1.0
+    },
+    "method": "three_point_table_fixture",
+    "quality": { "rms_error_m": 0.008 },
+    "workspace_feedback": "advisory_only"
   },
   "defaults": {
     "speed_pct": 50,
@@ -430,6 +444,100 @@ at replay (operator pick, perception, fixture probe). Each `move` step
 specifies `pose_frame`; default is `"world"`. Object-frame support is
 the TP-GMM-shaped lever for "teach once, replay when the part moves"
 without re-teaching. Adapters resolve object frames before IK.
+
+**Teaching calibration / retargeting contract.** The VR space is not
+allowed to be treated as the robot workspace. OpenXR `STAGE` space is
+useful because it gives a floor-referenced rectangular room-space
+origin and bounds, but it is still an operator-space frame, not the
+robot base, table, fixture, or object frame. ROS `tf2`'s lesson is the
+right one here: every pose must carry its source frame, and the system
+must know the transform chain before a number becomes meaningful.
+
+The architecture therefore introduces a minimal `calibration` block
+beside `frames`. A VR-captured program MUST record how the source
+space was grounded into a task frame before it is considered
+replayable. Hand-authored programs may omit `calibration` only if all
+poses are already expressed in robot/task frames and the source field
+declares that.
+
+The calibration block answers four questions:
+
+- where did the source pose come from (`source_space`, e.g.
+  `openxr_stage`, `unity_world`, `hand_authored`);
+- which task frame does it bind to (`task_frame`, usually `world` or
+  a fixture/object frame);
+- what transform/scale was used (`source_to_task_transform`);
+- how trustworthy is it (`method`, `quality.rms_error_m`).
+
+This is deliberately not a full vision system. v0.1 accepts a few
+grounding methods that can be implemented with the current project:
+
+| Method | What the operator does | When to use |
+|---|---|---|
+| `three_point_table_fixture` | touch/mark three known points on the table or fixture | simple table pick/place, establishes origin + axes + height |
+| `object_frame_bind` | bind `frames.objects.<name>` at replay using operator input, perception, or a fixture probe | when the object may move between teaching and replay |
+| `robot_probe` | jog the robot/tool to one or more known points to measure the task frame | when VR/table alignment is not trusted |
+| `manual_transform` | enter a known transform from setup notes | fixed lab/demo cells |
+
+The important design choice: **VR feedback is advisory, robot-side
+validation is authoritative.** The adapter/capability side can export
+a `TeachingFeedbackContract` to Unity/VR so the operator sees a
+reachable volume, table plane, object frames, forbidden zones, and
+near-boundary warnings. Unity can render this as overlays or haptic
+impulses. But the core must still validate the captured program after
+capture. If VR is absent, inaccurate, or ignores feedback, the adapter
+still catches unreachable or unsupported steps.
+
+```python
+class WorkspaceFeedbackKind(StrEnum):
+    NONE = "none"
+    VISUAL_ONLY = "visual_only"
+    HAPTIC_BOUNDARY = "haptic_boundary"
+    HAPTIC_AND_VISUAL = "haptic_and_visual"
+
+@dataclass(frozen=True)
+class TeachingFeedbackContract:
+    task_frame: str
+    reachable_workspace_hint: "WorkspaceModel"
+    forbidden_regions: list["WorkspaceModel"]
+    table_plane: Optional[tuple[float, float, float, float]]  # ax+by+cz+d=0
+    object_frames: dict[str, "Pose"]
+    feedback_kind: WorkspaceFeedbackKind
+```
+
+The haptic side should stay simple. OpenXR and Unity XR give us
+controller vibration primitives, not a precise force-feedback master.
+So haptics should mean "you are near/outside a constraint" or "this
+boundary matters," not "the robot guarantees this hand pose is valid."
+Research on virtual fixtures supports this split: haptic/visual
+fixtures can improve operator awareness and collision avoidance, but
+they are still interface assistance, not the final feasibility proof.
+
+**Retargeting policy.** A captured program may need adjustment before
+it can run on a different robot or a different table setup. The policy
+must be explicit, not hidden in adapter math:
+
+```text
+retargeting_policy ∈ {
+  "strict",             # fail if the taught pose is not reachable as-is
+  "frame_rebind",       # resolve object/task frames at replay
+  "project_with_error", # project to feasible subspace, but report the delta
+  "operator_review"     # produce diagnostics; require user acceptance
+}
+```
+
+Default for v0.1 is `frame_rebind` + `strict`: use task/object frames
+to adapt normal setup changes, but do not silently clamp a bad
+demonstration into the robot's workspace. Clamping may be useful for
+live preview, but not for generating a replayable robot program unless
+the operator accepts the projection error.
+
+This directly addresses the VR precision problem: bare VR hand motion
+is not accurate enough to define exact table/object contact by itself.
+Accurate replay comes from binding the demonstration to task frames,
+tool offsets, table/fixture calibration, and robot reachability checks.
+The demo gives intent and approximate motion; the calibration +
+adapter stack grounds it.
 
 **`action_layout_compat`** is a non-binding annotation declaring that
 `move` step pose + adjacent `tool` step gripper state align with the
@@ -510,14 +618,30 @@ kinematic tree and limits; SRDF supplies the planning group and
 collision pairs; `ros2_control` supplies the per-joint command/state
 interface vocabulary. The profile only adds what those layers do not
 cover: execution-mode support, queue semantics, tool model,
-orientation authority, timing contract.
+orientation authority, workspace envelope, timing contract.
 
 ```python
 class OrientationAuthority(StrEnum):
     FULL_6DOF       = "full_6dof"        # any reachable orientation
     YAW_ONLY_SCARA  = "yaw_only_scara"   # SCARA: tool yaw free, roll/pitch fixed
+    TRANSLATION_ONLY_DELTA = "translation_only_delta"  # 3-DOF delta / fixed platform
     PLANAR_XY_RZ    = "planar_xy_rz"     # planar manipulators
     CUSTOM          = "custom"           # see orientation_axis_mask
+
+class WorkspaceKind(StrEnum):
+    BOX = "box"                          # conservative AABB
+    CONVEX_MESH = "convex_mesh"          # e.g. simplified MoveIt PlanningScene shape
+    SAMPLED_REACHABILITY = "sampled_reachability"  # point cloud / voxel reachability map
+    ANALYTIC_DELTA = "analytic_delta"    # delta/parallel-robot envelope + singular zones
+    EXTERNAL = "external"                # vendor or simulator feasibility query
+
+@dataclass(frozen=True)
+class WorkspaceModel:
+    kind: WorkspaceKind
+    frame: str
+    margin_m: float
+    source: str                         # "urdf", "vendor_spec", "sampled_ik", ...
+    payload: dict                       # shape-specific parameters
 
 @dataclass(frozen=True)
 class MotionSupport:
@@ -558,6 +682,7 @@ class RobotCapabilityProfile:
 
     base_frame: str
     tcp_frame: str
+    workspace: WorkspaceModel
 
     motion: MotionSupport
     execution: ExecutionSupport
@@ -570,6 +695,28 @@ class RobotCapabilityProfile:
     max_joint_speed_rad_s: list[float]
     timing_contract: Literal["queued", "hard_realtime", "best_effort"]
 ```
+
+**WorkspaceModel.** This is what lets the robot side tell both the
+lifter and the VR interface where teaching is plausible. It is not a
+replacement for IK or collision checking; it is a conservative envelope
+for early feedback and fast rejection. Serial arms may start with a
+sampled reachability map from URDF IK. MG400 may start with a named
+provider plus a conservative box around the known work area. Delta
+robots need their own kind because the workspace is not well described
+by a simple box: parallel mechanisms have workspace boundaries and
+singularity zones that depend on their geometry, joint limits, and
+platform orientation.
+
+Rules:
+
+- VR may display `WorkspaceModel` as an overlay or haptic boundary.
+- The lifter may use it to mark low-confidence/out-of-workspace
+  samples.
+- The adapter must still run its own final reachability check before
+  execution.
+- Projection into the workspace is never silent; it emits a diagnostic
+  delta and requires `retargeting_policy = "project_with_error"` or
+  `operator_review`.
 
 **KinematicsContract.** Bluntly requiring `urdf_path: str` was wrong:
 `ros2_control` itself accepts a minimal `<ros2_control>`-only URDF
@@ -619,15 +766,19 @@ Adapters in this repo today:
 | UR / Franka | URDF, with SRDF + planning_group | MoveIt path. |
 | ABB RAPID export-only | NONE | Adapter only emits `.mod` files; no IK ever runs in this repo. |
 | Fake / sim | URDF (UR5, MG400) | CI runs Cartesian programs through real URDFs. |
+| Delta / pick-and-place | NAMED or EXTERNAL | Position-dominant adapter with `orientation_authority = TRANSLATION_ONLY_DELTA`; workspace is `ANALYTIC_DELTA` or sampled reachability, never a naive box. |
 
 **Orientation authority** is a correctness gate. SCARA / 4-DOF arms
 (MG400, M1 Pro) declare `YAW_ONLY_SCARA`; the translator projects the
 IR's full-6-DoF target onto the feasible subspace (preserve yaw,
-discard roll/pitch) **only when this field permits it**. A
-`FULL_6DOF` adapter that receives a yaw-only program is fine; a
-`YAW_ONLY_SCARA` adapter that receives roll/pitch intent the operator
-genuinely meant must raise `UnsupportedStep` with a clear reason
-rather than silently flatten it. See R12.
+discard roll/pitch) **only when this field permits it**. A classical
+3-DOF delta declares `TRANSLATION_ONLY_DELTA`: it can accept
+position-dominant `free` / fixed-tool-axis moves, but must reject
+`exact` orientation intent unless an external wrist/tool module is
+declared. A `FULL_6DOF` adapter that receives a yaw-only program is
+fine; a limited-orientation adapter that receives roll/pitch intent
+the operator genuinely meant must raise `UnsupportedStep` with a clear
+reason rather than silently flatten it. See R12.
 
 The profile is **loaded once at adapter init**. It is read-only to the
 core. Any runtime state (current queue depth, error codes) belongs to
@@ -769,6 +920,15 @@ Standard `unittest`.
 session, assert the lifter produces a known canonical program.
 Segmentation stays testable.
 
+**Rung 2.5 — Calibration / retargeting contract tests.** Given
+synthetic OpenXR `STAGE` poses and a known table/fixture transform,
+assert that the calibration block maps samples into the expected
+task frame, reports RMS error, and refuses missing/low-confidence
+bindings for contact-critical steps. Also assert that
+`TeachingFeedbackContract` generation is advisory: it may produce
+reachable-volume hints for Unity, but execution still depends on the
+adapter reachability check.
+
 **Rung 3 — Adapter translator golden tests.** For each adapter, a
 set of `(canonical_program, expected_native_commands)` pairs. For
 MG400 this is `(program, list_of_TCP_strings)`. Pure function, no
@@ -792,12 +952,14 @@ test config.
 
 **Rung 6 — Kinematics/physics sim.** **PyBullet** + URDF as the
 first-line option (lightweight, no ROS build). Validate that the
-canonical program, when adapted to a given URDF, produces reachable
-motion with no joint limit violations. Robot-agnostic; the same
-harness drives MG400 URDF, UR5 URDF, Panda URDF. **The test matrix
-must include at least one URDF with a different DOF count from MG400
-from day one** (UR5 is the pragmatic choice — community URDF stable,
-no license key). See R1.
+canonical program, when adapted to a given URDF or workspace provider,
+produces reachable motion with no joint limit violations. Robot-agnostic;
+the same harness drives MG400 URDF, UR5 URDF, Panda URDF,
+and a delta-style reachability provider. **The test matrix must
+include at least one URDF with a different DOF count from MG400 from
+day one** (UR5 is the pragmatic choice — community URDF stable, no
+license key), plus one translation-only delta/fake provider before the
+portability phase is considered complete. See R1 and R18.
 
 **Rung 7 — ROS2 `ros2_control` mock_components.** For any adapter
 that goes via `TRAJECTORY_ACTION` or `STREAMING`, run through
@@ -811,8 +973,9 @@ adapters get validated without hardware.
 manual.
 
 The chosen architecture is not considered complete until rungs 0–4
-are wired into CI and rung 6 works for MG400 URDF with at least one
-non-MG400 URDF in the test matrix.
+are wired into CI and rung 6 works for MG400 URDF, at least one
+non-MG400 URDF, and one translation-only delta/fake workspace
+provider in the test matrix.
 
 ---
 
@@ -833,15 +996,17 @@ as the first concrete provider. No "temporary then fix" step.
 - create `src/robot_teaching_core/` as a ROS2 ament_python package;
 - define `program/schema.py`, `program/types.py`, `capability/profile.py`,
   `capability/kinematics.py` (the `KinematicsContract` + `KinematicsProvider`
-  Protocol from §4.4), `adapter_api/base.py`, `validation/golden.py`,
-  `kinematics/registry.py`;
+  Protocol from §4.4), `calibration/types.py`,
+  `calibration/feedback.py`, `adapter_api/base.py`,
+  `validation/golden.py`, `kinematics/registry.py`;
 - ship `kinematics/providers/null.py` (FK/IK both raise) and
   `kinematics/providers/urdf.py` (URDF-backed, uses `pinocchio` or
   `KDL` — pick at scoping) so the seam is real on day one;
 - no behavior change to MG400 runtime yet.
 
-Deliverables: package builds, schema round-trip tests pass, registry
-resolves a stub provider. 1 PR.
+Deliverables: package builds, schema round-trip tests pass,
+calibration dataclasses serialize, registry resolves a stub provider.
+1 PR.
 
 ### Phase M2 — Extract robot-neutral pieces from MG400
 
@@ -882,12 +1047,15 @@ end-to-end. Rung 3 + Rung 4 tests pass.
 - the lifter consumes `*.session.mcap` and emits canonical
   `*.program.json`;
 - segmentation uses dwell/velocity thresholds — robot-neutral math;
+- the lifter requires a calibration binding for VR-captured sessions
+  (`openxr_stage`/`unity_world` → task frame) before emitting
+  contact-critical `move` steps;
 - Cartesian poses come from an **injected** `KinematicsProvider`,
   resolved by the caller (CLI flag `--kinematics mg400_4axis_fk` or
   `--kinematics urdf:path/to/ur5.urdf`);
 - the lifter package is forbidden from importing
   `adapters.*` (enforced by a small import-linter test);
-- ship CLI: `python -m teaching_core.lifter --kinematics ... session.mcap > program.json`.
+- ship CLI: `python -m teaching_core.lifter --calibration ... --kinematics ... session.mcap > program.json`.
 
 The lifter's first concrete run uses the MG400 provider to make a
 real demo work, but **the lifter never references MG400 directly**.
@@ -901,7 +1069,9 @@ Add `adapters/fake/` (in-memory) and either:
 
 - `adapters/ur/` via `ros2_control` + UR ROS2 driver
   (`TRAJECTORY_ACTION` mode), or
-- `adapters/pybullet/` for a sim-first demonstration.
+- `adapters/pybullet/` for a sim-first demonstration, or
+- `adapters/delta_fake/` with a translation-only workspace provider
+  for pick-and-place style tasks.
 
 Run the same canonical program through MG400 adapter + fake adapter +
 second adapter. If it replays on a second robot (even a sim one)
@@ -946,12 +1116,12 @@ Honest list. If these are not addressed, the architecture will rot.
 
 | # | Risk | Why it hurts | Mitigation |
 |---|---|---|---|
-| R1 | Canonical IR turns into "MG400 commands in JSON" | kills retargeting, we built nothing | Cartesian pose is primary; `joint_hint` is hint only; **rung 6 test matrix MUST include at least one URDF with different DOF count from MG400 from day one** (UR5 community URDF). Lifter package may not import from `adapters/*`. |
-| R2 | Lifter depends on MG400 FK | ties "robot-neutral" core to one robot | M5 decouples FK via pluggable kinematics provider; enforce by making the lifter package not import from `adapters/*` |
+| R1 | Canonical IR turns into "MG400 commands in JSON" | kills retargeting, we built nothing | Cartesian pose is primary; `joint_hint` is hint only; **rung 6 test matrix MUST include at least one URDF with different DOF count from MG400 from day one** (UR5 community URDF), plus a translation-only delta/fake provider before portability is claimed. Lifter package may not import from `adapters/*`. |
+| R2 | Lifter depends on MG400 FK | ties "robot-neutral" core to one robot | M1 ships a pluggable `KinematicsProvider`; M4 lifter receives it through CLI/DI; enforce by making the lifter package not import from `adapters/*` |
 | R3 | Capability profile grows into a god-struct | every new robot adds fields, nothing gets removed | profile is versioned; fields must gate a real adaptation decision in code or they do not land; review checklist in `docs/skills/multi_robot_architecture/SKILL.md` |
 | R4 | `ExecutionMode` values are aspirational on MG400 | users think `STREAMING` means hard-realtime; it does not | `timing_contract` on the profile is displayed in all user-facing mode selection; docs spell out MG400's "streaming-through-queue" honestly |
 | R5 | The mock is wrong in known ways | false-green CI | rung 3 (golden translator tests) is the real correctness gate; the mock is only trusted for rung 5 (socket plumbing) |
-| R6 | Second-adapter work keeps getting deferred | architecture never proven | M6 gate: no further work on MG400 optimization until a second adapter (even `fake` + URDF-only sim) replays a real captured program |
+| R6 | Second-adapter work keeps getting deferred | architecture never proven | M5 gate: no further work on MG400 optimization until a second adapter (even `fake`, `delta_fake`, or URDF-only sim) replays a real captured program |
 | R7 | Retargeting fails silently on workspace mismatch | robot A reaches, robot B cannot, adapter quietly clips | planner runs an IK/reachability pass at adaptation time and surfaces an `UnreachableStep` error; partial execution is never the default |
 | R8 | Capture format and canonical format merge over time | muddies the "raw demo vs taught program" distinction | keep `*.session.mcap` (raw, MCAP) and `*.program.json` (canonical, JSON) as separate file kinds with separate schemas; lifter is the only thing that reads the first and writes the second; today's `TrajectoryRecorder` JSON is **neither** tier and lives only as MG400-internal playback cache (see §5 Rung 0) |
 | R9 | Over-investment in behavior trees / Option C early | eats calendar with no objective payoff | explicitly out of scope for this phase; revisit after M6 lands |
@@ -961,6 +1131,9 @@ Honest list. If these are not addressed, the architecture will rot.
 | R13 | `STREAMING` mode semantics diverge silently between ROS2-native arms and MG400 | one user's `STREAMING` is hard-realtime servo, another's is queue-best-effort | `timing_contract` on the profile is surfaced verbatim in any UI/CLI mode selector; MG400's `STREAMING` label reads "streaming-through-queue (best-effort)"; profile-driven label generation is contract-tested. |
 | R14 | Lifter quietly imports MG400 FK and re-bakes the bias M4 was supposed to fix | "robot-neutral" core in name only; M5/portability proof becomes theatre | M1 ships `KinematicsProvider` Protocol + URDF + Null implementations on day one; M4 lifter consumes provider via DI; **import-linter test** in CI fails the build if `teaching_core/lifter/` imports from `adapters.*` or from `mg400_*`. M4 acceptance includes running the lifter against a UR5 URDF synthetic session. |
 | R15 | Adapters silently ignore `orientation_intent` and use the raw quaternion | per-step intent looks like docs theatre; SCARA still projects without warning | Two layers: (1) **schema requires `orientation_intent` on every `move` step** — JSON Schema validation rejects programs that omit it, no silent defaulting; (2) translator contract: every `move` step's effective `[orientation_intent, orientation_tolerance_rad]` must be either honored exactly or rejected with `UnsupportedStep`. Golden tests for MG400 include yaw-only steps, full-6DoF steps, and one over-tight step that the adapter must refuse. |
+| R16 | VR poses are assumed to be robot-accurate | table height, object position, and operator-space drift turn a nice demo into an unusable robot program | VR-captured programs require a `calibration` block; contact-critical steps need a task/object frame binding; lifter reports calibration quality; adapter still performs final reachability/limit checks. |
+| R17 | VR feedback becomes a hard dependency | the system only works when Unity renders perfect robot constraints | `TeachingFeedbackContract` is advisory only. Unity may show/haptically mark reachable volume and forbidden zones, but canonical validation remains in core/adapter tests and execution refuses invalid programs without trusting VR. |
+| R18 | Delta / parallel robots are mis-modeled as simple boxes or SCARA arms | delta robots have non-box workspaces, position-dependent orientation limits, and singular zones | add `TRANSLATION_ONLY_DELTA` and `WorkspaceKind.ANALYTIC_DELTA`; include a translation-only delta/fake provider in the portability test matrix before declaring multi-robot support proven. |
 
 ---
 
@@ -998,26 +1171,32 @@ In order, each is a small PR:
 1. **Freeze the canonical IR schema** (JSON Schema file + Python
    dataclasses + round-trip tests). `orientation_intent` and
    `pose_frame` are **required** fields on every `move` step; schema
-   validation rejects programs that omit them. No adapter changes.
-   ~1 day.
+   validation rejects programs that omit them. Add the minimal
+   `calibration` block shape for VR-captured programs, but keep the
+   exact MCAP message schema open. No adapter changes. ~1–1.5 days.
 2. **Land `KinematicsContract` + `KinematicsProvider` Protocol +
-   stub URDF/Null providers + registry.** Required before profiles
-   compile. ~1 day.
+   stub URDF/Null providers + registry.** Add `WorkspaceModel` and
+   `TeachingFeedbackContract` dataclasses at the same time, because
+   capability profiles now need to express reachability hints before
+   VR/lifter can be honest. Required before profiles compile. ~1 day.
 3. **Land `RobotCapabilityProfile` dataclass + MG400 profile instance**
    (with `kinematics.kind = NAMED, provider_id = "mg400_4axis_fk"`).
-   Read-only, no behavior change. ~0.5 day.
+   Include a conservative workspace envelope. Read-only, no behavior
+   change. ~0.5 day.
 4. **Define `RobotAdapter` protocol + write a `FakeAdapter` + 3
    golden tests** including a yaw-only step and an over-tight step
-   the adapter must refuse. ~1 day.
+   the adapter must refuse. Add one translation-only delta/fake
+   profile fixture to prove the model does not assume serial-arm
+   orientation. ~1 day.
 5. **Introduce `adapters/mg400/` and re-export existing modules
    from it** (leave legacy imports as wrappers). Land
    `mg400_4axis_fk` provider here. Zero behavior change. ~1 day.
 6. **Lifter v0 with provider injection**: capture → lifter (via
-   injected provider) → canonical program → MG400 adapter →
-   playback. Same lifter binary must produce a valid program from a
-   synthetic UR5 URDF session. ~3–4 days.
-7. **Second adapter scaffold** (`fake` or `ur`), same canonical
-   program, run in sim. ~2–3 days.
+   calibration + injected provider) → canonical program → MG400
+   adapter → playback. Same lifter binary must produce a valid
+   program from a synthetic UR5 URDF session. ~3–4 days.
+7. **Second adapter scaffold** (`fake`, `delta_fake`, or `ur`), same
+   canonical program, run in sim. ~2–3 days.
 
 After (7), the next phase's stated goal — "teach once, replay
 elsewhere" — exists in the repo. Before (7), it does not.
@@ -1043,12 +1222,21 @@ These need a call, not a guess.
   bag — raw `sensor_msgs/JointState`, custom `unity_hand_pose` msg,
   or both. Pick when the first lifter PR lands; non-breaking either
   way as long as the lifter knows what to read.
+- **Calibration acquisition UI**: the data contract is now fixed, but
+  the exact UI flow is open: three-point table fixture, robot probe,
+  manual transform, or perception-assisted object binding. PR1 should
+  only define the data model and tests.
+- **Delta concrete model**: `TRANSLATION_ONLY_DELTA` and
+  `WorkspaceKind.ANALYTIC_DELTA` are fixed concepts, but the first
+  implementation can be a conservative fake/sampled provider until a
+  specific delta robot is selected.
 - **Program editing UI**: out of scope. The canonical JSON is the
   program; any UI is a separate tool that reads/writes the schema.
 
-**Closed (no longer open as of v1.2):**
-- ~~Frame handling for multi-part workspaces~~ — resolved in §4.3
-  (`frames.objects.*` + per-step `pose_frame`).
+**Closed (no longer open as of v1.3):**
+- ~~Frame handling for multi-part workspaces and VR grounding~~ —
+  resolved in §4.3 (`frames.objects.*`, per-step `pose_frame`,
+  `calibration`, and `TeachingFeedbackContract`).
 - ~~Per-step orientation tolerance vs profile-only~~ — resolved in
   §4.3 (`orientation_intent` + `orientation_tolerance_rad`).
 - ~~URDF required vs optional~~ — resolved in §4.4

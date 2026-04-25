@@ -7,9 +7,10 @@
 > If this file ever conflicts with the proposal, the proposal wins.
 > Never implement from this file; implement from the proposal.
 
-Status: audit log accompanying the proposal. Currently covers two
-pressure passes: v1.0 → v1.1 (research findings, Parts 1–5) and
-v1.1 → v1.2 (second pressure-pass, Part 6).
+Status: audit log accompanying the proposal. Currently covers three
+pressure passes: v1.0 → v1.1 (research findings, Parts 1–5),
+v1.1 → v1.2 (second pressure-pass, Part 6), and v1.2 → v1.3
+(VR-to-robot calibration + delta-robot coverage, Part 7).
 
 Purpose: pressure-test every significant claim in the proposal against
 published work, vendor docs, and the ROS2 ecosystem. Say what holds,
@@ -675,3 +676,102 @@ intent + profile authority.
 Open questions reduced; closed list now includes orientation, frames,
 URDF, and lifter-FK. Two new open questions opened: kinematics
 library choice, MCAP message-type for raw sessions.
+
+---
+
+## Part 7 — Third Pressure-Pass: VR Grounding + Delta Coverage (proposal v1.3)
+
+### 7.1 Question
+
+The user raised a real architecture gap: a VR hand pose is not
+automatically a robot-accurate pose. Bare VR teaching may not know the
+real table height, object pose, tool offset, robot base, or reachable
+workspace. If we ignore this, the canonical program can look clean but
+fail on the robot.
+
+The user also requested explicit delta-robot coverage, because a
+multi-robot teaching architecture must not assume only serial arms or
+SCARA-like manipulators.
+
+### 7.2 Evidence
+
+- ROS `tf2` frames are the right mental model: robotic systems contain
+  many frames, and meaningful pose use requires transforming data
+  between source and target frames over time.
+  <https://docs.ros.org/en/rolling/Concepts/Intermediate/About-Tf2.html>
+- OpenXR `STAGE` space provides a floor-referenced room-scale origin
+  and bounds, but it remains a VR/operator-space reference, not the
+  robot base or task fixture.
+  <https://registry.khronos.org/OpenXR/specs/1.1/man/html/XR_REFERENCE_SPACE_TYPE_STAGE.html>
+- MoveIt models the world around the robot in a planning scene,
+  handles world geometry, collision objects, kinematics plugins, and
+  joint-limit-aware trajectory processing. This supports keeping final
+  feasibility checks on the robot/planning side, not only in VR.
+  <https://moveit.ai/documentation/concepts/>
+- Teleoperation virtual-fixture studies show that haptic/visual
+  constraints can improve awareness and collision avoidance, but they
+  are interface assistance; they are not a substitute for final robot
+  feasibility validation.
+  <https://link.springer.com/article/10.1007/s11370-019-00283-w>
+- OpenXR core haptics are vibration primitives with amplitude,
+  frequency, and duration, so v0.1 should use haptics as boundary
+  awareness, not as precise force feedback.
+  <https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrHapticVibration.html>
+- Delta/parallel robots have workspace and singularity issues that
+  are not well represented by a simple rectangular box. Their possible
+  orientation can depend on position, and singular zones must be
+  excluded.
+  <https://www.mdpi.com/2673-4591/70/1/5>
+
+### 7.3 Decision
+
+Add a small but explicit calibration/retargeting layer to the
+proposal, without turning VR into the source of truth.
+
+Final shape:
+
+- VR-captured programs carry a `calibration` block that binds
+  `openxr_stage` / `unity_world` into a task frame.
+- Task/object frames remain the long-term way to make the same taught
+  program replay when the table/object location changes.
+- `TeachingFeedbackContract` lets robot-side capability/workspace data
+  flow back to Unity/VR for visual overlays or haptic warnings.
+- That feedback is advisory only. The adapter still performs final
+  reachability, orientation, limit, and workspace checks.
+- `WorkspaceModel` is added to `RobotCapabilityProfile` so a robot can
+  expose conservative workspace hints before expensive IK/planning.
+- Delta robots are represented explicitly with
+  `TRANSLATION_ONLY_DELTA` and `WorkspaceKind.ANALYTIC_DELTA`; they
+  must not be squeezed into SCARA or serial-arm assumptions.
+
+### 7.4 Proposal Changes Applied
+
+- §4.2: added `calibration/` package in the proposed robot-neutral
+  core layout.
+- §4.3: added `calibration` block to the canonical program example.
+- §4.3: added "Teaching calibration / retargeting contract" and
+  "Retargeting policy" subsections.
+- §4.4: added `WorkspaceModel`, `WorkspaceKind`, and
+  `TRANSLATION_ONLY_DELTA`.
+- §4.4: added delta adapter row and orientation-authority explanation.
+- §5: added calibration/retargeting contract tests and delta/fake
+  provider expectation in the validation ladder.
+- §6: updated M1/M4/M5 migration steps to carry calibration and
+  delta/fake coverage.
+- §7: added R16, R17, R18.
+- §9: updated PR1 next-actions to include calibration, workspace
+  feedback, and a translation-only delta/fake fixture.
+- §10: closed generic frame handling; opened calibration UI and first
+  concrete delta-model choices.
+
+### 7.5 What Remains Open
+
+- How the user will perform calibration in the UI: three-point table
+  fixture, robot probe, manual transform, or perception-assisted
+  object binding.
+- Which concrete delta robot or delta simulator becomes the first
+  non-serial morphology target.
+- Exact MCAP message types for raw Unity sessions.
+
+These are not blockers for PR1 as long as the data contracts and tests
+exist.

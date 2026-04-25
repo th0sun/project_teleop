@@ -1,7 +1,7 @@
 # Thai Prompt For PR1 Implementation
 
 ไฟล์นี้คือ prompt ภาษาไทยสำหรับส่งต่อให้ AI ตัวถัดไปเริ่มงาน
-implementation รอบแรกของสถาปัตยกรรมใหม่ หลังจาก proposal v1.2
+implementation รอบแรกของสถาปัตยกรรมใหม่ หลังจาก proposal v1.3
 นิ่งพอแล้ว
 
 ## Prompt พร้อมใช้
@@ -40,10 +40,11 @@ feat/multi-robot-teaching-architecture
 สิ่งที่ควรทำในรอบนี้:
 
 1. freeze canonical IR schema รุ่นแรกในโค้ด
-2. วาง `KinematicsContract`
-3. วาง `KinematicsProvider` Protocol + stub providers ขั้นต่ำ
-4. เพิ่ม test ที่ยืนยัน contract หลักพวกนี้
-5. อย่ากระโดดไปของหนักเกิน milestone เช่น MoveIt integration เต็ม, UR adapter เต็ม, BT layer
+2. วาง data model ขั้นต่ำสำหรับ calibration / workspace feedback
+3. วาง `KinematicsContract`
+4. วาง `KinematicsProvider` Protocol + stub providers ขั้นต่ำ
+5. เพิ่ม test ที่ยืนยัน contract หลักพวกนี้
+6. อย่ากระโดดไปของหนักเกิน milestone เช่น MoveIt integration เต็ม, UR adapter เต็ม, BT layer
 
 ## สิ่งที่อยากได้เป็น deliverables รอบนี้
 
@@ -60,14 +61,17 @@ feat/multi-robot-teaching-architecture
    - `orientation_tolerance_rad` (optional)
    - `joint_hint_rad` (optional)
 4. `KinematicsContract`
-5. `KinematicsProvider` Protocol
-6. stub provider อย่างน้อย:
+5. `WorkspaceModel` และ `TeachingFeedbackContract` ขั้นต้น
+6. `KinematicsProvider` Protocol
+7. stub provider อย่างน้อย:
    - null provider
    - urdf provider skeleton
-7. regression/unit tests ที่ยืนยัน:
+8. regression/unit tests ที่ยืนยัน:
    - schema round-trip
    - missing `orientation_intent` ถูก reject
+   - VR-captured program ที่ไม่มี `calibration` ถูก reject หรือถูก mark ว่ายัง replay ไม่ได้ตาม rule ใน proposal
    - `KinematicsContract` validation rules ทำงาน
+   - `WorkspaceModel` รองรับ serial-arm และ delta/fake profile fixture ขั้นต่ำ
    - core layer ยังไม่ import จาก adapter layer
 
 ## ขอบเขตที่ยังไม่ควรทำรอบนี้
@@ -113,22 +117,32 @@ robot-neutral core ใหม่ โดยต้องสอดคล้องก
 - ยืนยัน file kinds:
   - raw = `*.session.mcap`
   - canonical = `*.program.json`
+- VR-captured canonical program ต้องมี `calibration` block ตาม proposal v1.3
+- อย่าให้ Unity/VR เป็น source of truth ด้าน safety; feedback จาก VR เป็น advisory เท่านั้น
 
-### Step C — kinematics seam
+### Step C — calibration / workspace feedback
+
+- ลง data model สำหรับ `calibration`
+- ลง `WorkspaceModel`
+- ลง `TeachingFeedbackContract`
+- เพิ่ม fixture อย่างน้อย 1 ตัวที่แทน delta / translation-only robot เพื่อกัน core โตจาก serial-arm worldview
+
+### Step D — kinematics seam
 
 - ลง `KinematicsKind`
 - ลง `KinematicsContract`
 - ลง `KinematicsProvider` Protocol
 - ลง stub providers ให้ seam ใช้งานได้จริงตั้งแต่แรก
 
-### Step D — tests
+### Step E — tests
 
 - schema validation test
 - round-trip test
+- calibration validation test
 - contract validation test
 - import-discipline test หรือ equivalent guard
 
-### Step E — docs sync
+### Step F — docs sync
 
 - อัปเดต proposal ถ้า implementation บีบให้แก้รายละเอียดจริง
 - อัปเดต revision/audit log ถ้ามี decision สำคัญ
@@ -184,7 +198,7 @@ robot-neutral core ใหม่ โดยต้องสอดคล้องก
 ## ใช้ตอนไหน
 
 ใช้ prompt นี้เมื่อจะส่งงานต่อให้ AI ตัวใหม่เริ่มลงมือ implement
-architecture phase ตาม proposal v1.2
+architecture phase ตาม proposal v1.3
 
 ## ไฟล์ที่เกี่ยวข้อง
 
