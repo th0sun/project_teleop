@@ -64,7 +64,7 @@ PREVIEW_STREAM_CP = 20
 PREVIEW_FINAL_CP = 0
 PREVIEW_START_TIMEOUT_SEC = 6.0
 PREVIEW_START_TOLERANCE_DEG = 3.0
-PREVIEW_FINAL_TOLERANCE_DEG = 0.5
+PREVIEW_FINAL_TOLERANCE_DEG = 0.05
 PREVIEW_FINAL_EXTRA_TIMEOUT_SEC = 2.0
 PREVIEW_ABSOLUTE_TIMEOUT_SEC = 10.0
 PREVIEW_POLL_SEC = 0.01
@@ -429,6 +429,16 @@ class TrajectoryRecorder:
             self._sleep_fn(PREVIEW_WAIT_POLL_SEC)
         return False
 
+    def _final_target_state(self, target_q):
+        if self._get_pos is None:
+            return None, None, None
+        pos_deg = self._get_current_position_deg()
+        if pos_deg is None:
+            return None, None, None
+        final_q = np.asarray(target_q[-1], dtype=float)
+        per_joint_error = np.abs(pos_deg - final_q)
+        return float(np.max(per_joint_error)), per_joint_error, pos_deg
+
     def _send_go_to_start(self, first_frame):
         start_q = [first_frame["j1"], first_frame["j2"], first_frame["j3"], first_frame["j4"]]
         cmd_start = self._build_jointmovj_command(
@@ -457,12 +467,10 @@ class TrajectoryRecorder:
             return False
 
         if self._get_pos is not None:
-            pos_deg = self._get_current_position_deg()
-            if pos_deg is None:
+            max_err, _, _ = self._final_target_state(target_q)
+            if max_err is None:
                 return False
-            final_q = np.asarray(target_q[-1], dtype=float)
-            err = float(np.max(np.abs(pos_deg - final_q)))
-            return err < PREVIEW_FINAL_TOLERANCE_DEG
+            return max_err <= PREVIEW_FINAL_TOLERANCE_DEG
 
         return elapsed >= total_dur + PREVIEW_FINAL_EXTRA_TIMEOUT_SEC
 
@@ -564,11 +572,18 @@ class TrajectoryRecorder:
                 
             self._sleep_fn(PREVIEW_POLL_SEC) # 100Hz interpolation and polling loop
 
+        final_max_error, final_error, final_position = self._final_target_state(target_q)
+        final_target = np.asarray(target_q[-1], dtype=float)
+
         self.is_playing = False
         self._emit_playback_event(
             "playback_complete",
             stopped=bool(self._stop_flag.is_set()),
             elapsed_s=float(self._time_fn() - t_start),
+            final_max_error_deg=None if final_max_error is None else float(final_max_error),
+            final_error_deg=None if final_error is None else [float(v) for v in final_error],
+            final_q_actual_deg=None if final_position is None else [float(v) for v in final_position],
+            final_target_deg=[float(v) for v in final_target],
         )
         if self._stop_flag.is_set():
             self._log.info("⏹️  Playback stopped")

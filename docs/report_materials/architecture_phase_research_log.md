@@ -654,3 +654,72 @@ Why not rename everything now:
 - Parameterizing first gives us the safety net: the defaults keep working, and a
   second robot can be tried with namespaced topics without editing controller
   code.
+
+## 15. Final-settle fix and Unity JSON playback tests
+
+Problem found:
+
+- The previous Mock timing report showed a final joint error around `0.44 deg`.
+- This was not a persistent target-conversion error.  The Mock feedback settled
+  to the exact target after playback, but the measurement script reported the
+  first sample that entered the old final tolerance.
+- The runtime threshold was also too loose for a value named "final":
+  `PREVIEW_FINAL_TOLERANCE_DEG = 0.5`.
+
+Change made:
+
+- Tightened final playback settle tolerance to `0.05 deg`.
+- `playback_complete` events now include final target, final actual, and
+  per-joint final error when feedback is available.
+- `tools/demo_lift/measure_replay_timing.py` now separates:
+  - `completion_error_deg`: error when playback declares complete
+  - `final_error_deg`: error after an additional post-settle observation window
+- The timing report now avoids a false arrival for a later waypoint whose target
+  equals the initial pose by only searching for arrival at or after that
+  waypoint's scheduled time.
+- The script can now load Unity JSON trajectory files with `--trajectory-json`.
+
+Mock results after the fix:
+
+```text
+Synthetic timing probe:
+completion_error_deg: [0.0, 0.0204, 0.0, 0.0]
+final_error_deg:      [0.0, 0.0, 0.0, 0.0]
+
+unity_mock_test.json:
+planned_duration_s:   1.0
+measured_duration_s:  1.6
+completion_error_deg: [0.0362, 0.0362, 0.0362, 0.0]
+final_error_deg:      [0.0, 0.0, 0.0, 0.0]
+```
+
+Unity trajectory file audit:
+
+```text
+Pick_place_1.json: frames=122 original=15.986s retimed=16.534s scale=x1.034 max_segment_stretch=x1.87
+Pick_place_2.json: frames=180 original=21.712s retimed=22.640s scale=x1.043 max_segment_stretch=x2.51
+money.json:        frames=118 original=14.665s retimed=15.856s scale=x1.081 max_segment_stretch=x1.99
+unity_mock_test:   frames=3   original=1.000s  retimed=1.000s  scale=x1.000 max_segment_stretch=x1.00
+```
+
+Important Mock limitation:
+
+- The long Unity files do not play accurately through the live MG400 Mock with
+  the current queued playback path.
+- The reason is behavioral: the Mock `JointMovJ` implementation rejects a new
+  motion command while the Mock is in `MODE_RUNNING`; it does not model the real
+  robot controller's queued-command behavior.
+- The current runtime intentionally queues waypoints ahead of time for the real
+  robot path.  Dense Unity files therefore expose a Mock limitation, not a
+  confirmed real-robot final-position failure.
+- For report/demo evidence, use the Mock to prove conversion, final settle, and
+  basic timing on short queued paths; do not claim that live Mock proves dense
+  queued playback timing for the MG400 controller.
+
+Next engineering implication:
+
+- Add an explicit robot/mock capability such as `supports_motion_queue`.
+- For real MG400, keep the queued path and verify with physical feedback.
+- For MG400 Mock, add a sequential compatibility mode or a queue-emulating test
+  harness so dense Unity JSON files can be tested deterministically without
+  pretending the Mock has real controller queue semantics.

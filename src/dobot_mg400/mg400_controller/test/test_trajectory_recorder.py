@@ -4,6 +4,7 @@ import tempfile
 import numpy as np
 
 from mg400_controller.common.trajectory.trajectory_recorder import (
+    PREVIEW_FINAL_TOLERANCE_DEG,
     PREVIEW_START_TOLERANCE_DEG,
     TrajectoryRecorder,
     frames_from_joint_trajectory_msg,
@@ -116,6 +117,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
         feed = PositionFeed([
             [25.0, 10.0, 0.0, 0.0],
             [20.4, 10.2, 0.0, 0.0],
+            [20.03, 10.01, 0.0, 0.0],
         ])
         recorder = TrajectoryRecorder(
             command_send_fn=lambda cmd: True,
@@ -127,7 +129,9 @@ class TrajectoryRecorderTest(unittest.TestCase):
         )
 
         self.assertFalse(recorder._playback_complete(2, 1.0, 1.0, target_q))
-        self.assertTrue(recorder._playback_complete(2, 1.1, 1.0, target_q))
+        self.assertFalse(recorder._playback_complete(2, 1.1, 1.0, target_q))
+        self.assertTrue(recorder._playback_complete(2, 1.2, 1.0, target_q))
+        self.assertLessEqual(PREVIEW_FINAL_TOLERANCE_DEG, 0.05)
 
     def test_playback_complete_uses_extra_timeout_without_feedback(self):
         clock = FakeClock()

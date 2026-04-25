@@ -177,6 +177,24 @@ def _wait_mode(monitor: FeedbackMonitor, mode: int, timeout_s: float = 8.0) -> b
     return False
 
 
+def _wait_near_q(
+    monitor: FeedbackMonitor,
+    target_deg: np.ndarray,
+    *,
+    tolerance_deg: float,
+    timeout_s: float,
+) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        samples = monitor.snapshot()
+        if samples:
+            err = float(np.max(np.abs(samples[-1].q_actual_deg - target_deg)))
+            if err <= tolerance_deg:
+                return True
+        time.sleep(0.02)
+    return False
+
+
 def _make_teach_frames() -> List[Dict]:
     """Compact synthetic teaching trajectory with explicit timestamps."""
     points = [
@@ -200,6 +218,26 @@ def _make_teach_frames() -> List[Dict]:
     ]
 
 
+def _load_trajectory_frames(path: Path) -> List[Dict]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    frames = data if isinstance(data, list) else data.get("frames", [])
+    out = []
+    for idx, frame in enumerate(frames):
+        try:
+            out.append({
+                "timeStamp": float(frame["timeStamp"]),
+                "j1": float(frame["j1"]),
+                "j2": float(frame["j2"]),
+                "j3": float(frame["j3"]),
+                "j4": float(frame["j4"]),
+            })
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid trajectory frame at index {idx}: {frame!r}") from exc
+    if not out:
+        raise ValueError(f"No frames found in {path}")
+    return out
+
+
 def _interp_target(frames: List[Dict], elapsed_s: float) -> np.ndarray:
     t = np.array([f["timeStamp"] - frames[0]["timeStamp"] for f in frames], dtype=float)
     q = np.array([[f["j1"], f["j2"], f["j3"], f["j4"]] for f in frames], dtype=float)
@@ -213,9 +251,10 @@ def _first_arrival_time(
     target_deg: np.ndarray,
     *,
     tolerance_deg: float,
+    earliest_elapsed_s: float = 0.0,
 ) -> Optional[float]:
     for sample in samples:
-        if sample.t < start_t:
+        if sample.t < start_t + earliest_elapsed_s:
             continue
         err = float(np.max(np.abs(sample.q_actual_deg - target_deg)))
         if err <= tolerance_deg:
@@ -225,10 +264,36 @@ def _first_arrival_time(
 
 def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEvents) -> Dict:
     if events.playback_start_t is None:
-        raise RuntimeError("TrajectoryRecorder did not emit playback_start")
+        latest = samples[-1] if samples else None
+        final_target = np.array([
+            frames[-1]["j1"], frames[-1]["j2"], frames[-1]["j3"], frames[-1]["j4"]
+        ], dtype=float)
+        return {
+            "status": "aborted_before_playback",
+            "sample_count": 0,
+            "post_settle_sample_count": 0,
+            "planned_duration_s": round(frames[-1]["timeStamp"] - frames[0]["timeStamp"], 3),
+            "measured_duration_s": 0.0,
+            "post_settle_observed_s": 0.0,
+            "max_tracking_error_deg": 0.0,
+            "mean_tracking_error_deg": 0.0,
+            "completion_error_deg": None,
+            "completion_event_error_deg": None,
+            "final_error_deg": None if latest is None else [
+                round(float(v), 4) for v in np.abs(latest.q_actual_deg - final_target)
+            ],
+            "final_q_actual_deg": None if latest is None else [
+                round(float(v), 4) for v in latest.q_actual_deg
+            ],
+            "final_target_deg": [round(float(v), 4) for v in final_target],
+            "waypoints": [],
+            "commands": [],
+            "queued_waypoint_events": [],
+        }
     start_t = events.playback_start_t
     end_t = events.playback_complete_t or (start_t + frames[-1]["timeStamp"])
     window = [s for s in samples if start_t <= s.t <= end_t]
+    post_window = [s for s in samples if s.t >= start_t]
     errors = []
     for sample in window:
         elapsed = sample.t - start_t
@@ -239,7 +304,13 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
     for idx, frame in enumerate(frames):
         target_t = frame["timeStamp"] - frames[0]["timeStamp"]
         q = np.array([frame["j1"], frame["j2"], frame["j3"], frame["j4"]], dtype=float)
-        arrival = _first_arrival_time(window, start_t, q, tolerance_deg=1.0)
+        arrival = _first_arrival_time(
+            window,
+            start_t,
+            q,
+            tolerance_deg=1.0,
+            earliest_elapsed_s=max(0.0, target_t),
+        )
         waypoint_rows.append({
             "index": idx,
             "target_time_s": round(target_t, 3),
@@ -262,16 +333,27 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
             "command": command.command,
         })
 
-    final_sample = window[-1] if window else samples[-1]
+    final_sample = post_window[-1] if post_window else (window[-1] if window else samples[-1])
+    completion_sample = window[-1] if window else final_sample
+    playback_complete = next(
+        (e for e in reversed(events.events) if e["event"] == "playback_complete"),
+        {},
+    )
     final_target = np.array([
         frames[-1]["j1"], frames[-1]["j2"], frames[-1]["j3"], frames[-1]["j4"]
     ], dtype=float)
     return {
         "sample_count": len(window),
+        "post_settle_sample_count": max(0, len(post_window) - len(window)),
         "planned_duration_s": round(frames[-1]["timeStamp"] - frames[0]["timeStamp"], 3),
         "measured_duration_s": round((end_t - start_t), 3),
+        "post_settle_observed_s": round(max(0.0, final_sample.t - end_t), 3),
         "max_tracking_error_deg": round(max(errors) if errors else 0.0, 4),
         "mean_tracking_error_deg": round(float(np.mean(errors)) if errors else 0.0, 4),
+        "completion_error_deg": [
+            round(float(v), 4) for v in np.abs(completion_sample.q_actual_deg - final_target)
+        ],
+        "completion_event_error_deg": playback_complete.get("final_error_deg"),
         "final_error_deg": [
             round(float(v), 4) for v in np.abs(final_sample.q_actual_deg - final_target)
         ],
@@ -294,7 +376,7 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
     }
 
 
-def run(out_path: Optional[Path]) -> Dict:
+def run(out_path: Optional[Path], trajectory_json: Optional[Path] = None, post_settle_s: float = 0.5) -> Dict:
     print(f"Connecting to MG400 Mock at {MOCK_IP} ...")
     dash = _connect_dashboard()
     motion = _connect_motion()
@@ -313,11 +395,19 @@ def run(out_path: Optional[Path]) -> Dict:
         _wait_mode(monitor, MODE_ENABLE, timeout_s=8.0)
 
         # Start from home so the replay measurement is deterministic.
+        _dashboard_cmd(dash, "ResetRobot()")
+        _dashboard_cmd(dash, "EnableRobot()")
         send_motion("JointMovJ(0,0,0,0)")
         time.sleep(0.1)
-        _wait_mode(monitor, MODE_ENABLE, timeout_s=8.0)
+        _wait_mode(monitor, MODE_ENABLE, timeout_s=20.0)
+        _wait_near_q(
+            monitor,
+            np.array([0.0, 0.0, 0.0, 0.0]),
+            tolerance_deg=0.05,
+            timeout_s=60.0,
+        )
 
-        frames = _make_teach_frames()
+        frames = _load_trajectory_frames(trajectory_json) if trajectory_json else _make_teach_frames()
         recorder = TrajectoryRecorder(
             command_send_fn=send_motion,
             dashboard_send_fn=lambda cmd: _dashboard_cmd(dash, cmd),
@@ -326,12 +416,13 @@ def run(out_path: Optional[Path]) -> Dict:
             playback_event_callback=events.callback,
         )
         recorder.loaded_frames = frames
-        recorder.loaded_name = "mock_timing_probe"
+        recorder.loaded_name = trajectory_json.name if trajectory_json else "mock_timing_probe"
 
         recorder._play_worker()
-        time.sleep(0.5)
+        time.sleep(post_settle_s)
 
         result = _analyse(frames, monitor.snapshot(), events)
+        result["trajectory_name"] = recorder.loaded_name
         if out_path is not None:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -355,6 +446,8 @@ def main():
     parser.add_argument("--dashboard-port", type=int, default=DASHBOARD_PORT)
     parser.add_argument("--motion-port", type=int, default=MOTION_PORT)
     parser.add_argument("--feedback-port", type=int, default=FEEDBACK_PORT)
+    parser.add_argument("--trajectory-json", type=Path, default=None)
+    parser.add_argument("--post-settle-s", type=float, default=0.5)
     args = parser.parse_args()
 
     MOCK_IP = args.host
@@ -362,14 +455,18 @@ def main():
     MOTION_PORT = args.motion_port
     FEEDBACK_PORT = args.feedback_port
 
-    result = run(args.out)
+    result = run(args.out, trajectory_json=args.trajectory_json, post_settle_s=args.post_settle_s)
 
     print("\nReplay timing result")
+    print(f"  status:              {result.get('status', 'ok')}")
+    print(f"  trajectory:          {result['trajectory_name']}")
     print(f"  planned_duration_s:   {result['planned_duration_s']}")
     print(f"  measured_duration_s:  {result['measured_duration_s']}")
+    print(f"  post_settle_s:        {result['post_settle_observed_s']}")
     print(f"  samples:              {result['sample_count']}")
     print(f"  max_error_deg:        {result['max_tracking_error_deg']}")
     print(f"  mean_error_deg:       {result['mean_tracking_error_deg']}")
+    print(f"  completion_error_deg: {result['completion_error_deg']}")
     print(f"  final_error_deg:      {result['final_error_deg']}")
     print("\nWaypoint arrival timing (1 deg tolerance)")
     for row in result["waypoints"]:
