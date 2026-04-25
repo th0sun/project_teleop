@@ -14,8 +14,9 @@ URDF-required, two-tier capture model `*.session.mcap`/`*.program.json`,
 M4/M5 collapse; VR-to-robot calibration and delta-robot coverage added).
 PR1 core scaffold is implemented in `src/robot_teaching_core/`
 (`843cb7b`, with adapter contracts through `32cc739`). M2 runtime
-helper extraction is implemented in `c361f64`. Later adapter/lifter
-migration phases are not implemented yet.
+helper extraction is implemented in `c361f64`. The first M3 MG400
+adapter facade is implemented in `8b79726`; Cartesian IK and lifter
+phases are not implemented yet.
 
 Scope: answer the design questions in
 `docs/ai_handoffs/next_phase_architecture_brief.md` with a concrete, testable
@@ -1052,6 +1053,16 @@ surface does not move twice.
 
 Deliverables: `MG400Adapter().execute(program, mode=QUEUED)` works
 end-to-end. Rung 3 + Rung 4 tests pass.
+
+Implementation status (2026-04-25): `src/adapters/mg400/` now exists
+as a separate `mg400_adapter` package in commit `8b79726`. It exposes
+the MG400 capability profile, FK-only provider registration, a
+translator for the safe v0 subset, and an adapter facade over the
+existing command sender. The current translator deliberately accepts
+`motion="joint"` steps with `joint_hint_rad`; it rejects Cartesian
+`linear` moves until the MG400 IK/translator pass lands. This keeps the
+adapter honest: the profile says MG400 is the first robot-specific
+case study, not that the whole retargeting problem is solved.
 
 ### Phase M4 — Lifter v0 (no MG400 FK bias)
 
