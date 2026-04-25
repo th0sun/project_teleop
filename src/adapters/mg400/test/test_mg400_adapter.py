@@ -24,6 +24,7 @@ from teaching_core.program.types import (
     MoveStep,
     OrientationIntent,
     Pose,
+    SetFrameStep,
     Source,
     ToolStep,
     WaitStep,
@@ -185,6 +186,88 @@ class MG400AdapterTest(unittest.TestCase):
         # Must translate to at least one MG400 command.
         plan = translate_program(program)
         self.assertGreaterEqual(len(plan.commands), 2)
+
+    def test_dwell_path_produces_intermediate_command_with_correct_degrees(self):
+        """Dwell → intermediate waypoint → JointMovJ degree values are correct.
+
+        This closes the gap between segmenter unit tests (use _LinearFKProvider)
+        and the translator (never sees a dwell-produced step).  The settle
+        waypoint's joint_hint_rad must survive the full pipeline and appear
+        in the command string as degrees.
+        """
+        import math
+        provider = register_mg400_provider()
+
+        # Build: move → hold at J1=20 deg for >0.2 s → move on.
+        j1_settle_rad = math.radians(20.0)
+        pairs = []
+        for i in range(5):                        # ramp to 20 deg
+            pairs.append((i * 0.04, (j1_settle_rad * i / 4, 0.0, 0.0, 0.0)))
+        for i in range(5, 12):                    # hold ≥0.25 s
+            pairs.append((i * 0.04, (j1_settle_rad, 0.0, 0.0, 0.0)))
+        for i in range(12, 17):                   # move on to 35 deg
+            pairs.append((i * 0.04, (j1_settle_rad + math.radians((i - 11) * 3), 0.0, 0.0, 0.0)))
+
+        stream = SessionStream.from_pairs(pairs)
+        cfg = LifterConfig(
+            program_id="dwell_e2e",
+            capture_id="cap_dwell",
+            captured_at="2026-04-25T19:00:00Z",
+            default_orientation_intent=OI.YAW_ONLY,
+        )
+
+        program = lift_session(stream, provider=provider, config=cfg)
+        moves = [s for s in program.steps if isinstance(s, MoveStep)]
+        # Segmenter must produce start + settle + end.
+        self.assertGreaterEqual(len(moves), 3)
+
+        # Find the settle waypoint (J1 ≈ 20 deg).
+        settle = next(
+            (m for m in moves[1:-1]
+             if abs(math.degrees(m.joint_hint_rad[0]) - 20.0) < 0.5),
+            None,
+        )
+        self.assertIsNotNone(settle, "No intermediate waypoint near J1=20 deg")
+
+        # Translate: settle step → JointMovJ contains "20.0000" for J1.
+        plan = translate_program(program)
+        settle_idx = moves.index(settle)
+        cmd = plan.commands[settle_idx].command
+        self.assertIn("JointMovJ", cmd)
+        self.assertIn("20.0000", cmd)
+        # Speed must come from Defaults(speed_pct=50.0) since lifter never sets step speed.
+        self.assertIn("SpeedJ=50", cmd)
+
+    def test_vacuum_on_produces_two_digital_outputs(self):
+        """ToolStep 'on' → vacuum DO on + blow DO off (2 commands, no wait)."""
+        plan = translate_program(_program(ToolStep(tool="vacuum", action="on")))
+
+        kinds = [c.kind for c in plan.commands]
+        self.assertEqual(kinds, ["digital_output", "digital_output"])
+        # DOExecute uses int 1/0, not bool True/False.
+        # vacuum port=16 on (1), blow port=15 off (0).
+        cmds = [c.command for c in plan.commands]
+        self.assertTrue(any("DOExecute(16,1)" in c for c in cmds))
+        self.assertTrue(any("DOExecute(15,0)" in c for c in cmds))
+
+    def test_set_frame_step_raises_unsupported(self):
+        """SetFrameStep must be resolved before MG400 translation."""
+        step = SetFrameStep(
+            frame_name="fixture",
+            pose=Pose(
+                position_m=(0.1, 0.0, 0.1),
+                orientation_quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+            ),
+        )
+        with self.assertRaises(UnsupportedStep):
+            translate_program(_program(step))
+
+    def test_unknown_tool_and_action_rejected(self):
+        """Unrecognised tool names and non-on/off actions raise UnsupportedStep."""
+        with self.assertRaises(UnsupportedStep):
+            translate_program(_program(ToolStep(tool="gripper", action="close")))
+        with self.assertRaises(UnsupportedStep):
+            translate_program(_program(ToolStep(tool="vacuum", action="toggle")))
 
 
 if __name__ == "__main__":
