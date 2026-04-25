@@ -13,6 +13,9 @@ from teaching_core.kinematics.registry import (
     get_provider,
     list_providers,
 )
+from teaching_core.lifter.segmenter import LifterConfig, lift_session
+from teaching_core.lifter.session import SessionStream
+from teaching_core.program.types import OrientationIntent as OI
 from teaching_core.program.types import (
     CanonicalProgram,
     Defaults,
@@ -135,6 +138,53 @@ class MG400AdapterTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertIn("1 MG400 commands", result.message)
         self.assertEqual(progress.events, [("offline export ready", 1.0)])
+
+
+    def test_lifter_end_to_end_with_mg400_fk_provider(self):
+        """Registry → provider injection → lift_session → translate.
+
+        Validates the full M4 pipeline:
+        session stream → canonical program → mg400 command plan.
+        No adapter import inside teaching_core; provider injected here.
+        """
+        clear_registry()
+        provider = register_mg400_provider()
+
+        # Four-joint stream: swing J1 from 0→30 deg (in rad), rest static.
+        import math
+        pairs = [
+            (i * 0.05, (math.radians(i * 6), 0.0, 0.0, 0.0))
+            for i in range(6)
+        ]
+        stream = SessionStream.from_pairs(pairs)
+        cfg = LifterConfig(
+            program_id="mg400_e2e_test",
+            capture_id="cap_e2e_001",
+            captured_at="2026-04-25T19:00:00Z",
+            default_orientation_intent=OI.YAW_ONLY,
+        )
+
+        program = lift_session(stream, provider=provider, config=cfg)
+
+        # Every step must have YAW_ONLY intent and positions in meters.
+        from teaching_core.program.types import MoveStep
+        moves = [s for s in program.steps if isinstance(s, MoveStep)]
+        self.assertGreaterEqual(len(moves), 2)
+        for m in moves:
+            self.assertEqual(m.orientation_intent, OI.YAW_ONLY)
+            # FK output must be in meters: MG400 reach ≤ 0.45 m
+            x, y, z = m.pose.position_m
+            self.assertLess(abs(x), 0.50)
+            self.assertLess(abs(y), 0.50)
+
+        # Must round-trip through schema validation.
+        from teaching_core.program.io import program_to_dict
+        from teaching_core.program.schema import validate_program_dict
+        validate_program_dict(program_to_dict(program))
+
+        # Must translate to at least one MG400 command.
+        plan = translate_program(program)
+        self.assertGreaterEqual(len(plan.commands), 2)
 
 
 if __name__ == "__main__":
