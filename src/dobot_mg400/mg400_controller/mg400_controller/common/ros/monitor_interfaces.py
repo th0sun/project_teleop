@@ -12,21 +12,9 @@ import numpy as np
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64MultiArray, Int32, Int32MultiArray, Int64
 
-from mg400_controller.common.config.motion_config import (
-    DO_STATUS_TOPIC,
-    ERROR_STATUS_TOPIC,
-    FLANGE_ACTUAL_TOPIC,
-    LIGHT_TOPIC,
-    PREDICTED_TARGET_TOPIC,
-    ROBOT_MODE_TOPIC,
-    RVIZ_TOPIC,
-    SENT_COMMAND_TOPIC,
-    SUCTION_TOPIC,
-    TOOL_ACTUAL_TOPIC,
-    TOOL_INDEX_TOPIC,
-    TOOL_TARGET_TOPIC,
-    UNITY_TOPIC,
-    UNITY_XYZ_TOPIC,
+from mg400_controller.common.ros.topic_config import (
+    DEFAULT_TELEOP_TOPICS,
+    TeleopTopicConfig,
 )
 
 
@@ -143,26 +131,26 @@ class MonitorTelemetryState:
         }
 
 
-def create_control_publishers(node):
+def create_control_publishers(node, topics: TeleopTopicConfig = DEFAULT_TELEOP_TOPICS):
     return MonitorControlPublishers(
-        suction=node.create_publisher(Bool, SUCTION_TOPIC, 10),
-        light=node.create_publisher(Int32MultiArray, LIGHT_TOPIC, 10),
+        suction=node.create_publisher(Bool, topics.suction, 10),
+        light=node.create_publisher(Int32MultiArray, topics.light, 10),
     )
 
 
-def create_monitor_subscriptions(node, telemetry):
+def create_monitor_subscriptions(node, telemetry, topics: TeleopTopicConfig = DEFAULT_TELEOP_TOPICS):
     return MonitorSubscriptions(
-        actual=node.create_subscription(JointState, RVIZ_TOPIC, telemetry.on_actual, 10),
-        target=node.create_subscription(JointState, UNITY_TOPIC, telemetry.on_target, 10),
-        predicted=node.create_subscription(JointState, PREDICTED_TARGET_TOPIC, telemetry.on_predicted, 10),
-        sent=node.create_subscription(JointState, SENT_COMMAND_TOPIC, telemetry.on_sent, 10),
-        raw_unity=node.create_subscription(JointState, UNITY_TOPIC, telemetry.on_raw_unity, 10),
-        tool_actual=node.create_subscription(Float64MultiArray, TOOL_ACTUAL_TOPIC, telemetry.on_tool_actual, 10),
-        tool_target=node.create_subscription(Float64MultiArray, TOOL_TARGET_TOPIC, telemetry.on_tool_target, 10),
-        unity_xyz=node.create_subscription(Float64MultiArray, UNITY_XYZ_TOPIC, telemetry.on_unity_xyz, 10),
-        flange_actual=node.create_subscription(Float64MultiArray, FLANGE_ACTUAL_TOPIC, telemetry.on_flange_actual, 10),
-        tool_index=node.create_subscription(Int32, TOOL_INDEX_TOPIC, telemetry.on_tool_index, 10),
-        do_status=node.create_subscription(Int64, DO_STATUS_TOPIC, telemetry.on_do_status, 10),
-        robot_mode=node.create_subscription(Int32, ROBOT_MODE_TOPIC, telemetry.on_robot_mode, 10),
-        error_status=node.create_subscription(Int32, ERROR_STATUS_TOPIC, telemetry.on_error_status, 10),
+        actual=node.create_subscription(JointState, topics.joint_states, telemetry.on_actual, 10),
+        target=node.create_subscription(JointState, topics.unity_joint_cmd, telemetry.on_target, 10),
+        predicted=node.create_subscription(JointState, topics.predicted_target, telemetry.on_predicted, 10),
+        sent=node.create_subscription(JointState, topics.sent_command, telemetry.on_sent, 10),
+        raw_unity=node.create_subscription(JointState, topics.unity_joint_cmd, telemetry.on_raw_unity, 10),
+        tool_actual=node.create_subscription(Float64MultiArray, topics.tool_actual, telemetry.on_tool_actual, 10),
+        tool_target=node.create_subscription(Float64MultiArray, topics.tool_target, telemetry.on_tool_target, 10),
+        unity_xyz=node.create_subscription(Float64MultiArray, topics.unity_xyz, telemetry.on_unity_xyz, 10),
+        flange_actual=node.create_subscription(Float64MultiArray, topics.flange_actual, telemetry.on_flange_actual, 10),
+        tool_index=node.create_subscription(Int32, topics.tool_index, telemetry.on_tool_index, 10),
+        do_status=node.create_subscription(Int64, topics.do_status, telemetry.on_do_status, 10),
+        robot_mode=node.create_subscription(Int32, topics.robot_mode, telemetry.on_robot_mode, 10),
+        error_status=node.create_subscription(Int32, topics.error_status, telemetry.on_error_status, 10),
     )

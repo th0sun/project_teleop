@@ -39,6 +39,7 @@ from mg400_controller.common.ros.monitor_interfaces import (  # noqa: E402
     create_control_publishers,
     create_monitor_subscriptions,
 )
+from mg400_controller.common.ros.topic_config import TeleopTopicConfig  # noqa: E402
 
 
 class FakeNode:
@@ -80,6 +81,24 @@ class MonitorRosWiringTest(unittest.TestCase):
         self.assertEqual(subscriptions.actual.topic, RVIZ_TOPIC)
         self.assertEqual(subscriptions.do_status.topic, DO_STATUS_TOPIC)
         self.assertEqual(len(node.subscription_calls), 13)
+
+    def test_monitor_wiring_accepts_custom_topic_profile(self):
+        node = FakeNode()
+        telemetry = MonitorTelemetryState()
+        topics = TeleopTopicConfig(
+            joint_states="/robot_a/joint_states",
+            unity_joint_cmd="/robot_a/unity/joint_cmd",
+            suction="/robot_a/tool/suction",
+            light="/robot_a/tool/light",
+        )
+
+        publishers = create_control_publishers(node, topics=topics)
+        subscriptions = create_monitor_subscriptions(node, telemetry, topics=topics)
+
+        self.assertEqual(publishers.suction.topic, "/robot_a/tool/suction")
+        self.assertEqual(publishers.light.topic, "/robot_a/tool/light")
+        self.assertEqual(subscriptions.actual.topic, "/robot_a/joint_states")
+        self.assertEqual(subscriptions.target.topic, "/robot_a/unity/joint_cmd")
 
     def test_telemetry_state_updates_and_consumes_sent_flag(self):
         telemetry = MonitorTelemetryState()

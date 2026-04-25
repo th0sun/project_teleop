@@ -47,6 +47,7 @@ from mg400_controller.common.ros.monitor_interfaces import (
     create_control_publishers,
     create_monitor_subscriptions,
 )
+from mg400_controller.common.ros.topic_config import declare_topic_parameters
 
 # Graph colors
 COL_UNITY = "#ff7f0e"      # Matplotlib standard orange
@@ -70,9 +71,10 @@ GRAPH_UPDATE_HZ = 20      # Update rate
 class JointMonitorNode(Node):
     def __init__(self):
         super().__init__('mg400_joint_monitor')
-        self.control_publishers = create_control_publishers(self)
+        self.topics = declare_topic_parameters(self)
+        self.control_publishers = create_control_publishers(self, topics=self.topics)
         self.telemetry = MonitorTelemetryState()
-        self.subscriptions = create_monitor_subscriptions(self, self.telemetry)
+        self.subscriptions = create_monitor_subscriptions(self, self.telemetry, topics=self.topics)
 
     def request_suction(self, state):
         msg = Bool()

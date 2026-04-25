@@ -609,3 +609,48 @@ Status after this update: the first version of this bridge exists in
 `vr_teleop_node.py`.  It still needs a real Unity-to-ROS smoke test with the
 Quest/Unity scene, but unit tests now cover the conversion from Unity-style
 `JointTrajectory` points into internal degree frames.
+
+## 14. Topic Profile: avoiding ROS topic hardcoding
+
+Problem found:
+
+- The ROS/MG400 side already had a central `motion_config.py`, but the runtime
+  wiring still imported topic constants directly.
+- The Unity side exposes several topic names as inspector fields, but there was
+  no single ROS-side profile that says "these are the deployment topic names for
+  this robot instance".
+- For a future multi-robot teaching system, the robot adapter should not own the
+  Unity contract by hardcoding topic strings.  The adapter should consume a
+  named data contract, and the deployment should decide the actual topic names
+  or namespaces.
+
+Decision:
+
+- Keep the current MG400 demo topic names as defaults so the near-term Unity
+  demo remains compatible.
+- Add a `TeleopTopicConfig` profile in
+  `mg400_controller/common/ros/topic_config.py`.
+- Let ROS nodes override topic names through parameters under `topics.*`, for
+  example `topics.unity_joint_cmd` or `topics.unity_trajectory`.
+- Use the same topic profile in both `vr_teleop_node.py` and `monitor_gui.py`,
+  so the monitor follows the same robot namespace as the controller.
+
+Architecture implication:
+
+- For the current MG400 demo, Unity can continue sending:
+  - live joint targets: `/unity/joint_cmd`
+  - teach-repeat path: `/mg400/joint_trajectory_controller/command`
+  - suction: `/vr/suction_cmd`
+- For later robots, the preferred shape is:
+  - Unity publishes robot-neutral intent when possible: live target, taught
+    program, tool command.
+  - Each robot adapter translates that intent into its own command protocol.
+  - Topic names become deployment configuration, not robot logic.
+
+Why not rename everything now:
+
+- The upcoming demo depends on the current Unity script defaults.
+- Renaming topics is low-value unless both ROS and Unity are migrated together.
+- Parameterizing first gives us the safety net: the defaults keep working, and a
+  second robot can be tried with namespaced topics without editing controller
+  code.

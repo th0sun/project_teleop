@@ -27,7 +27,6 @@ from mg400_controller.common.config.robot_config import (
     ELBOW_ANGLE_LIMIT
 )
 from mg400_controller.common.config.motion_config import (
-    UNITY_TOPIC,
     VACUUM_DO_PORT,
     BLOW_DO_PORT,
     SUCTION_ACTIVATION_THRESHOLD,
@@ -66,6 +65,7 @@ from mg400_controller.common.ros.teleop_interfaces import (
     create_subscriptions,
     attach_unity_subscription,
 )
+from mg400_controller.common.ros.topic_config import declare_topic_parameters
 
 # =========================
 # ===== MAIN NODE ========
@@ -99,7 +99,8 @@ class TeleopNode(Node):
         self.clock_calibrator = ClockCalibrator(window_size=50) # Now estimates drift automatically
         
         # Level 3: RTT Heartbeat (ROS-side ping)
-        self.publishers = create_publishers(self)
+        self.topics = declare_topic_parameters(self)
+        self.publishers = create_publishers(self, topics=self.topics)
         self.create_timer(1.0, self._publish_heartbeat) # 1Hz Ping
         
         # --- Analytics Logging (Async) ---
@@ -146,6 +147,7 @@ class TeleopNode(Node):
             teach_status_callback=self._teach_status_callback,
             traj_data_callback=self._traj_data_callback,
             joint_trajectory_callback=self._joint_trajectory_callback,
+            topics=self.topics,
         )
         
         # Suction Cup Control (Smart Trigger)
@@ -212,6 +214,7 @@ class TeleopNode(Node):
             self,
             self._unity_callback,
             qos_profile,
+            topics=self.topics,
         )
         
         self.get_logger().info("✅ Teleop Node fully initialized and listening.")
@@ -229,8 +232,8 @@ class TeleopNode(Node):
         
         self.get_logger().info(f"✅ Teleop Node Ready")
         self.get_logger().info(
-            "🎓 Teach & Repeat: /unity/teach_status + /unity/trajectory_data "
-            f"+ {motion_config.UNITY_TRAJECTORY_TOPIC}"
+            f"🎓 Teach & Repeat: {self.topics.teach_status} + "
+            f"{self.topics.trajectory_data} + {self.topics.unity_trajectory}"
         )
         self.get_logger().info(f"📊 Control Strategy: Proximity + Velocity-Based Stuck Detection")
         self.get_logger().info(f"📏 Dyn Proximity Base: {motion_config.DYNAMIC_PROXIMITY_BASE_RAD:.3f} rad ({np.degrees(motion_config.DYNAMIC_PROXIMITY_BASE_RAD):.1f} deg)")

@@ -49,12 +49,17 @@ from mg400_controller.common.ros.teleop_interfaces import (  # noqa: E402
     create_publishers,
     create_subscriptions,
 )
+from mg400_controller.common.ros.topic_config import (  # noqa: E402
+    TeleopTopicConfig,
+    declare_topic_parameters,
+)
 
 
 class FakeNode:
     def __init__(self):
         self.publish_calls = []
         self.subscription_calls = []
+        self.parameters = {}
 
     def create_publisher(self, msg_type, topic, depth):
         publisher = types.SimpleNamespace(msg_type=msg_type, topic=topic, depth=depth)
@@ -70,6 +75,11 @@ class FakeNode:
         )
         self.subscription_calls.append(subscription)
         return subscription
+
+    def declare_parameter(self, name, value):
+        resolved = self.parameters.get(name, value)
+        self.parameters[name] = resolved
+        return types.SimpleNamespace(value=resolved)
 
 
 class TeleopRosWiringTest(unittest.TestCase):
@@ -111,6 +121,42 @@ class TeleopRosWiringTest(unittest.TestCase):
 
         self.assertEqual(subscription.topic, UNITY_TOPIC)
         self.assertIs(subscription.callback, callback)
+
+    def test_topic_parameters_can_override_unity_contract_topics(self):
+        node = FakeNode()
+        node.parameters["topics.unity_joint_cmd"] = "/robot_a/unity/joint_cmd"
+        node.parameters["topics.unity_trajectory"] = "/robot_a/program"
+        node.parameters["topics.suction"] = "/robot_a/tool/suction"
+
+        topics = declare_topic_parameters(node)
+
+        self.assertEqual(topics.unity_joint_cmd, "/robot_a/unity/joint_cmd")
+        self.assertEqual(topics.unity_trajectory, "/robot_a/program")
+        self.assertEqual(topics.suction, "/robot_a/tool/suction")
+
+    def test_custom_topics_are_used_by_subscriptions(self):
+        node = FakeNode()
+        callbacks = {
+            "unity_pong_callback": lambda msg: None,
+            "suction_callback": lambda msg: None,
+            "light_callback": lambda msg: None,
+            "dashboard_cmd_callback": lambda msg: None,
+            "teach_status_callback": lambda msg: None,
+            "traj_data_callback": lambda msg: None,
+            "joint_trajectory_callback": lambda msg: None,
+        }
+        topics = TeleopTopicConfig(
+            unity_joint_cmd="/robot_a/unity/joint_cmd",
+            unity_trajectory="/robot_a/program",
+            suction="/robot_a/tool/suction",
+        )
+
+        subscriptions = create_subscriptions(node, **callbacks, topics=topics)
+        unity_subscription = attach_unity_subscription(node, lambda msg: None, object(), topics=topics)
+
+        self.assertEqual(subscriptions.suction.topic, "/robot_a/tool/suction")
+        self.assertEqual(subscriptions.unity_trajectory.topic, "/robot_a/program")
+        self.assertEqual(unity_subscription.topic, "/robot_a/unity/joint_cmd")
 
 
 if __name__ == "__main__":
