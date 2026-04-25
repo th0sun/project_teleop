@@ -779,3 +779,45 @@ Tests:
   command list with expected timing and final-settle behavior.
 - Existing playback tests still verify go-to-start, segment-speed scaling, and
   final completion checks.
+
+## 17. Exported compiled playback job artifact
+
+Change made:
+
+- Added `compiled_playback_plan_to_dict()` so a compiled MG400 teach-repeat job
+  can be serialised into a stable JSON artifact.
+- Added `TrajectoryRecorder.export_loaded_plan(path)` to compile + write that
+  artifact in one step.
+- Added `tools/demo_lift/compile_playback_plan.py` so saved Unity/native
+  trajectory JSON files can be turned into a visible `compiled playback job`
+  artifact without launching the ROS node.
+
+Artifact shape:
+
+- `artifact_kind = "mg400_compiled_playback_plan"`
+- `artifact_version = "0.1"`
+- source trajectory name
+- waypoint count / queued command count
+- original + retimed timing metadata
+- lookahead window
+- retimed waypoints
+- queued commands, each with:
+  - index
+  - target time
+  - original target time
+  - joints in degrees
+  - `SpeedJ`
+  - `CP`
+  - rendered `JointMovJ(...)`
+
+Why this matters:
+
+- We now have a concrete file that represents the teach-repeat job after
+  compilation and before execution.
+- This is the right place to inspect, diff, archive, or later hand off to a
+  different executor backend.
+- It also gives a clean seam for future work:
+  - executor reads compiled job
+  - controller-side/offline path can replace host-dispatch later
+  - research into Dobot offline/program upload can target this artifact
+    boundary instead of raw Unity trajectory JSON directly

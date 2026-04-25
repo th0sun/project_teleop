@@ -29,8 +29,9 @@ import json
 import math
 import threading
 import numpy as np
+from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Callable, Tuple
+from typing import List, Dict, Optional, Callable, Tuple, Any
 
 from mg400_protocol.commands import joint_mov_j
 from mg400_protocol.dashboard import enable_robot, reset_robot
@@ -100,6 +101,36 @@ class CompiledPlaybackPlan:
     time_scale: float
     original_timing_feasible: bool
     lookahead_s: float
+
+
+def compiled_playback_plan_to_dict(plan: CompiledPlaybackPlan) -> Dict[str, Any]:
+    """Serialise a compiled playback plan into a JSON-safe debug artifact."""
+    return {
+        "artifact_kind": "mg400_compiled_playback_plan",
+        "artifact_version": "0.1",
+        "source_name": plan.source_name,
+        "waypoint_count": len(plan.waypoints),
+        "queued_command_count": len(plan.queued_commands),
+        "original_duration_s": plan.original_duration_s,
+        "retimed_duration_s": plan.retimed_duration_s,
+        "total_duration_s": plan.total_duration_s,
+        "time_scale": plan.time_scale,
+        "original_timing_feasible": plan.original_timing_feasible,
+        "lookahead_s": plan.lookahead_s,
+        "waypoints": [dict(frame) for frame in plan.waypoints],
+        "queued_commands": [
+            {
+                "index": cmd.index,
+                "target_time_s": cmd.target_time_s,
+                "original_target_time_s": cmd.original_target_time_s,
+                "joints_deg": list(cmd.joints_deg),
+                "speed_j": cmd.speed_j,
+                "cp": cmd.cp,
+                "command": cmd.command,
+            }
+            for cmd in plan.queued_commands
+        ],
+    }
 
 
 def frames_from_joint_trajectory_msg(msg) -> List[Dict]:
@@ -496,6 +527,18 @@ class TrajectoryRecorder:
             original_timing_feasible=bool(timing.is_original_timing_feasible),
             lookahead_s=float(lookahead),
         )
+
+    def export_loaded_plan(self, path: str) -> str:
+        """Compile + export the current playback job as a JSON artifact."""
+        plan = self.compile_loaded_plan()
+        out_path = Path(path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(compiled_playback_plan_to_dict(plan), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self._log.info(f"🧾 Exported compiled playback plan → {out_path}")
+        return str(out_path)
 
     def _wait_until_near_target(self, target_q_deg, tolerance_deg, timeout_sec):
         if self._get_pos is None:

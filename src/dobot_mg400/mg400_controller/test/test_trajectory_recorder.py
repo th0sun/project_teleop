@@ -6,6 +6,7 @@ import numpy as np
 from mg400_controller.common.trajectory.trajectory_recorder import (
     PREVIEW_FINAL_TOLERANCE_DEG,
     PREVIEW_START_TOLERANCE_DEG,
+    compiled_playback_plan_to_dict,
     TrajectoryRecorder,
     frames_from_joint_trajectory_msg,
 )
@@ -211,6 +212,54 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertIn("JointMovJ(2.0000", plan.queued_commands[0].command)
         self.assertEqual(plan.queued_commands[0].speed_j, 15)
         self.assertEqual(plan.queued_commands[1].cp, 0)
+
+    def test_export_loaded_plan_writes_json_artifact(self):
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        recorder.load_frames(
+            [
+                {"timeStamp": 0.0, "j1": 0.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+                {"timeStamp": 0.2, "j1": 2.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+            ],
+            name="export_demo.json",
+        )
+
+        artifact_path = recorder.export_loaded_plan(
+            f"{self.temp_dir.name}/compiled/export_demo.compiled_playback.json"
+        )
+
+        import json
+
+        with open(artifact_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+
+        self.assertEqual(data["artifact_kind"], "mg400_compiled_playback_plan")
+        self.assertEqual(data["source_name"], "export_demo.json")
+        self.assertEqual(data["waypoint_count"], 2)
+        self.assertEqual(data["queued_command_count"], 1)
+        self.assertIn("JointMovJ(2.0000", data["queued_commands"][0]["command"])
+
+    def test_compiled_playback_plan_to_dict_is_json_safe(self):
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        recorder.load_frames(
+            [
+                {"timeStamp": 0.0, "j1": 0.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+                {"timeStamp": 0.2, "j1": 2.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+            ]
+        )
+
+        payload = compiled_playback_plan_to_dict(recorder.compile_loaded_plan())
+
+        self.assertEqual(payload["artifact_version"], "0.1")
+        self.assertIsInstance(payload["waypoints"], list)
+        self.assertIsInstance(payload["queued_commands"][0]["joints_deg"], list)
 
     def test_play_worker_skips_duplicate_start_and_uses_segment_speed(self):
         sent_commands = []
