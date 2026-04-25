@@ -5,6 +5,20 @@ import numpy as np
 
 from mg400_protocol.alarms import AlarmCatalog
 from mg400_protocol.commands import do_execute, joint_mov_j, mov_j, mov_l
+from mg400_protocol.dashboard import (
+    acc_j,
+    clear_error,
+    continue_,
+    disable_robot,
+    emergency_stop,
+    enable_robot,
+    get_pose,
+    get_tool,
+    pause,
+    reset_robot,
+    speed_factor,
+    speed_j,
+)
 from mg400_protocol.feedback import (
     FEEDBACK_PACKET_SIZE,
     FEEDBACK_TEST_VALUE,
@@ -30,6 +44,15 @@ class MG400ProtocolTest(unittest.TestCase):
             "JointMovJ(0.0000,5.7296,-5.7296,0.0000,SpeedJ=40,AccJ=100,CP=100)",
         )
         self.assertEqual(digital_output.render(), "DOExecute(16,1)")
+
+    def test_cp_zero_is_preserved_unlike_speed_clamp(self):
+        # CP=0 means "no blending" in the MG400 vendor protocol; SpeedJ/AccJ=0
+        # do not. Clamps must not collapse them together.
+        cmd = joint_mov_j(
+            (0.0, 0.0, 0.0, 0.0), speed_j=20, acc_j=50, cp=0,
+        )
+        self.assertIn("CP=0", cmd.render())
+        self.assertIn("SpeedJ=20", cmd.render())
 
     def test_legacy_motion_builders_match_existing_runtime_format(self):
         self.assertEqual(
@@ -70,6 +93,26 @@ class MG400ProtocolTest(unittest.TestCase):
         self.assertEqual(snapshot.run_queued_cmd, 1)
         self.assertEqual(snapshot.current_command_id, 123)
         self.assertEqual(snapshot.tool_vector_actual[0], 10.0)
+
+    def test_dashboard_state_commands_render_vendor_format(self):
+        self.assertEqual(enable_robot().render(), "EnableRobot()")
+        self.assertEqual(disable_robot().render(), "DisableRobot()")
+        self.assertEqual(clear_error().render(), "ClearError()")
+        self.assertEqual(reset_robot().render(), "ResetRobot()")
+        self.assertEqual(emergency_stop().render(), "EmergencyStop()")
+        self.assertEqual(pause().render(), "Pause()")
+        self.assertEqual(continue_().render(), "Continue()")
+
+    def test_dashboard_speed_commands_clamp_to_vendor_range(self):
+        self.assertEqual(speed_factor(100).render(), "SpeedFactor(100)")
+        self.assertEqual(speed_factor(0).render(), "SpeedFactor(1)")    # clamps to 1
+        self.assertEqual(speed_factor(150).render(), "SpeedFactor(100)")  # clamps to 100
+        self.assertEqual(speed_j(50).render(), "SpeedJ(50)")
+        self.assertEqual(acc_j(75).render(), "AccJ(75)")
+
+    def test_dashboard_introspection_commands(self):
+        self.assertEqual(get_tool().render(), "GetTool()")
+        self.assertEqual(get_pose().render(), "GetPose()")
 
     def test_alarm_catalog_loads_vendor_alarm_json(self):
         catalog = AlarmCatalog.from_files(

@@ -45,7 +45,13 @@ def _format_value(value: object) -> str:
 
 
 def _speed(value: float) -> int:
+    """Clamp to vendor [1, 100] range used by SpeedJ / AccJ / SpeedFactor."""
     return max(1, min(100, int(round(value))))
+
+
+def _blend_pct(value: float) -> int:
+    """Clamp to vendor [0, 100] range used by ``CP`` (0 = no blending)."""
+    return max(0, min(100, int(round(value))))
 
 
 def joint_mov_j(
@@ -64,7 +70,7 @@ def joint_mov_j(
     if acc_j is not None:
         kwargs.append(("AccJ", _speed(acc_j)))
     if cp is not None:
-        kwargs.append(("CP", _speed(cp)))
+        kwargs.append(("CP", _blend_pct(cp)))
     return DobotCommand("JointMovJ", joints, tuple(kwargs))
 
 
@@ -84,7 +90,7 @@ def mov_j(
     if acc_j is not None:
         kwargs.append(("AccJ", _speed(acc_j)))
     if cp is not None:
-        kwargs.append(("CP", _speed(cp)))
+        kwargs.append(("CP", _blend_pct(cp)))
     return DobotCommand("MovJ", values, tuple(kwargs))
 
 
@@ -104,7 +110,7 @@ def mov_l(
     if acc_j is not None:
         kwargs.append(("AccJ", _speed(acc_j)))
     if cp is not None:
-        kwargs.append(("CP", _speed(cp)))
+        kwargs.append(("CP", _blend_pct(cp)))
     return DobotCommand("MovL", values, tuple(kwargs))
 
 

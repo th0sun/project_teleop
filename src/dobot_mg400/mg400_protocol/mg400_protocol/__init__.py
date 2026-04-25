@@ -14,6 +14,20 @@ from mg400_protocol.commands import (  # noqa: F401
     mov_j,
     mov_l,
 )
+from mg400_protocol.dashboard import (  # noqa: F401
+    acc_j,
+    clear_error,
+    continue_,
+    disable_robot,
+    emergency_stop,
+    enable_robot,
+    get_pose,
+    get_tool,
+    pause,
+    reset_robot,
+    speed_factor,
+    speed_j,
+)
 from mg400_protocol.feedback import (  # noqa: F401
     FEEDBACK_PACKET_SIZE,
     FEEDBACK_TEST_VALUE,
