@@ -819,5 +819,51 @@ Why this matters:
 - It also gives a clean seam for future work:
   - executor reads compiled job
   - controller-side/offline path can replace host-dispatch later
-  - research into Dobot offline/program upload can target this artifact
-    boundary instead of raw Unity trajectory JSON directly
+- research into Dobot offline/program upload can target this artifact
+  boundary instead of raw Unity trajectory JSON directly
+
+## 18. Unity teach-repeat bridge audit and ROS sync fix
+
+Audit finding:
+
+- The Unity project already had two different teach-repeat data paths:
+  - local JSON save/load inside `ContinuousTeachAndRepeat.cs`
+  - ROS `JointTrajectory` publish inside `ROSPathPublisher.cs`
+- Those two paths were not actually tied together as one artifact workflow.
+- Result:
+  - Unity could save a JSON file locally for later preview/load
+  - Unity could also send a `JointTrajectory` to ROS
+  - but ROS did not automatically receive the same raw JSON artifact Unity was
+    using for save/load, even though `vr_teleop_node.py` already subscribed to
+    `/unity/trajectory_data`
+
+Change made on the Unity side:
+
+- Extended the Unity JSON wrapper with `filename`.
+- Added `currentPathFileName` tracking in `ContinuousTeachAndRepeat.cs`.
+- When Unity saves a path, it now also mirrors that JSON artifact to ROS via
+  `/unity/trajectory_data`.
+- When Unity sends a path to the robot, it now first publishes the raw JSON
+  artifact and then publishes the ROS `JointTrajectory`.
+
+Why this matters:
+
+- Unity and ROS now observe the same teach-repeat asset instead of two loosely
+  related representations.
+- The raw artifact path (`/unity/trajectory_data`) is now actually exercised by
+  the real Unity application, not only by simulator/test tooling.
+- This gives the ROS side enough information to:
+  - archive the exact taught path as JSON
+  - compile/export a playback job artifact
+  - later compare raw JSON vs compiled playback plan vs robot-specific executor
+
+Remaining gap:
+
+- The current runtime still starts immediate MG400 playback when Unity publishes
+  `JointTrajectory`.
+- For the longer-term architecture, Unity should eventually submit an explicit
+  `teach-repeat job request` and let the ROS/adapter side decide whether to:
+  - compile only,
+  - preview,
+  - export,
+  - or execute on a specific robot backend.
