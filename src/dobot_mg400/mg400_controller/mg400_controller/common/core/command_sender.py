@@ -14,6 +14,7 @@ import time
 import re
 import queue
 import threading
+from mg400_protocol.commands import do_execute
 
 class CommandSender:
     def __init__(self, robot_connection, feedback_handler, logger):
@@ -69,8 +70,7 @@ class CommandSender:
         """
         สั่งเปิด/ปิด Digital Output (Non-blocking via Queue)
         """
-        status_val = 1 if status else 0
-        command = f"DOExecute({port}, {status_val})"
+        command = do_execute(port, status).render()
         
         # Push to background queue to avoid blocking ROS executor
         self.dash_queue.put((command, port, status))

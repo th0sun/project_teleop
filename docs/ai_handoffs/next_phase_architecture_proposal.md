@@ -15,8 +15,10 @@ M4/M5 collapse; VR-to-robot calibration and delta-robot coverage added).
 PR1 core scaffold is implemented in `src/robot_teaching_core/`
 (`843cb7b`, with adapter contracts through `32cc739`). M2 runtime
 helper extraction is implemented in `c361f64`. The first M3 MG400
-adapter facade is implemented in `8b79726`; Cartesian IK and lifter
-phases are not implemented yet.
+adapter facade is implemented in `8b79726`; shared MG400 protocol
+artifacts are implemented in `2c7504f` and then promoted to the
+`mg400_protocol` package. Cartesian IK and lifter phases are not
+implemented yet.
 
 Scope: answer the design questions in
 `docs/ai_handoffs/next_phase_architecture_brief.md` with a concrete, testable
@@ -1064,14 +1066,16 @@ existing command sender. The current translator deliberately accepts
 adapter honest: the profile says MG400 is the first robot-specific
 case study, not that the whole retargeting problem is solved.
 
-Protocol-onboarding status: MG400 now also carries adapter-local
-vendor artifacts under `mg400_adapter/protocol/`: typed command
+Protocol-onboarding status: MG400 now also carries shared vendor
+artifacts in `src/dobot_mg400/mg400_protocol/`: typed command
 builders, the 1440-byte feedback packet layout, and an alarm catalog
-loader backed by Dobot's controller/servo JSON files. This is the
-pattern for adding a robot: collect vendor command grammar, feedback
-state layout, error/alarm database, capability profile, kinematics
-contract, and translator mapping in the adapter. Do not hardcode
-vendor command strings or byte offsets in translator/executor code.
+loader backed by Dobot's controller/servo JSON files. Both the legacy
+`mg400_controller` runtime and the new `mg400_adapter` use this package.
+This is the pattern for adding a robot: collect vendor command grammar,
+feedback state layout, error/alarm database, capability profile,
+kinematics contract, and translator mapping in the robot-specific
+packages. Do not hardcode vendor command strings or byte offsets in
+translator/executor code.
 
 ### Phase M4 — Lifter v0 (no MG400 FK bias)
 

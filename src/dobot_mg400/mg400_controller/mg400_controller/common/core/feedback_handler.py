@@ -12,9 +12,9 @@
 
 import threading
 import socket
-import struct
 import time
 import numpy as np
+from mg400_protocol.feedback import FEEDBACK_PACKET_SIZE, parse_feedback_packet
 from sensor_msgs.msg import JointState
 from mg400_controller.common.utils.kinematics import KinematicsCalculator
 
@@ -60,7 +60,6 @@ class FeedbackHandler:
     
     def _run(self):
         """Main loop รับข้อมูล feedback"""
-        PACKET_SIZE = 1440
         buffer = b''
         
         # ตั้งค่า socket เป็น blocking mode
@@ -85,9 +84,9 @@ class FeedbackHandler:
                         break
                 
                 # Process only the LATEST complete packet from the buffer
-                while len(buffer) >= PACKET_SIZE:
-                    latest_packet = buffer[:PACKET_SIZE]
-                    buffer = buffer[PACKET_SIZE:]
+                while len(buffer) >= FEEDBACK_PACKET_SIZE:
+                    latest_packet = buffer[:FEEDBACK_PACKET_SIZE]
+                    buffer = buffer[FEEDBACK_PACKET_SIZE:]
                 
                 if latest_packet:
                     self._process_packet(latest_packet)
@@ -109,35 +108,18 @@ class FeedbackHandler:
 
     
     def _process_packet(self, data):
-        """ประมวลผล binary packet ตามโครงสร้าง MyType ใน dobot_api.py"""
+        """ประมวลผล binary packet ผ่าน mg400_protocol feedback parser"""
         try:
-            # 0. Packet Verification (Offset 48: TestValue)
-            # Expecting 0x0123456789ABCDEF (Little Endian constant from Dobot)
-            TEST_VALUE_OFFSET = 48
-            test_val = struct.unpack_from('<Q', data, TEST_VALUE_OFFSET)[0]
-            
-            # 🛑 ZERO-LOCK FIX:
-            # Real robots send 0x0123456789ABCDEF. Mocks send 0.
-            # Accept both so we don't break the Mock Simulator.
-            VALID_TEST_VALUES = (0x0123456789ABCDEF, 0)
-            
-            if test_val not in VALID_TEST_VALUES:
-                self.logger.warn(f"Packet Rejected: TestValue mismatch. Got: {hex(test_val)}", throttle_duration_sec=1.0)
+            snapshot = parse_feedback_packet(data, allow_mock_zero_test_value=True)
+            if snapshot is None:
+                self.logger.warn(
+                    "Packet Rejected: invalid MG400 feedback packet",
+                    throttle_duration_sec=1.0,
+                )
                 return
 
-            # 1. Parse Joint Angles (Offset 432)
-            OFFSET_JOINT_ACTUAL = 432
-            q_all = struct.unpack_from('<6d', data, OFFSET_JOINT_ACTUAL)
-            j1, j2, j3, j4 = q_all[0:4]
-            
-            # 🛑 ZERO-LOCK FIX (Continued):
-            # If the robot reconnects and sends a completely empty buffer, 
-            # test_val is 0 AND the joints are exactly 0.0, 0.0, 0.0, 0.0.
-            # We must reject this so it doesn't lock the Robot's Position at 0.
-            if test_val == 0 and sum(abs(x) for x in q_all[0:4]) < 0.000001:
-                self.logger.warn("Packet Rejected: Blank zero-buffer detected (Zero-Lock Prevention)", throttle_duration_sec=1.0)
-                return
-                
+            # 1. Parse Joint Angles (degrees in vendor packet -> radians internally)
+            j1, j2, j3, j4 = snapshot.q_actual_deg
             q_rad = np.radians([j1, j2, j3, j4])
             
             # --- Sanity Check ---
@@ -149,45 +131,30 @@ class FeedbackHandler:
             self.current_position = q_rad
 
             # 1.5 Parse queue target and running-state feedback for backlog-aware gating.
-            OFFSET_JOINT_TARGET = 192
-            OFFSET_RUN_QUEUED = 1014
-            q_target_all = struct.unpack_from('<6d', data, OFFSET_JOINT_TARGET)
-            self.target_position = np.radians(q_target_all[0:4])
-            self.run_queued_cmd = data[OFFSET_RUN_QUEUED]
+            self.target_position = np.radians(snapshot.q_target_deg)
+            self.run_queued_cmd = snapshot.run_queued_cmd
             
             # 2. Parse Robot Mode (Offset 24)
-            OFFSET_ROBOT_MODE = 24
-            self.robot_mode = struct.unpack_from('<Q', data, OFFSET_ROBOT_MODE)[0]
+            self.robot_mode = snapshot.robot_mode
             
             # 3. Parse Digital I/O (Offset 8/16)
-            OFFSET_DI_STATUS = 8
-            OFFSET_DO_STATUS = 16
-            self.di_status = struct.unpack_from('<Q', data, OFFSET_DI_STATUS)[0]
-            self.do_status = struct.unpack_from('<Q', data, OFFSET_DO_STATUS)[0]
+            self.di_status = snapshot.digital_inputs
+            self.do_status = snapshot.digital_outputs
             
             # 🌟 3.5 Parse Speed Scaling (SpeedFactor) -> Offset 64 (float64)
-            OFFSET_SPEED_SCALING = 64
-            self.speed_scaling = struct.unpack_from('<d', data, OFFSET_SPEED_SCALING)[0]
+            self.speed_scaling = snapshot.speed_scaling
             self.logger.info(f"🚀 SpeedFactor Confirm: {self.speed_scaling}", throttle_duration_sec=3.0)
             
             # 4. Parse Error/Collision status
-            OFFSET_ERROR = 1029
-            OFFSET_COLLISION = 1038
-            self.error_status = data[OFFSET_ERROR]
-            self.collision_state = data[OFFSET_COLLISION]
+            self.error_status = snapshot.error_status
+            self.collision_state = snapshot.collision_state
 
             # 5. Parse Command ID (Offset 1112)
-            OFFSET_CMD_ID = 1112
-            self.command_id = struct.unpack_from('<Q', data, OFFSET_CMD_ID)[0]
+            self.command_id = snapshot.current_command_id
             
             # 6. Parse Tool Vector Actual (Offset 624) & Target (Offset 768)
-            OFFSET_TOOL_ACTUAL = 624
-            tool_actual = struct.unpack_from('<6d', data, OFFSET_TOOL_ACTUAL)
-            self.tool_vector_actual = np.array(tool_actual)
-
-            OFFSET_TOOL_TARGET = 768
-            tool_target = struct.unpack_from('<6d', data, OFFSET_TOOL_TARGET)
-            self.tool_vector_target = np.array(tool_target)
+            self.tool_vector_actual = np.array(snapshot.tool_vector_actual)
+            self.tool_vector_target = np.array(snapshot.tool_vector_target)
             
             # 7. Joint State Calculation & Publishing
             all_joints = self.kinematics.calculate_passive_joints(q_rad)

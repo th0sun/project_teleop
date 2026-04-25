@@ -1,14 +1,16 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>mg400_controller</name>
-  <version>0.0.0</version>
-  <description>ROS2 teleoperation controller for Dobot MG400.</description>
+  <name>mg400_protocol</name>
+  <version>0.1.0</version>
+  <description>
+    Shared Dobot MG400 TCP/IP protocol definitions: command builders,
+    1440-byte feedback parser, and alarm-code catalog.
+  </description>
   <maintainer email="m.hassunofficial@gmail.com">th0sun</maintainer>
   <license>MIT</license>
 
-  <exec_depend>mg400_protocol</exec_depend>
-  <exec_depend>robot_teaching_core</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

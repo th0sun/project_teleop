@@ -9,7 +9,7 @@ import numpy as np
 
 from mg400_controller.common.config import motion_config
 from mg400_controller.common.config.robot_config import CONTROL_MODE
-from mg400_adapter.protocol.commands import do_execute, joint_mov_j
+from mg400_protocol.commands import do_execute, joint_mov_j
 from teaching_core.adapter_api import UnsupportedStep
 from teaching_core.program.types import (
     CanonicalProgram,
@@ -47,7 +47,7 @@ def _translate_move(step: MoveStep, control_mode: str, speed_pct: int):
     if control_mode != "jointmovj":
         raise UnsupportedStep(
             "MG400 adapter v0 only exposes protocol-backed JointMovJ. "
-            "MovJ/MovL support should be added through mg400_adapter.protocol."
+            "MovJ/MovL support should be added through mg400_protocol."
         )
     if step.joint_hint_rad is None or len(step.joint_hint_rad) < 4:
         raise UnsupportedStep(

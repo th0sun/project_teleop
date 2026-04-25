@@ -3,9 +3,9 @@ from pathlib import Path
 
 import numpy as np
 
-from mg400_adapter.protocol.alarms import AlarmCatalog
-from mg400_adapter.protocol.commands import do_execute, joint_mov_j
-from mg400_adapter.protocol.feedback import (
+from mg400_protocol.alarms import AlarmCatalog
+from mg400_protocol.commands import do_execute, joint_mov_j, mov_j, mov_l
+from mg400_protocol.feedback import (
     FEEDBACK_PACKET_SIZE,
     FEEDBACK_TEST_VALUE,
     MG400_FEEDBACK_DTYPE,
@@ -30,6 +30,16 @@ class MG400ProtocolTest(unittest.TestCase):
             "JointMovJ(0.0000,5.7296,-5.7296,0.0000,SpeedJ=40,AccJ=100,CP=100)",
         )
         self.assertEqual(digital_output.render(), "DOExecute(16,1)")
+
+    def test_legacy_motion_builders_match_existing_runtime_format(self):
+        self.assertEqual(
+            mov_j((1.0, 2.0, 3.0, 4.0), speed_j=50, acc_j=100, cp=100).render(),
+            "MovJ(1.0000,2.0000,3.0000,4.0000,SpeedJ=50,AccJ=100,CP=100)",
+        )
+        self.assertEqual(
+            mov_l((1.0, 2.0, 3.0, 4.0), speed_j=50, acc_j=100, cp=100).render(),
+            "MovL(1.0000,2.0000,3.0000,4.0000,SpeedJ=50,AccJ=100,CP=100)",
+        )
 
     def test_feedback_layout_matches_1440_byte_vendor_packet(self):
         self.assertEqual(MG400_FEEDBACK_DTYPE.itemsize, FEEDBACK_PACKET_SIZE)

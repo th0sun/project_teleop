@@ -12,6 +12,7 @@
   <license>MIT</license>
 
   <exec_depend>mg400_controller</exec_depend>
+  <exec_depend>mg400_protocol</exec_depend>
   <exec_depend>robot_teaching_core</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
 

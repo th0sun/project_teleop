@@ -68,6 +68,46 @@ def joint_mov_j(
     return DobotCommand("JointMovJ", joints, tuple(kwargs))
 
 
+def mov_j(
+    pose_or_joint_values: Iterable[float],
+    *,
+    speed_j: float,
+    acc_j: Optional[float] = None,
+    cp: Optional[float] = None,
+) -> DobotCommand:
+    """Build the legacy 4-value ``MovJ`` form used by the current runtime."""
+    values = tuple(float(value) for value in pose_or_joint_values)
+    if len(values) != 4:
+        raise ValueError(f"MovJ expects 4 values, got {len(values)}")
+
+    kwargs = [("SpeedJ", _speed(speed_j))]
+    if acc_j is not None:
+        kwargs.append(("AccJ", _speed(acc_j)))
+    if cp is not None:
+        kwargs.append(("CP", _speed(cp)))
+    return DobotCommand("MovJ", values, tuple(kwargs))
+
+
+def mov_l(
+    pose_values: Iterable[float],
+    *,
+    speed_j: float,
+    acc_j: Optional[float] = None,
+    cp: Optional[float] = None,
+) -> DobotCommand:
+    """Build the legacy 4-value ``MovL`` form used by the current runtime."""
+    values = tuple(float(value) for value in pose_values)
+    if len(values) != 4:
+        raise ValueError(f"MovL expects 4 values, got {len(values)}")
+
+    kwargs = [("SpeedJ", _speed(speed_j))]
+    if acc_j is not None:
+        kwargs.append(("AccJ", _speed(acc_j)))
+    if cp is not None:
+        kwargs.append(("CP", _speed(cp)))
+    return DobotCommand("MovL", values, tuple(kwargs))
+
+
 def do_execute(index: int, status: bool) -> DobotCommand:
     """Build ``DOExecute(index,status)``."""
     return DobotCommand("DOExecute", (int(index), bool(status)))
