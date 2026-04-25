@@ -8,6 +8,17 @@ and limitations.
 
 ## Files
 
+- `architecture_phase_research_log.md`
+  Research/process log for the new multi-robot architecture phase. Use this for
+  report sections about design alternatives, why the architecture direction
+  changed, why certain options were rejected or deferred, and what remains open
+  before implementation.
+
+- `architecture_phase_timeline.md`
+  Chronological record of how the project moved from MG400-first runtime
+  cleanup into the current multi-robot architecture-design phase. Useful for
+  methodology timelines and discussion chapters.
+
 - `report_writing_guideline.md`  
   Suggested chapter structure and wording for the final report.
 
