@@ -969,6 +969,35 @@ faithful validator for MG400 queue behavior:
    - This means the mock cannot validate differences such as `CP=80` vs
      `CP=100`.
 
+3. `DOExecute(port, status)` is not implemented.
+   - The motion port accepts the command string but the upstream mock
+     does not toggle digital outputs in feedback. Suction / gripper
+     paths cannot be validated through the mock.
+   - Dashboard `EmergencyStop`, `Pause`, `Continue`, `GetTool`, and
+     `GetPose` are also absent.
+
+### Decision: keep upstream mock at rung 5; augment with adapter-side fake
+
+We considered patching the upstream `MG400_Mock` submodule (or forking
+it) to cover `DOExecute`, `RunQueuedCmd`, and the missing dashboard
+verbs. Decided **against**, on three grounds:
+
+1. proposal R5 already pins the rule: "rung 3 golden translator tests
+   are the real correctness gate; the mock is only trusted for rung 5
+   (socket plumbing)." The missing verbs are an instance of that
+   limitation, not a new problem.
+2. patching the submodule in-tree drifts on every upstream pull and
+   buys nothing the protocol-layer golden tests do not already give.
+3. forking adds a maintenance dependency (license is Apache-2.0, but
+   carrying a HarvestX fork has no upside for "MG400 is the first
+   adapter, not the system center").
+
+Action: when an adapter or M4 lifter test needs DO toggling or queue
+state to assert, ship a Python-level `FakeBackend` test double that
+implements the relevant `mg400_protocol` surface directly. The
+upstream mock keeps its rung-5 role: real socket plumbing for the
+verbs it already supports.
+
 ### Practical Conclusion
 
 The benchmark is still useful for one thing:
