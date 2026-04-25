@@ -669,8 +669,12 @@ Problem found:
 Change made:
 
 - Tightened final playback settle tolerance to `0.05 deg`.
+- Final completion now also waits for robot feedback mode to leave
+  `MODE_RUNNING` when robot-mode feedback is available.  This prevents a false
+  "complete" event while the feedback position has entered tolerance but the
+  robot is still executing the final segment.
 - `playback_complete` events now include final target, final actual, and
-  per-joint final error when feedback is available.
+  per-joint final error plus final robot mode when feedback is available.
 - `tools/demo_lift/measure_replay_timing.py` now separates:
   - `completion_error_deg`: error when playback declares complete
   - `final_error_deg`: error after an additional post-settle observation window
@@ -683,13 +687,13 @@ Mock results after the fix:
 
 ```text
 Synthetic timing probe:
-completion_error_deg: [0.0, 0.0204, 0.0, 0.0]
+completion_error_deg: [0.0, 0.0, 0.0, 0.0]
 final_error_deg:      [0.0, 0.0, 0.0, 0.0]
 
 unity_mock_test.json:
 planned_duration_s:   1.0
 measured_duration_s:  1.6
-completion_error_deg: [0.0362, 0.0362, 0.0362, 0.0]
+completion_error_deg: [0.0, 0.0, 0.0, 0.0]
 final_error_deg:      [0.0, 0.0, 0.0, 0.0]
 ```
 

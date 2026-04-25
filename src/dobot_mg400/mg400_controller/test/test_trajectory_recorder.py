@@ -133,6 +133,27 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertTrue(recorder._playback_complete(2, 1.2, 1.0, target_q))
         self.assertLessEqual(PREVIEW_FINAL_TOLERANCE_DEG, 0.05)
 
+    def test_playback_complete_waits_for_robot_mode_to_leave_running(self):
+        target_q = np.array([
+            [0.0, 0.0, 0.0, 0.0],
+            [20.0, 10.0, 0.0, 0.0],
+        ])
+        feed = PositionFeed([
+            [20.0, 10.0, 0.0, 0.0],
+            [20.0, 10.0, 0.0, 0.0],
+        ])
+        modes = iter([7, 5])
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            get_position_fn=feed,
+            get_robot_mode_fn=lambda: next(modes),
+            traj_dir=self.temp_dir.name,
+        )
+
+        self.assertFalse(recorder._playback_complete(2, 1.0, 1.0, target_q))
+        self.assertTrue(recorder._playback_complete(2, 1.1, 1.0, target_q))
+
     def test_playback_complete_uses_extra_timeout_without_feedback(self):
         clock = FakeClock()
         recorder = TrajectoryRecorder(

@@ -192,6 +192,7 @@ class TeleopNode(Node):
             logger=self.get_logger(),
             dashboard_send_fn=self.connection.send_dashboard_cmd,
             get_position_fn=self.feedback.get_current_position,
+            get_robot_mode_fn=self.feedback.get_robot_mode,
             waypoint_callback=self._playback_waypoint_callback,
             target_callback=self._playback_target_callback,
         )

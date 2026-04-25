@@ -74,6 +74,7 @@ PREVIEW_LOOKAHEAD_MAX_SEC = 0.25
 PREVIEW_LOOKAHEAD_FRAMES = 2.0
 PREVIEW_JOINT_SPEED_AT_100_DEG_S = 90.0
 PREVIEW_STREAM_REF_VEL_DEG_S = PREVIEW_JOINT_SPEED_AT_100_DEG_S
+MG400_ROBOT_MODE_RUNNING = 7
 
 
 def frames_from_joint_trajectory_msg(msg) -> List[Dict]:
@@ -133,6 +134,7 @@ class TrajectoryRecorder:
                  waypoint_callback: Optional[Callable] = None,
                  target_callback: Optional[Callable] = None,
                  playback_event_callback: Optional[Callable] = None,
+                 get_robot_mode_fn: Optional[Callable] = None,
                  traj_dir: Optional[str] = None,
                  time_fn: Optional[Callable] = None,
                  sleep_fn: Optional[Callable] = None):
@@ -143,6 +145,7 @@ class TrajectoryRecorder:
         self._waypoint_cb = waypoint_callback
         self._target_cb = target_callback
         self._playback_event_cb = playback_event_callback
+        self._get_robot_mode = get_robot_mode_fn
         self._traj_dir = TRAJ_DIR if traj_dir is None else traj_dir
         self._time_fn = time.time if time_fn is None else time_fn
         self._sleep_fn = time.sleep if sleep_fn is None else sleep_fn
@@ -431,13 +434,19 @@ class TrajectoryRecorder:
 
     def _final_target_state(self, target_q):
         if self._get_pos is None:
-            return None, None, None
+            return None, None, None, None
         pos_deg = self._get_current_position_deg()
         if pos_deg is None:
-            return None, None, None
+            return None, None, None, None
         final_q = np.asarray(target_q[-1], dtype=float)
         per_joint_error = np.abs(pos_deg - final_q)
-        return float(np.max(per_joint_error)), per_joint_error, pos_deg
+        robot_mode = None
+        if self._get_robot_mode is not None:
+            try:
+                robot_mode = int(self._get_robot_mode())
+            except Exception:
+                robot_mode = None
+        return float(np.max(per_joint_error)), per_joint_error, pos_deg, robot_mode
 
     def _send_go_to_start(self, first_frame):
         start_q = [first_frame["j1"], first_frame["j2"], first_frame["j3"], first_frame["j4"]]
@@ -467,10 +476,14 @@ class TrajectoryRecorder:
             return False
 
         if self._get_pos is not None:
-            max_err, _, _ = self._final_target_state(target_q)
+            max_err, _, _, robot_mode = self._final_target_state(target_q)
             if max_err is None:
                 return False
-            return max_err <= PREVIEW_FINAL_TOLERANCE_DEG
+            if max_err > PREVIEW_FINAL_TOLERANCE_DEG:
+                return False
+            if robot_mode == MG400_ROBOT_MODE_RUNNING:
+                return False
+            return True
 
         return elapsed >= total_dur + PREVIEW_FINAL_EXTRA_TIMEOUT_SEC
 
@@ -572,7 +585,7 @@ class TrajectoryRecorder:
                 
             self._sleep_fn(PREVIEW_POLL_SEC) # 100Hz interpolation and polling loop
 
-        final_max_error, final_error, final_position = self._final_target_state(target_q)
+        final_max_error, final_error, final_position, final_robot_mode = self._final_target_state(target_q)
         final_target = np.asarray(target_q[-1], dtype=float)
 
         self.is_playing = False
@@ -584,6 +597,7 @@ class TrajectoryRecorder:
             final_error_deg=None if final_error is None else [float(v) for v in final_error],
             final_q_actual_deg=None if final_position is None else [float(v) for v in final_position],
             final_target_deg=[float(v) for v in final_target],
+            final_robot_mode=final_robot_mode,
         )
         if self._stop_flag.is_set():
             self._log.info("⏹️  Playback stopped")

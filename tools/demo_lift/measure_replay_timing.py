@@ -94,6 +94,13 @@ class FeedbackMonitor:
             return None
         return np.radians(latest.q_actual_deg)
 
+    def latest_robot_mode(self):
+        with self._lock:
+            latest = self._latest
+        if latest is None:
+            return 0
+        return latest.robot_mode
+
     def snapshot(self) -> List[FeedbackSample]:
         with self._lock:
             return list(self.samples)
@@ -413,6 +420,7 @@ def run(out_path: Optional[Path], trajectory_json: Optional[Path] = None, post_s
             dashboard_send_fn=lambda cmd: _dashboard_cmd(dash, cmd),
             logger=Logger(),
             get_position_fn=monitor.latest_q_rad,
+            get_robot_mode_fn=monitor.latest_robot_mode,
             playback_event_callback=events.callback,
         )
         recorder.loaded_frames = frames
