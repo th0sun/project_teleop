@@ -12,7 +12,8 @@ Status: **proposal / draft v1.3** (second pressure-pass folded in:
 per-step orientation intent now required, KinematicsContract replaces
 URDF-required, two-tier capture model `*.session.mcap`/`*.program.json`,
 M4/M5 collapse; VR-to-robot calibration and delta-robot coverage added).
-Not yet implemented.
+PR1 core scaffold is implemented in `src/robot_teaching_core/` as of
+commit `843cb7b`; later migration phases are not implemented yet.
 
 Scope: answer the design questions in
 `docs/ai_handoffs/next_phase_architecture_brief.md` with a concrete, testable
