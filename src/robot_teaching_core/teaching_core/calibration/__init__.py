@@ -12,4 +12,7 @@ from teaching_core.calibration.feedback import (  # noqa: F401
     WorkspaceFeedbackKind,
     WorkspaceKind,
     WorkspaceModel,
+    WorkspaceModelValidationError,
+    validate_teaching_feedback_contract,
+    validate_workspace_model,
 )

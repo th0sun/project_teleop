@@ -262,6 +262,39 @@ class TestProfileValidation(unittest.TestCase):
         with self.assertRaises(ProfileValidationError):
             validate_profile(bad)
 
+    def test_joint_speed_count_must_match_dof(self) -> None:
+        profile = _mg400_profile(
+            kinematics=KinematicsContract(
+                kind=KinematicsKind.NAMED, provider_id="mg400_4axis_fk"
+            ),
+            execution=_full_exec(),
+        )
+        bad = RobotCapabilityProfile(
+            **{**profile.__dict__, "max_joint_speed_rad_s": (3.0, 3.0, 3.0)}
+        )
+        with self.assertRaises(ProfileValidationError):
+            validate_profile(bad)
+
+    def test_workspace_box_payload_must_be_valid(self) -> None:
+        profile = _mg400_profile(
+            kinematics=KinematicsContract(
+                kind=KinematicsKind.NAMED, provider_id="mg400_4axis_fk"
+            ),
+            execution=_full_exec(),
+        )
+        bad_workspace = WorkspaceModel(
+            kind=WorkspaceKind.BOX,
+            frame="mg400_base",
+            margin_m=0.02,
+            source="vendor_spec",
+            payload={"min_m": [0.4, -0.4, 0.0], "max_m": [-0.4, 0.4, 0.45]},
+        )
+        bad = RobotCapabilityProfile(
+            **{**profile.__dict__, "workspace": bad_workspace}
+        )
+        with self.assertRaises(ProfileValidationError):
+            validate_profile(bad)
+
     def test_delta_translation_only_workspace_validates(self) -> None:
         profile = RobotCapabilityProfile(
             robot_id="delta_fake",

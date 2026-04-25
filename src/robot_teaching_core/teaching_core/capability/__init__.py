@@ -22,4 +22,6 @@ from teaching_core.capability.profile import (  # noqa: F401
 from teaching_core.calibration.feedback import (  # noqa: F401
     WorkspaceKind,
     WorkspaceModel,
+    WorkspaceModelValidationError,
+    validate_workspace_model,
 )

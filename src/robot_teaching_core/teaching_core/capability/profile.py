@@ -9,9 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Literal, Optional, Tuple
+from typing import Literal, Optional, Tuple
 
-from teaching_core.calibration.feedback import WorkspaceKind, WorkspaceModel
+from teaching_core.calibration.feedback import (
+    WorkspaceKind,
+    WorkspaceModel,
+    WorkspaceModelValidationError,
+    validate_workspace_model,
+)
 from teaching_core.capability.kinematics import (
     KinematicsContract,
     KinematicsContractError,
@@ -116,10 +121,10 @@ def validate_profile(p: RobotCapabilityProfile) -> None:
         raise ProfileValidationError("base_frame must be non-empty")
     if not p.tcp_frame:
         raise ProfileValidationError("tcp_frame must be non-empty")
-    if not p.workspace.frame:
-        raise ProfileValidationError("workspace.frame must be non-empty")
-    if p.workspace.margin_m < 0.0:
-        raise ProfileValidationError("workspace.margin_m must be >= 0")
+    try:
+        validate_workspace_model(p.workspace)
+    except WorkspaceModelValidationError as exc:
+        raise ProfileValidationError(f"workspace: {exc}") from exc
     if p.workspace.kind == WorkspaceKind.ANALYTIC_DELTA and (
         p.orientation_authority != OrientationAuthority.TRANSLATION_ONLY_DELTA
     ):
@@ -134,6 +139,16 @@ def validate_profile(p: RobotCapabilityProfile) -> None:
                 f"unknown command interface {iface!r}; "
                 f"expected one of {_VALID_INTERFACES}"
             )
+
+    if len(p.max_joint_speed_rad_s) != p.dof:
+        raise ProfileValidationError(
+            f"max_joint_speed_rad_s length ({len(p.max_joint_speed_rad_s)}) "
+            f"!= dof ({p.dof})"
+        )
+    if any(speed <= 0.0 for speed in p.max_joint_speed_rad_s):
+        raise ProfileValidationError("max_joint_speed_rad_s values must be > 0")
+    if p.max_tcp_speed_m_s <= 0.0:
+        raise ProfileValidationError("max_tcp_speed_m_s must be > 0")
     for iface in p.ros2_control_state_interfaces:
         if iface not in _VALID_INTERFACES:
             raise ProfileValidationError(
