@@ -141,6 +141,77 @@ class MG400AdapterTest(unittest.TestCase):
         self.assertEqual(progress.events, [("offline export ready", 1.0)])
 
 
+    def test_pick_place_command_sequence(self):
+        """Full vertical slice: session → lift → vacuum wrap → MG400 command sequence.
+
+        Locks the observable contract of the teaching pipeline for the safe
+        pick-place subset (joint moves + vacuum + wait).  The expected kinds
+        sequence is:
+
+            DO DO  motion×N  wait(300)  DO DO wait(400) DO
+
+        N >= 3 because the session has a dwell (≥0.20 s) that the segmenter
+        must detect and insert as an intermediate waypoint.
+        """
+        import math
+        from dataclasses import replace as dc_replace
+        from mg400_adapter.translator import plan_to_dict
+
+        clear_registry()
+        provider = register_mg400_provider()
+
+        # Approach → dwell at pick point → retreat (same design as demo script).
+        pairs = []
+        for i in range(5):
+            pairs.append((i * 0.04, (math.radians(i * 5), math.radians(-i * 3.75), 0.0, 0.0)))
+        for i in range(5, 12):
+            pairs.append((i * 0.04, (math.radians(20), math.radians(-15), 0.0, 0.0)))
+        for i in range(12, 17):
+            pairs.append((i * 0.04, (math.radians(20), math.radians(-15 + (i - 11) * 3), 0.0, 0.0)))
+
+        stream = SessionStream.from_pairs(pairs)
+        cfg = LifterConfig(
+            program_id="pick_place_seq_test",
+            capture_id="cap_seq_001",
+            captured_at="2026-04-25T19:00:00Z",
+            default_orientation_intent=OI.YAW_ONLY,
+        )
+        motion_program = lift_session(stream, provider=provider, config=cfg)
+
+        # Wrap motion steps with vacuum on / settle wait / vacuum off.
+        program = dc_replace(
+            motion_program,
+            steps=(
+                ToolStep(tool="vacuum", action="on"),
+                *motion_program.steps,
+                WaitStep(duration_ms=300),
+                ToolStep(tool="vacuum", action="off"),
+            ),
+        )
+
+        plan = translate_program(program)
+        kinds = [c.kind for c in plan.commands]
+        plan_d = plan_to_dict(plan)
+
+        # First two: vacuum on (DO×2, no wait).
+        self.assertEqual(kinds[:2], ["digital_output", "digital_output"])
+        # Middle section: all motion commands (dwell → ≥3 JointMovJ).
+        n_motions = sum(1 for k in kinds if k == "motion")
+        self.assertGreaterEqual(n_motions, 3)
+        motion_block = kinds[2 : 2 + n_motions]
+        self.assertTrue(all(k == "motion" for k in motion_block))
+        # After motions: settle wait then vacuum off sequence.
+        tail = kinds[2 + n_motions :]
+        self.assertEqual(tail[0], "wait")
+        self.assertEqual(plan.commands[2 + n_motions].duration_ms, 300)
+        # Vacuum off: DO DO wait(blow) DO.
+        self.assertEqual(tail[1:], ["digital_output", "digital_output", "wait", "digital_output"])
+        blow_wait = next(c for c in plan.commands if c.kind == "wait" and c.duration_ms != 300)
+        self.assertGreater(blow_wait.duration_ms, 0)
+
+        # Total count must be consistent.
+        self.assertEqual(plan_d["command_count"], len(plan.commands))
+
     def test_lifter_end_to_end_with_mg400_fk_provider(self):
         """Registry → provider injection → lift_session → translate.
 
