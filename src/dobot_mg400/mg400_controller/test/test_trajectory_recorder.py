@@ -162,6 +162,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
 
     def test_play_worker_skips_duplicate_start_and_uses_segment_speed(self):
         sent_commands = []
+        events = []
         clock = FakeClock()
         feed = PositionFeed([
             [15.0, 0.0, 0.0, 0.0],
@@ -176,6 +177,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
             command_send_fn=sent_commands.append,
             logger=FakeLogger(),
             get_position_fn=feed,
+            playback_event_callback=lambda event, payload: events.append((event, payload)),
             traj_dir=self.temp_dir.name,
             time_fn=clock,
             sleep_fn=clock.sleep,
@@ -191,10 +193,14 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(len(sent_commands), 3)
         self.assertIn("SpeedJ=20", sent_commands[0])  # go-to-start
         self.assertIn("JointMovJ(2.0000", sent_commands[1])
-        self.assertIn("SpeedJ=20", sent_commands[1])  # 2 deg / 0.2 s -> 10 deg/s -> min clamp
+        self.assertIn("SpeedJ=25", sent_commands[1])  # 2 deg / 0.2 s -> 10 deg/s -> tuned mapping
         self.assertIn("JointMovJ(10.0000", sent_commands[2])
         self.assertIn("SpeedJ=100", sent_commands[2])  # 8 deg / 0.1 s -> 80 deg/s -> clamp near top
         self.assertIn("CP=0", sent_commands[2])  # final command should settle, not blend
+        self.assertEqual(events[0][0], "go_to_start_command")
+        self.assertEqual(events[1][0], "playback_start")
+        queued = [event for event in events if event[0] == "waypoint_queued"]
+        self.assertEqual([event[1]["index"] for event in queued], [1, 2])
 
 
 if __name__ == "__main__":

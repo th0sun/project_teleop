@@ -66,7 +66,7 @@ PREVIEW_WAIT_POLL_SEC = 0.05
 PREVIEW_LOOKAHEAD_MIN_SEC = 0.10
 PREVIEW_LOOKAHEAD_MAX_SEC = 0.25
 PREVIEW_LOOKAHEAD_FRAMES = 2.0
-PREVIEW_STREAM_REF_VEL_DEG_S = 50.0
+PREVIEW_STREAM_REF_VEL_DEG_S = 40.0
 
 
 class TrajectoryRecorder:
@@ -94,6 +94,7 @@ class TrajectoryRecorder:
                  get_position_fn: Optional[Callable] = None,
                  waypoint_callback: Optional[Callable] = None,
                  target_callback: Optional[Callable] = None,
+                 playback_event_callback: Optional[Callable] = None,
                  traj_dir: Optional[str] = None,
                  time_fn: Optional[Callable] = None,
                  sleep_fn: Optional[Callable] = None):
@@ -103,6 +104,7 @@ class TrajectoryRecorder:
         self._get_pos = get_position_fn
         self._waypoint_cb = waypoint_callback
         self._target_cb = target_callback
+        self._playback_event_cb = playback_event_callback
         self._traj_dir = TRAJ_DIR if traj_dir is None else traj_dir
         self._time_fn = time.time if time_fn is None else time_fn
         self._sleep_fn = time.sleep if sleep_fn is None else sleep_fn
@@ -283,6 +285,14 @@ class TrajectoryRecorder:
             cp=cp,
         ).render()
 
+    def _emit_playback_event(self, event_name, **payload):
+        if self._playback_event_cb is None:
+            return
+        try:
+            self._playback_event_cb(event_name, payload)
+        except Exception:
+            pass
+
     def _get_current_position_deg(self):
         if self._get_pos is None:
             return None
@@ -341,6 +351,7 @@ class TrajectoryRecorder:
             f"🏁 Go-to-start: ({first_frame['j1']:.1f},{first_frame['j2']:.1f},"
             f"{first_frame['j3']:.1f},{first_frame['j4']:.1f})"
         )
+        self._emit_playback_event("go_to_start_command", command=cmd_start, frame=first_frame)
         self._send(cmd_start)
         return self._wait_until_near_target(
             start_q,
@@ -398,6 +409,7 @@ class TrajectoryRecorder:
 
         idx = 1
         t_start = self._time_fn()
+        self._emit_playback_event("playback_start", total_duration_s=total_dur, waypoints=n)
         while not self._stop_flag.is_set():
             elapsed = self._time_fn() - t_start
             
@@ -413,6 +425,16 @@ class TrajectoryRecorder:
                     cp=cp,
                 )
                 self._send(cmd)
+                self._emit_playback_event(
+                    "waypoint_queued",
+                    index=idx,
+                    command=cmd,
+                    target_time_s=float(target_t[idx]),
+                    elapsed_s=float(elapsed),
+                    speed_j=speed_j,
+                    cp=cp,
+                    frame=fr,
+                )
                 
                 # Publish the discrete command sent for the red dots graph
                 if self._waypoint_cb is not None:
@@ -441,6 +463,11 @@ class TrajectoryRecorder:
             self._sleep_fn(PREVIEW_POLL_SEC) # 100Hz interpolation and polling loop
 
         self.is_playing = False
+        self._emit_playback_event(
+            "playback_complete",
+            stopped=bool(self._stop_flag.is_set()),
+            elapsed_s=float(self._time_fn() - t_start),
+        )
         if self._stop_flag.is_set():
             self._log.info("⏹️  Playback stopped")
         else:

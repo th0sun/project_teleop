@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""Measure teach-and-repeat replay timing against the live MG400 Mock.
+
+This uses the real TrajectoryRecorder playback path, sends commands over
+MG400_Mock TCP, samples realtime feedback, and compares q_actual(t) against
+the taught trajectory q_target(t). It intentionally reports Mock limitations:
+the Mock motion port does not acknowledge commands and does not implement the
+real robot's queued-command feedback fields.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import socket
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+
+_REPO = Path(__file__).resolve().parents[2]
+for _pkg in (
+    "src/dobot_mg400/mg400_controller",
+    "src/dobot_mg400/mg400_protocol",
+    "MG400_Mock/app/src",
+):
+    _p = str(_REPO / _pkg)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from mg400_controller.common.trajectory.trajectory_recorder import (  # noqa: E402
+    TrajectoryRecorder,
+)
+from tcp_interface.realtime_packet import RealtimePacketType  # noqa: E402
+
+MOCK_IP = "127.0.0.1"
+DASHBOARD_PORT = 29999
+MOTION_PORT = 30003
+FEEDBACK_PORT = 30004
+PKT_SIZE = np.dtype(RealtimePacketType).itemsize
+
+MODE_ENABLE = 5
+MODE_RUNNING = 7
+
+
+class Logger:
+    def info(self, msg):
+        print(msg)
+
+    def warn(self, msg):
+        print(msg)
+
+    def error(self, msg):
+        print(msg)
+
+
+@dataclass
+class FeedbackSample:
+    t: float
+    robot_mode: int
+    q_actual_deg: np.ndarray
+    q_target_deg: np.ndarray
+    tool_vector_actual: np.ndarray
+
+
+class FeedbackMonitor:
+    def __init__(self):
+        self.samples: List[FeedbackSample] = []
+        self._latest: Optional[FeedbackSample] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def latest_q_rad(self):
+        with self._lock:
+            latest = self._latest
+        if latest is None:
+            return None
+        return np.radians(latest.q_actual_deg)
+
+    def snapshot(self) -> List[FeedbackSample]:
+        with self._lock:
+            return list(self.samples)
+
+    def _run(self):
+        sock = socket.create_connection((MOCK_IP, FEEDBACK_PORT), timeout=5)
+        sock.settimeout(5)
+        try:
+            while not self._stop.is_set():
+                data = b""
+                while len(data) < PKT_SIZE and not self._stop.is_set():
+                    data += sock.recv(PKT_SIZE - len(data))
+                if len(data) < PKT_SIZE:
+                    break
+                arr = np.frombuffer(data, dtype=RealtimePacketType)
+                sample = FeedbackSample(
+                    t=time.monotonic(),
+                    robot_mode=int(arr["robot_mode"][0]),
+                    q_actual_deg=np.array(arr["q_actual"][0][:4]),
+                    q_target_deg=np.array(arr["q_target"][0][:4]),
+                    tool_vector_actual=np.array(arr["tool_vector_actual"][0]),
+                )
+                with self._lock:
+                    self.samples.append(sample)
+                    self._latest = sample
+        finally:
+            sock.close()
+
+
+@dataclass
+class CommandEvent:
+    t: float
+    command: str
+
+
+@dataclass
+class ReplayEvents:
+    playback_start_t: Optional[float] = None
+    playback_complete_t: Optional[float] = None
+    events: List[Dict] = field(default_factory=list)
+    commands: List[CommandEvent] = field(default_factory=list)
+
+    def callback(self, event_name: str, payload: Dict):
+        now = time.monotonic()
+        item = {"t": now, "event": event_name, **payload}
+        self.events.append(item)
+        if event_name == "playback_start":
+            self.playback_start_t = now
+        elif event_name == "playback_complete":
+            self.playback_complete_t = now
+
+
+def _connect_dashboard() -> socket.socket:
+    sock = socket.create_connection((MOCK_IP, DASHBOARD_PORT), timeout=5)
+    sock.settimeout(5)
+    return sock
+
+
+def _connect_motion() -> socket.socket:
+    sock = socket.create_connection((MOCK_IP, MOTION_PORT), timeout=5)
+    sock.settimeout(5)
+    return sock
+
+
+def _dashboard_cmd(sock: socket.socket, cmd: str) -> str:
+    sock.sendall((cmd + "\n").encode())
+    time.sleep(0.05)
+    try:
+        return sock.recv(1024).decode().strip()
+    except Exception:
+        return ""
+
+
+def _wait_mode(monitor: FeedbackMonitor, mode: int, timeout_s: float = 8.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        samples = monitor.snapshot()
+        if samples and samples[-1].robot_mode == mode:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _make_teach_frames() -> List[Dict]:
+    """Compact synthetic teaching trajectory with explicit timestamps."""
+    points = [
+        (0.00, (0.0, 0.0, 0.0, 0.0)),
+        (0.50, (5.0, -3.0, 0.0, 0.0)),
+        (1.00, (10.0, -7.0, 0.0, 0.0)),
+        (1.50, (15.0, -11.0, 0.0, 0.0)),
+        (2.00, (20.0, -15.0, 0.0, 0.0)),
+        (2.50, (20.0, -8.0, 0.0, 0.0)),
+        (3.00, (20.0, 0.0, 0.0, 0.0)),
+    ]
+    return [
+        {
+            "timeStamp": t,
+            "j1": q[0],
+            "j2": q[1],
+            "j3": q[2],
+            "j4": q[3],
+        }
+        for t, q in points
+    ]
+
+
+def _interp_target(frames: List[Dict], elapsed_s: float) -> np.ndarray:
+    t = np.array([f["timeStamp"] - frames[0]["timeStamp"] for f in frames], dtype=float)
+    q = np.array([[f["j1"], f["j2"], f["j3"], f["j4"]] for f in frames], dtype=float)
+    elapsed_s = max(float(t[0]), min(float(t[-1]), elapsed_s))
+    return np.array([np.interp(elapsed_s, t, q[:, axis]) for axis in range(4)])
+
+
+def _first_arrival_time(
+    samples: List[FeedbackSample],
+    start_t: float,
+    target_deg: np.ndarray,
+    *,
+    tolerance_deg: float,
+) -> Optional[float]:
+    for sample in samples:
+        if sample.t < start_t:
+            continue
+        err = float(np.max(np.abs(sample.q_actual_deg - target_deg)))
+        if err <= tolerance_deg:
+            return sample.t - start_t
+    return None
+
+
+def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEvents) -> Dict:
+    if events.playback_start_t is None:
+        raise RuntimeError("TrajectoryRecorder did not emit playback_start")
+    start_t = events.playback_start_t
+    end_t = events.playback_complete_t or (start_t + frames[-1]["timeStamp"])
+    window = [s for s in samples if start_t <= s.t <= end_t]
+    errors = []
+    for sample in window:
+        elapsed = sample.t - start_t
+        target = _interp_target(frames, elapsed)
+        errors.append(float(np.max(np.abs(sample.q_actual_deg - target))))
+
+    waypoint_rows = []
+    for idx, frame in enumerate(frames):
+        target_t = frame["timeStamp"] - frames[0]["timeStamp"]
+        q = np.array([frame["j1"], frame["j2"], frame["j3"], frame["j4"]], dtype=float)
+        arrival = _first_arrival_time(window, start_t, q, tolerance_deg=1.0)
+        waypoint_rows.append({
+            "index": idx,
+            "target_time_s": round(target_t, 3),
+            "arrival_time_s": None if arrival is None else round(arrival, 3),
+            "timing_error_s": None if arrival is None else round(arrival - target_t, 3),
+            "target_deg": [round(float(v), 3) for v in q],
+        })
+
+    command_rows = []
+    for command in events.commands:
+        if command.t < start_t:
+            phase = "go_to_start"
+            elapsed = command.t - start_t
+        else:
+            phase = "playback"
+            elapsed = command.t - start_t
+        command_rows.append({
+            "phase": phase,
+            "elapsed_s": round(elapsed, 3),
+            "command": command.command,
+        })
+
+    final_sample = window[-1] if window else samples[-1]
+    final_target = np.array([
+        frames[-1]["j1"], frames[-1]["j2"], frames[-1]["j3"], frames[-1]["j4"]
+    ], dtype=float)
+    return {
+        "sample_count": len(window),
+        "planned_duration_s": round(frames[-1]["timeStamp"] - frames[0]["timeStamp"], 3),
+        "measured_duration_s": round((end_t - start_t), 3),
+        "max_tracking_error_deg": round(max(errors) if errors else 0.0, 4),
+        "mean_tracking_error_deg": round(float(np.mean(errors)) if errors else 0.0, 4),
+        "final_error_deg": [
+            round(float(v), 4) for v in np.abs(final_sample.q_actual_deg - final_target)
+        ],
+        "final_q_actual_deg": [round(float(v), 4) for v in final_sample.q_actual_deg],
+        "final_target_deg": [round(float(v), 4) for v in final_target],
+        "waypoints": waypoint_rows,
+        "commands": command_rows,
+        "queued_waypoint_events": [
+            {
+                "index": e["index"],
+                "queued_elapsed_s": round(e["t"] - start_t, 3),
+                "target_time_s": round(float(e["target_time_s"]), 3),
+                "queue_lead_s": round(float(e["target_time_s"]) - (e["t"] - start_t), 3),
+                "speed_j": e["speed_j"],
+                "cp": e["cp"],
+            }
+            for e in events.events
+            if e["event"] == "waypoint_queued"
+        ],
+    }
+
+
+def run(out_path: Optional[Path]) -> Dict:
+    dash = _connect_dashboard()
+    motion = _connect_motion()
+    monitor = FeedbackMonitor()
+    events = ReplayEvents()
+
+    def send_motion(command: str):
+        events.commands.append(CommandEvent(time.monotonic(), command))
+        motion.sendall((command + "\n").encode())
+        return True
+
+    try:
+        monitor.start()
+        time.sleep(0.2)
+        print(f"EnableRobot: {_dashboard_cmd(dash, 'EnableRobot()')}")
+        _wait_mode(monitor, MODE_ENABLE, timeout_s=8.0)
+
+        # Start from home so the replay measurement is deterministic.
+        send_motion("JointMovJ(0,0,0,0)")
+        time.sleep(0.1)
+        _wait_mode(monitor, MODE_ENABLE, timeout_s=8.0)
+
+        frames = _make_teach_frames()
+        recorder = TrajectoryRecorder(
+            command_send_fn=send_motion,
+            dashboard_send_fn=lambda cmd: _dashboard_cmd(dash, cmd),
+            logger=Logger(),
+            get_position_fn=monitor.latest_q_rad,
+            playback_event_callback=events.callback,
+        )
+        recorder.loaded_frames = frames
+        recorder.loaded_name = "mock_timing_probe"
+
+        recorder._play_worker()
+        time.sleep(0.5)
+
+        result = _analyse(frames, monitor.snapshot(), events)
+        if out_path is not None:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        return result
+    finally:
+        monitor.stop()
+        dash.close()
+        motion.close()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", type=Path, default=None)
+    args = parser.parse_args()
+    result = run(args.out)
+
+    print("\nReplay timing result")
+    print(f"  planned_duration_s:   {result['planned_duration_s']}")
+    print(f"  measured_duration_s:  {result['measured_duration_s']}")
+    print(f"  samples:              {result['sample_count']}")
+    print(f"  max_error_deg:        {result['max_tracking_error_deg']}")
+    print(f"  mean_error_deg:       {result['mean_tracking_error_deg']}")
+    print(f"  final_error_deg:      {result['final_error_deg']}")
+    print("\nWaypoint arrival timing (1 deg tolerance)")
+    for row in result["waypoints"]:
+        print(
+            f"  #{row['index']} target={row['target_time_s']:>5}s "
+            f"arrival={row['arrival_time_s']}s error={row['timing_error_s']}s "
+            f"q={row['target_deg']}"
+        )
+    print("\nQueued waypoint events")
+    for row in result["queued_waypoint_events"]:
+        print(
+            f"  #{row['index']} queued={row['queued_elapsed_s']:>5}s "
+            f"target={row['target_time_s']:>5}s lead={row['queue_lead_s']:>5}s "
+            f"SpeedJ={row['speed_j']} CP={row['cp']}"
+        )
+
+
+if __name__ == "__main__":
+    main()
