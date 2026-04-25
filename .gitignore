@@ -14,6 +14,9 @@ __pycache__/
 .idea/
 .DS_Store
 
+# Local AI/agent runner config (per-developer; not shared project tooling)
+.claude/
+
 # Colcon
 .colcon_install_layout
 

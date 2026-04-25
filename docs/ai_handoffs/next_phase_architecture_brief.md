@@ -107,3 +107,23 @@ The next phase is successful if, after reading the output, a maintainer can say:
 I understand what the robot-neutral core is, what the robot-specific adapter is,
 and how a new robot would be integrated without rewriting the whole system.
 ```
+
+## Current Proposal
+
+A first-pass answer to every question in this brief is written up in:
+
+- `docs/ai_handoffs/next_phase_architecture_proposal.md`
+
+**That file is the single source of truth for this phase's
+architecture.** Read it alongside this brief. If you disagree with
+its choices, edit it — do not start a parallel document.
+
+A companion file exists:
+
+- `docs/ai_handoffs/next_phase_architecture_revision.md`
+
+This is **audit log only** — it records the research findings and
+pressure-pass deltas that produced the current proposal version. It
+is not authoritative for design decisions. Always read the proposal
+first; consult the revision file only when you need to understand
+*why* a particular section reads the way it does.
