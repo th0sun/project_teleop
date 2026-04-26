@@ -93,3 +93,19 @@ RED_LIGHT_DO_PORT = 5    # Red Light
 SMART_SUCTION_ENABLED = True        # True = รอหุ่นวิ่งถึงเป้าหมายก่อนถึงสั่งดูด, False = สั่งดูดทันทีที่กดปุ่มใน VR
 SUCTION_ACTIVATION_THRESHOLD = 0.05 # rad (~2.8°) - ระยะห่างที่ยอมให้หัวดูดทำงาน (ใช้เมื่อ SMART_SUCTION_ENABLED = True)
 BLOW_DURATION = 0.4                 # วินาที: ระยะเวลาที่เป่าลม (Pressure) หลังจากสั่งหยุดดูด ก่อนจะปิดทั้ง 2 พอร์ต (Safety Release)
+
+# 📐 Path simplification (RDP)
+# Unity records joint state at ~20 FPS so a single demonstration produces
+# hundreds of dense waypoints, each one becoming its own JointMovJ command in
+# the MG400 motion queue.  The controller blends linearly between commanded
+# waypoints, so collapsing near-collinear runs into their endpoints lets the
+# robot follow the same path with far fewer queued commands and less risk of
+# the queue backing up faster than playback can drain it.
+#
+# Tolerance is the max permitted joint deviation (degrees) between any
+# dropped waypoint and the time-lerp of its surrounding kept waypoints.
+# 0.0 disables simplification (use during diagnosis or when a path must be
+# replayed verbatim).  0.5° matches the recorder's RECORD_MIN_DELTA so the
+# simplifier does not collapse motion that recording considered worth
+# capturing in the first place.
+PATH_SIMPLIFY_TOLERANCE_DEG = 0.5

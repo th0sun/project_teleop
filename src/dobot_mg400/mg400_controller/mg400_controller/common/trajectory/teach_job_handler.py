@@ -343,6 +343,8 @@ class TeachJobHandler:
                     f"({plan.total_duration_s:.2f}s)",
             metadata={
                 "waypoint_count": len(plan.waypoints),
+                "raw_waypoint_count": int(getattr(plan, "raw_waypoint_count", len(plan.waypoints))),
+                "simplify_tolerance_deg": float(getattr(plan, "simplify_tolerance_deg", 0.0)),
                 "queued_command_count": len(plan.queued_commands),
                 "event_command_count": len(getattr(plan, "event_commands", ())),
                 "total_duration_s": plan.total_duration_s,
@@ -390,6 +392,8 @@ class TeachJobHandler:
                 "sim": True,
                 "real_robot_moved": False,
                 "waypoint_count": len(plan.waypoints),
+                "raw_waypoint_count": int(getattr(plan, "raw_waypoint_count", len(plan.waypoints))),
+                "simplify_tolerance_deg": float(getattr(plan, "simplify_tolerance_deg", 0.0)),
                 "queued_command_count": len(plan.queued_commands),
                 "event_command_count": len(getattr(plan, "event_commands", ())),
                 "total_duration_s": plan.total_duration_s,

@@ -273,6 +273,210 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(plan.event_commands[1].port, 3)
         self.assertIn("DOExecute(3,1)", plan.event_commands[1].commands)
 
+    # ── Path simplification (RDP) ──────────────────────────────────────────────
+    # The recorder ships with motion_config.PATH_SIMPLIFY_TOLERANCE_DEG = 0.5°
+    # so dense Unity-recorded waypoints collapse before they hit the MG400
+    # motion queue.  These tests run the full compile + _play_worker pipeline
+    # against a behavioural robot mock (PositionFeed for feedback, list.append
+    # for the dashboard / motion send channels) to verify the simplified
+    # command stream actually reaches the wire.
+
+    def _set_simplify_tolerance(self, value):
+        """Patch the global tolerance config and undo it on test teardown."""
+        import mg400_controller.common.config.motion_config as cfg
+        original = cfg.PATH_SIMPLIFY_TOLERANCE_DEG
+        cfg.PATH_SIMPLIFY_TOLERANCE_DEG = value
+        self.addCleanup(setattr, cfg, "PATH_SIMPLIFY_TOLERANCE_DEG", original)
+
+    def test_compile_collapses_dense_straight_line_to_endpoints(self):
+        self._set_simplify_tolerance(0.5)
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        # 11 evenly-spaced waypoints along a perfectly straight 0°→10° motion
+        # in j1.  RDP should drop everything between the endpoints.
+        recorder.load_frames([
+            {"timeStamp": i * 0.1, "j1": float(i), "j2": 0.0, "j3": 0.0, "j4": 0.0}
+            for i in range(11)
+        ], name="line.json")
+
+        plan = recorder.compile_loaded_plan()
+
+        self.assertEqual(plan.raw_waypoint_count, 11)
+        self.assertEqual(len(plan.waypoints), 2,
+                         "straight line should collapse to endpoints in the playback plan")
+        self.assertEqual(len(plan.queued_commands), 1,
+                         "straight line should produce exactly one queued JointMovJ command")
+        self.assertAlmostEqual(plan.simplify_tolerance_deg, 0.5)
+
+    def test_compile_preserves_l_corner_waypoint(self):
+        self._set_simplify_tolerance(0.5)
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        # Right-then-up L: 5 points right, corner at t=0.5, 5 points up
+        frames = []
+        for i in range(6):
+            frames.append({"timeStamp": i * 0.1, "j1": float(i), "j2": 0.0, "j3": 0.0, "j4": 0.0})
+        for i in range(1, 6):
+            frames.append({"timeStamp": 0.5 + i * 0.1, "j1": 5.0, "j2": float(i), "j3": 0.0, "j4": 0.0})
+        recorder.load_frames(frames, name="corner.json")
+
+        plan = recorder.compile_loaded_plan()
+
+        self.assertEqual(plan.raw_waypoint_count, 11)
+        self.assertEqual(len(plan.waypoints), 3)
+        # Endpoints + corner — the corner waypoint is the one with j1=5, j2=0.
+        corner = plan.waypoints[1]
+        self.assertAlmostEqual(corner["timeStamp"], 0.5)
+        self.assertAlmostEqual(corner["j1"], 5.0)
+        self.assertAlmostEqual(corner["j2"], 0.0)
+
+    def test_compile_keeps_curve_proportional_to_curvature(self):
+        import math
+        self._set_simplify_tolerance(0.5)
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        # 21 samples of a 10° sine arc — should keep more than 2 (curve) but
+        # fewer than 21 (not every dense sample).
+        frames = [
+            {"timeStamp": i / 20.0,
+             "j1": 10.0 * math.sin(math.pi * i / 20.0),
+             "j2": 0.0, "j3": 0.0, "j4": 0.0}
+            for i in range(21)
+        ]
+        recorder.load_frames(frames, name="curve.json")
+
+        plan = recorder.compile_loaded_plan()
+
+        self.assertGreater(len(plan.waypoints), 2)
+        self.assertLess(len(plan.waypoints), 21)
+
+    def test_compile_skips_simplification_when_tolerance_zero(self):
+        self._set_simplify_tolerance(0.0)
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        recorder.load_frames([
+            {"timeStamp": i * 0.1, "j1": float(i), "j2": 0.0, "j3": 0.0, "j4": 0.0}
+            for i in range(11)
+        ], name="line.json")
+
+        plan = recorder.compile_loaded_plan()
+
+        # Tolerance 0 disables simplification — every recorded frame stays.
+        self.assertEqual(len(plan.waypoints), 11)
+        self.assertEqual(plan.raw_waypoint_count, 11)
+
+    def test_play_worker_dispatches_only_simplified_commands_to_robot_mock(self):
+        """End-to-end: dense line → compile → _play_worker → motion port mock.
+
+        The mock collects every JointMovJ string that would hit port 30003 on
+        a real MG400.  With simplification on, only the start go-to-start
+        plus the single endpoint command should reach the wire."""
+        self._set_simplify_tolerance(0.5)
+
+        sent_motion = []
+        events = []
+        clock = FakeClock()
+        # PositionFeed simulates the robot reaching the start, holding, then
+        # arriving at the endpoint — same behavioural pattern existing tests
+        # use to mock the real arm's feedback loop.
+        feed = PositionFeed([
+            [0.0, 0.0, 0.0, 0.0],   # arrived at start
+            [0.0, 0.0, 0.0, 0.0],   # still at start
+            [10.0, 0.0, 0.0, 0.0],  # arrived at endpoint
+            [10.0, 0.0, 0.0, 0.0],  # holding
+        ])
+        recorder = TrajectoryRecorder(
+            command_send_fn=sent_motion.append,
+            logger=FakeLogger(),
+            get_position_fn=feed,
+            playback_event_callback=lambda e, p: events.append((e, p)),
+            traj_dir=self.temp_dir.name,
+            time_fn=clock,
+            sleep_fn=clock.sleep,
+        )
+        recorder.load_frames([
+            {"timeStamp": i * 0.1, "j1": float(i), "j2": 0.0, "j3": 0.0, "j4": 0.0}
+            for i in range(11)
+        ])
+
+        recorder._play_worker()
+
+        # 1 go-to-start + 1 simplified queued command = 2 wire-level commands.
+        # Without simplification this would be 1 + 10 = 11 commands.
+        self.assertEqual(
+            len(sent_motion), 2,
+            f"simplified straight line should hit wire as 2 commands; got {sent_motion}",
+        )
+        self.assertIn("JointMovJ(0.0000", sent_motion[0])  # go-to-start
+        self.assertIn("JointMovJ(10.0000", sent_motion[1])  # endpoint
+        # Final command must settle (CP=0), not blend.
+        self.assertIn("CP=0", sent_motion[1])
+
+        queued = [e for e in events if e[0] == "waypoint_queued"]
+        self.assertEqual(len(queued), 1, "exactly one waypoint should be queued")
+
+    def test_simplification_preserves_io_event_timing_alignment(self):
+        """Events at intermediate timestamps must still fire at the correct
+        retimed point even when their original frame is dropped by RDP."""
+        self._set_simplify_tolerance(0.5)
+        sent_motion = []
+        sent_dashboard = []
+        events = []
+        clock = FakeClock()
+        feed = PositionFeed([
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0, 0.0],
+        ])
+        recorder = TrajectoryRecorder(
+            command_send_fn=sent_motion.append,
+            dashboard_send_fn=sent_dashboard.append,
+            logger=FakeLogger(),
+            get_position_fn=feed,
+            playback_event_callback=lambda e, p: events.append((e, p)),
+            traj_dir=self.temp_dir.name,
+            time_fn=clock,
+            sleep_fn=clock.sleep,
+        )
+        # Straight line in j1, vacuum-on event at the midpoint.  RDP will drop
+        # the middle motion frames but the event must still fire at retimed
+        # midpoint via np.interp on the simplified source_target_t.
+        recorder.load_frames(
+            [
+                {"timeStamp": i * 0.1, "j1": float(i), "j2": 0.0, "j3": 0.0, "j4": 0.0}
+                for i in range(11)
+            ],
+            events=[
+                {"timeStamp": 0.5, "kind": "digital_output", "channel": "vacuum", "value": True},
+            ],
+        )
+
+        recorder._play_worker()
+
+        # Vacuum DOExecute must have hit the dashboard channel.
+        self.assertTrue(
+            any("DOExecute(16,1)" in cmd for cmd in sent_dashboard),
+            f"vacuum-on must dispatch DOExecute(16,1); got {sent_dashboard}",
+        )
+        io = [e for e in events if e[0] == "io_event_queued"]
+        self.assertEqual(len(io), 1)
+        # Retimed event time should land roughly at the midpoint of the
+        # simplified 0→1.0s path.  Allow ±0.1s slack for retiming math.
+        self.assertAlmostEqual(io[0][1]["target_time_s"], 0.5, delta=0.1)
+
     def test_translate_digital_event_raises_when_vacuum_port_misconfigured(self):
         import mg400_controller.common.config.motion_config as cfg
         recorder = TrajectoryRecorder(

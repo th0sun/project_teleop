@@ -40,6 +40,7 @@ from teaching_core.trajectory import (
     JointTimingLimits,
     TimedJointPoint,
     retime_joint_path,
+    simplify_joint_path_rdp,
     speed_percent_for_segment,
 )
 
@@ -116,6 +117,11 @@ class CompiledPlaybackPlan:
     time_scale: float
     original_timing_feasible: bool
     lookahead_s: float
+    # Observability: how dense the recording was vs how many waypoints we
+    # actually queue.  raw_waypoint_count is the unsimplified loaded_frames
+    # count; len(waypoints) is what the MG400 motion queue actually sees.
+    raw_waypoint_count: int = 0
+    simplify_tolerance_deg: float = 0.0
 
 
 def compiled_playback_plan_to_dict(plan: CompiledPlaybackPlan) -> Dict[str, Any]:
@@ -125,6 +131,8 @@ def compiled_playback_plan_to_dict(plan: CompiledPlaybackPlan) -> Dict[str, Any]
         "artifact_version": "0.1",
         "source_name": plan.source_name,
         "waypoint_count": len(plan.waypoints),
+        "raw_waypoint_count": int(getattr(plan, "raw_waypoint_count", len(plan.waypoints))),
+        "simplify_tolerance_deg": float(getattr(plan, "simplify_tolerance_deg", 0.0)),
         "queued_command_count": len(plan.queued_commands),
         "event_command_count": len(getattr(plan, "event_commands", ())),
         "original_duration_s": plan.original_duration_s,
@@ -653,6 +661,33 @@ class TrajectoryRecorder:
             )
         return tuple(sorted(event_commands, key=lambda item: item.target_time_s))
 
+    def _simplify_loaded_frames(
+        self,
+        frames: List[Dict],
+        tolerance_deg: float,
+    ) -> List[Dict]:
+        """Drop dense intermediate frames whose joint values fall within
+        ``tolerance_deg`` of the time-lerp between surrounding kept frames.
+
+        Returns the original frame dicts verbatim — no synthetic interpolation,
+        no resampling — so downstream code (timing, event mapping, artifact
+        export) keeps the exact joint values the user demonstrated.
+        """
+        if tolerance_deg <= 0 or len(frames) <= 2:
+            return list(frames)
+
+        points = [
+            TimedJointPoint(time_s=float(f["timeStamp"]), position=self._frame_q_deg(f))
+            for f in frames
+        ]
+        kept = simplify_joint_path_rdp(points, tolerance_deg)
+
+        # Map kept TimedJointPoints back to the original frame dicts using the
+        # original timestamp as the join key (rounded to keep float equality
+        # robust against the round-trip through the dataclass).
+        kept_keys = {round(p.time_s, 9) for p in kept}
+        return [f for f in frames if round(float(f["timeStamp"]), 9) in kept_keys]
+
     def compile_loaded_plan(self) -> CompiledPlaybackPlan:
         """Compile the loaded trajectory into a pre-timed MG400 playback job.
 
@@ -663,7 +698,22 @@ class TrajectoryRecorder:
         if not self.loaded_frames:
             raise ValueError("No trajectory loaded for playback compilation")
 
-        source_frames = list(self.loaded_frames)
+        raw_frames = list(self.loaded_frames)
+        raw_count = len(raw_frames)
+
+        # Path simplification (RDP) — collapse dense recorded waypoints to the
+        # critical points that actually shape the motion so the MG400 motion
+        # queue does not back up while playing back long teach-and-repeat
+        # trajectories.  Configured by motion_config.PATH_SIMPLIFY_TOLERANCE_DEG;
+        # set to 0.0 to disable when a path must replay verbatim.
+        tolerance = float(getattr(motion_config, "PATH_SIMPLIFY_TOLERANCE_DEG", 0.0))
+        source_frames = self._simplify_loaded_frames(raw_frames, tolerance)
+        if len(source_frames) < raw_count:
+            self._log.info(
+                f"📐 Path simplified: {raw_count} → {len(source_frames)} waypoints "
+                f"(RDP @ {tolerance:.2f}°)"
+            )
+
         frames, timing = self._retime_frames_for_playback(source_frames)
         source_t0_traj = float(source_frames[0]["timeStamp"])
         t0_traj = float(frames[0]["timeStamp"])
@@ -716,6 +766,8 @@ class TrajectoryRecorder:
             time_scale=float(timing.time_scale),
             original_timing_feasible=bool(timing.is_original_timing_feasible),
             lookahead_s=float(lookahead),
+            raw_waypoint_count=raw_count,
+            simplify_tolerance_deg=tolerance,
         )
 
     def export_loaded_plan(self, path: str) -> str:
