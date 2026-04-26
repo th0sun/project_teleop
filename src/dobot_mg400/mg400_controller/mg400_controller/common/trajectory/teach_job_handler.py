@@ -24,7 +24,8 @@ JobRequest schema (JSON over ``std_msgs/String``)::
       "target": "mg400" | "robot_a" | ...,
       "trajectory": {
         "filename": "...",
-        "frames": [{"timeStamp": s, "j1": deg, "j2": deg, "j3": deg, "j4": deg}, ...]
+        "frames": [{"timeStamp": s, "j1": deg, "j2": deg, "j3": deg, "j4": deg}, ...],
+        "events": [{"timeStamp": s, "kind": "digital_output", "channel": "vacuum", "value": true}, ...]
       },
       "options": {
         "speed_scale": 1.0,
@@ -121,6 +122,13 @@ class JobRequest:
             return []
         frames = self.trajectory.get("frames")
         return list(frames) if isinstance(frames, list) else []
+
+    def events(self) -> List[Dict[str, Any]]:
+        """Return captured task events from the embedded trajectory, or []."""
+        if not self.trajectory:
+            return []
+        events = self.trajectory.get("events")
+        return list(events) if isinstance(events, list) else []
 
     def filename(self) -> str:
         if not self.trajectory:
@@ -336,6 +344,7 @@ class TeachJobHandler:
             metadata={
                 "waypoint_count": len(plan.waypoints),
                 "queued_command_count": len(plan.queued_commands),
+                "event_command_count": len(getattr(plan, "event_commands", ())),
                 "total_duration_s": plan.total_duration_s,
                 "time_scale": plan.time_scale,
                 "original_timing_feasible": plan.original_timing_feasible,
@@ -382,6 +391,7 @@ class TeachJobHandler:
                 "real_robot_moved": False,
                 "waypoint_count": len(plan.waypoints),
                 "queued_command_count": len(plan.queued_commands),
+                "event_command_count": len(getattr(plan, "event_commands", ())),
                 "total_duration_s": plan.total_duration_s,
                 "time_scale": plan.time_scale,
                 "original_timing_feasible": plan.original_timing_feasible,
@@ -552,6 +562,7 @@ class TeachJobHandler:
             ok = self._recorder.load_frames(
                 frames,
                 name=request.filename() or "job_request_inline",
+                events=request.events(),
             )
             if not ok:
                 self._fail(request, ERR_EMPTY_TRAJECTORY,

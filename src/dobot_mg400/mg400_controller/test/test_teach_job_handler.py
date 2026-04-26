@@ -82,10 +82,11 @@ class FakeRecorder:
         self._export_should_raise = value
 
     # -- TrajectoryRecorder surface ------------------------------------
-    def load_frames(self, frames, name="inline"):
+    def load_frames(self, frames, name="inline", events=None):
         if not frames:
             return False
         self.loaded_frames = list(frames)
+        self.loaded_events = list(events or [])
         self.loaded_name = name
         return True
 
@@ -136,6 +137,7 @@ class FakeCompiledPlan:
             {"timeStamp": 1.0, "j1": 10.0, "j2": -5.0, "j3": 0.0, "j4": 0.0},
         )
         self.queued_commands = ()
+        self.event_commands = ()
         self.original_duration_s = 1.0
         self.retimed_duration_s = 1.0
         self.total_duration_s = 1.0
@@ -154,6 +156,15 @@ def _frames_payload():
     }
 
 
+def _frames_with_events_payload():
+    payload = _frames_payload()
+    payload["events"] = [
+        {"timeStamp": 0.5, "kind": "digital_output", "channel": "vacuum", "value": True},
+        {"timeStamp": 0.9, "kind": "digital_output", "channel": "green_light", "value": True},
+    ]
+    return payload
+
+
 class TeachJobRequestParseTest(unittest.TestCase):
     def test_parses_minimal_valid_request(self):
         payload = json.dumps({
@@ -166,6 +177,16 @@ class TeachJobRequestParseTest(unittest.TestCase):
         self.assertEqual(req.action, "compile")
         self.assertEqual(req.filename(), "demo.json")
         self.assertEqual(len(req.frames()), 2)
+
+    def test_parses_embedded_task_events(self):
+        payload = json.dumps({
+            "job_id": "abc",
+            "action": "compile",
+            "trajectory": _frames_with_events_payload(),
+        })
+        req = parse_job_request(payload)
+        self.assertEqual(len(req.events()), 2)
+        self.assertEqual(req.events()[0]["channel"], "vacuum")
 
     def test_assigns_uuid_when_job_id_missing(self):
         payload = json.dumps({"action": "stop"})
@@ -248,6 +269,19 @@ class TeachJobHandlerTest(unittest.TestCase):
             artifacts[0]["artifact"]["artifact_kind"],
             "mg400_compiled_playback_plan",
         )
+
+    def test_compile_passes_embedded_events_to_recorder(self):
+        payload = json.dumps({
+            "job_id": "j-events",
+            "action": ACTION_COMPILE,
+            "trajectory": _frames_with_events_payload(),
+        })
+        self.handler.handle(payload)
+
+        self.assertEqual(len(self.recorder.loaded_events), 2)
+        self.assertEqual(self.recorder.loaded_events[0]["channel"], "vacuum")
+        statuses = self._decoded_status()
+        self.assertEqual(statuses[-1]["stage"], STAGE_COMPILED)
 
     def test_preview_sim_is_compile_only_and_does_not_move_real_robot(self):
         """preview_sim must publish the compiled artifact + a preview_ready

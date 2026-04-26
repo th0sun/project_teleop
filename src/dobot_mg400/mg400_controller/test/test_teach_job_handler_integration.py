@@ -81,10 +81,11 @@ class _Logger:
 
 
 class _CompiledPlanStub:
-    def __init__(self, frames):
+    def __init__(self, frames, events=()):
         self.source_name = "unity_mock_test"
         self.waypoints = tuple(frames)
         self.queued_commands = ()
+        self.event_commands = tuple(events)
         self.original_duration_s = float(frames[-1]["timeStamp"] - frames[0]["timeStamp"])
         self.retimed_duration_s = self.original_duration_s
         self.total_duration_s = self.original_duration_s
@@ -99,6 +100,7 @@ class _FakeRecorder:
     def __init__(self, traj_dir: str):
         self._traj_dir = traj_dir
         self.loaded_frames = []
+        self.loaded_events = []
         self.loaded_name = ""
         self.is_playing = False
         self.is_recording = False
@@ -108,10 +110,11 @@ class _FakeRecorder:
         self.export_calls = 0
         self.sent_motion_strings = []  # would-be JointMovJ payloads
 
-    def load_frames(self, frames, name="inline"):
+    def load_frames(self, frames, name="inline", events=None):
         if not frames:
             return False
         self.loaded_frames = list(frames)
+        self.loaded_events = list(events or [])
         self.loaded_name = name
         return True
 
@@ -142,7 +145,8 @@ class _FakeRecorder:
 # ── Helpers ─────────────────────────────────────────────────────────────────
 def _build_unity_request(action: str, frames: list, *, file_name: str,
                         job_id: str, target: str = "mg400",
-                        options: dict | None = None) -> str:
+                        options: dict | None = None,
+                        events: list | None = None) -> str:
     """Reproduce the JSON envelope built by Unity TeachJobPublisher.cs."""
     payload = {
         "job_id": job_id,
@@ -150,7 +154,11 @@ def _build_unity_request(action: str, frames: list, *, file_name: str,
         "target": target,
         "submitted_at_unity_sec": 0.0,
         "options": options or {},
-        "trajectory": {"filename": file_name, "frames": frames},
+        "trajectory": {
+            "filename": file_name,
+            "frames": frames,
+            "events": events or [],
+        },
     }
     return json.dumps(payload, sort_keys=True)
 

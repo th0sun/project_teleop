@@ -22,6 +22,11 @@ UNITY_STYLE_FRAMES = [
     {"timeStamp": 1.0, "j1": 0.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
 ]
 
+UNITY_STYLE_EVENTS = [
+    {"timeStamp": 0.25, "kind": "digital_output", "channel": "vacuum", "value": True},
+    {"timeStamp": 0.75, "kind": "digital_output", "channel": "vacuum", "value": False},
+]
+
 
 class FakeLogger:
     def __init__(self):
@@ -81,6 +86,7 @@ class TeachJobAcceptanceTest(unittest.TestCase):
             "trajectory": {
                 "filename": "unity_mock_test.json",
                 "frames": UNITY_STYLE_FRAMES,
+                "events": UNITY_STYLE_EVENTS,
             },
             "options": {},
             "submitted_at_unity_sec": 1.25,
@@ -99,6 +105,7 @@ class TeachJobAcceptanceTest(unittest.TestCase):
         statuses = self._statuses()
         self.assertEqual([s["stage"] for s in statuses], [STAGE_RECEIVED, STAGE_COMPILED])
         self.assertEqual(statuses[-1]["metadata"]["queued_command_count"], 2)
+        self.assertEqual(statuses[-1]["metadata"]["event_command_count"], 2)
         self.assertEqual(statuses[-1]["metadata"]["waypoint_count"], 3)
 
         artifacts = self._artifacts()
@@ -109,6 +116,11 @@ class TeachJobAcceptanceTest(unittest.TestCase):
             "mg400_compiled_playback_plan",
         )
         self.assertEqual(artifacts[0]["artifact"]["queued_command_count"], 2)
+        self.assertEqual(artifacts[0]["artifact"]["event_command_count"], 2)
+        self.assertIn(
+            "DOExecute(16,1)",
+            artifacts[0]["artifact"]["event_commands"][0]["commands"],
+        )
 
         self.assertEqual(self.sent_motion_commands, [])
         self.assertEqual(self.sent_dashboard_commands, [])

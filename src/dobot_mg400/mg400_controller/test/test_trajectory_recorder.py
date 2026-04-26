@@ -244,6 +244,74 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(plan.queued_commands[0].speed_j, 15)
         self.assertEqual(plan.queued_commands[1].cp, 0)
 
+    def test_compile_loaded_plan_includes_robot_neutral_io_events(self):
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        recorder.load_frames(
+            [
+                {"timeStamp": 10.0, "j1": 0.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+                {"timeStamp": 11.0, "j1": 10.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+            ],
+            name="with_events.json",
+            events=[
+                {"timeStamp": 10.25, "kind": "digital_output", "channel": "vacuum", "value": True},
+                {"timeStamp": 10.50, "kind": "digital_output", "channel": "green_light", "value": True},
+            ],
+        )
+
+        plan = recorder.compile_loaded_plan()
+        payload = compiled_playback_plan_to_dict(plan)
+
+        self.assertEqual(len(plan.event_commands), 2)
+        self.assertEqual(payload["event_command_count"], 2)
+        self.assertEqual(plan.event_commands[0].channel, "vacuum")
+        self.assertIn("DOExecute(16,1)", plan.event_commands[0].commands)
+        self.assertIn("DOExecute(15,0)", plan.event_commands[0].commands)
+        self.assertEqual(plan.event_commands[1].port, 3)
+        self.assertIn("DOExecute(3,1)", plan.event_commands[1].commands)
+
+    def test_translate_digital_event_raises_when_vacuum_port_misconfigured(self):
+        import mg400_controller.common.config.motion_config as cfg
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        original = cfg.VACUUM_DO_PORT
+        try:
+            cfg.VACUUM_DO_PORT = 0
+            with self.assertRaises(ValueError, msg="VACUUM_DO_PORT=0 must raise ValueError at compile time"):
+                recorder._translate_digital_event(
+                    {"kind": "digital_output", "channel": "vacuum", "value": True}
+                )
+        finally:
+            cfg.VACUUM_DO_PORT = original
+
+    def test_stop_all_cancels_pending_delayed_io_timers(self):
+        import time as real_time
+        sent_dashboard = []
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            dashboard_send_fn=sent_dashboard.append,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        # Schedule a blow-off timer with a real 10-second delay (would never fire
+        # in a fast test run without cancellation).
+        recorder._schedule_delayed_event_command(10.0, "DOExecute(15,0)")
+        self.assertEqual(len(recorder._pending_timers), 1)
+
+        recorder.stop_all()
+
+        # Brief pause — timer must NOT have fired.
+        real_time.sleep(0.05)
+        self.assertNotIn("DOExecute(15,0)", sent_dashboard,
+                         "stop_all() must cancel pending delayed IO timers")
+        self.assertEqual(len(recorder._pending_timers), 0)
+
     def test_export_loaded_plan_writes_json_artifact(self):
         recorder = TrajectoryRecorder(
             command_send_fn=lambda cmd: True,
@@ -335,6 +403,44 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(events[1][1]["execution_model"], "compiled_queue_plan")
         queued = [event for event in events if event[0] == "waypoint_queued"]
         self.assertEqual([event[1]["index"] for event in queued], [1, 2])
+
+    def test_play_worker_dispatches_io_events_on_dashboard_channel(self):
+        sent_motion = []
+        sent_dashboard = []
+        events = []
+        clock = FakeClock()
+        feed = PositionFeed([
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0],
+        ])
+        recorder = TrajectoryRecorder(
+            command_send_fn=sent_motion.append,
+            dashboard_send_fn=sent_dashboard.append,
+            logger=FakeLogger(),
+            get_position_fn=feed,
+            playback_event_callback=lambda event, payload: events.append((event, payload)),
+            traj_dir=self.temp_dir.name,
+            time_fn=clock,
+            sleep_fn=clock.sleep,
+        )
+        recorder.load_frames(
+            [
+                {"timeStamp": 0.0, "j1": 0.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+                {"timeStamp": 0.2, "j1": 2.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+            ],
+            events=[
+                {"timeStamp": 0.0, "kind": "digital_output", "channel": "green_light", "value": True},
+            ],
+        )
+
+        recorder._play_worker()
+
+        self.assertIn("DOExecute(3,1)", sent_dashboard)
+        io_events = [event for event in events if event[0] == "io_event_queued"]
+        self.assertEqual(len(io_events), 1)
+        self.assertEqual(io_events[0][1]["channel"], "green_light")
 
     def test_play_worker_retimes_too_fast_segments_instead_of_decimating(self):
         sent_commands = []

@@ -1181,3 +1181,59 @@ Blockers still in the way of demo day:
   playback.  The system now fails loud and flushes on timeout, but the
   product direction remains controller-side/offline execution for real
   teach-repeat fidelity.
+
+## 22. Phase 2 Update — Teach Events For IO / Tools
+
+Decision:
+
+- Extend the Unity teach artifact from motion-only `frames` to
+  `frames + events`.
+- Treat suction, lights, grippers, and other digital outputs as
+  timestamped task events, not as one-off live ROS topics that disappear
+  during replay.
+
+Why:
+
+- Pick-and-place needs both motion and discrete actions.  A trajectory
+  that only stores J1-J4 cannot reproduce "suck here", "release here",
+  or "turn this output on while teaching".
+- The architecture target is multi-robot teaching, so Unity should record
+  robot-neutral intent (`channel="vacuum"`, `channel="green_light"`,
+  or explicit `port`) while each adapter translates that intent to native
+  robot commands.
+
+Current implementation:
+
+- Unity save/load and `/teach/job_request` payload now support:
+  `trajectory.events[] = {timeStamp, kind, channel, value, port}`.
+- `VacuumROSController` still publishes live `/vr/suction_cmd`, but when
+  Unity is recording it also appends a `digital_output` teach event with
+  `channel="vacuum"`.
+- `ROSPathPublisher.PublishTrajectoryJson(...)` mirrors events on the
+  legacy `/unity/trajectory_data` JSON path so migration tooling does not
+  lose task actions.
+- ROS `TeachJobHandler` parses embedded events and passes them into
+  `TrajectoryRecorder`.
+- `TrajectoryRecorder.compile_loaded_plan()` now exports
+  `event_commands` alongside motion commands.  MG400 support currently
+  maps:
+  - `vacuum/suction` -> vacuum DO 16 and blow DO 15 sequence
+  - `green_light/yellow_light/red_light` -> configured light DO ports
+  - `doN` or explicit `port=N` -> `DOExecute(N,value)`
+
+Validation:
+
+- Targeted ROS tests passed:
+  `test_teach_job_handler.py`, `test_trajectory_recorder.py`,
+  `test_teach_job_acceptance.py`, and
+  `test_teach_job_handler_integration.py` (`53 tests`).
+- `git diff --check` passed in both ROS and Unity repos.
+
+Remaining follow-up:
+
+- Unity still needs scene/UI wiring for non-vacuum outputs if the demo
+  wants buttons for lights or arbitrary DO channels.
+- Event timing is aligned to the retimed trajectory during compile; dense
+  host-streamed motion is still limited by the existing executor.  For
+  high-fidelity task replay, the controller-side/offline execution path
+  remains the long-term fix.

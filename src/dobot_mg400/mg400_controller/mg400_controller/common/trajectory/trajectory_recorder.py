@@ -33,7 +33,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Callable, Tuple, Any
 
-from mg400_protocol.commands import joint_mov_j
+from mg400_controller.common.config import motion_config
+from mg400_protocol.commands import do_execute, joint_mov_j
 from mg400_protocol.dashboard import enable_robot, reset_robot
 from teaching_core.trajectory import (
     JointTimingLimits,
@@ -91,10 +92,24 @@ class CompiledPlaybackCommand:
 
 
 @dataclass(frozen=True)
+class CompiledPlaybackEventCommand:
+    index: int
+    target_time_s: float
+    original_target_time_s: float
+    kind: str
+    channel: str
+    value: bool
+    port: int
+    commands: Tuple[str, ...]
+    delayed_commands: Tuple[Tuple[float, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class CompiledPlaybackPlan:
     source_name: str
     waypoints: Tuple[Dict, ...]
     queued_commands: Tuple[CompiledPlaybackCommand, ...]
+    event_commands: Tuple[CompiledPlaybackEventCommand, ...]
     original_duration_s: float
     retimed_duration_s: float
     total_duration_s: float
@@ -111,6 +126,7 @@ def compiled_playback_plan_to_dict(plan: CompiledPlaybackPlan) -> Dict[str, Any]
         "source_name": plan.source_name,
         "waypoint_count": len(plan.waypoints),
         "queued_command_count": len(plan.queued_commands),
+        "event_command_count": len(getattr(plan, "event_commands", ())),
         "original_duration_s": plan.original_duration_s,
         "retimed_duration_s": plan.retimed_duration_s,
         "total_duration_s": plan.total_duration_s,
@@ -129,6 +145,23 @@ def compiled_playback_plan_to_dict(plan: CompiledPlaybackPlan) -> Dict[str, Any]
                 "command": cmd.command,
             }
             for cmd in plan.queued_commands
+        ],
+        "event_commands": [
+            {
+                "index": event.index,
+                "target_time_s": event.target_time_s,
+                "original_target_time_s": event.original_target_time_s,
+                "kind": event.kind,
+                "channel": event.channel,
+                "value": event.value,
+                "port": event.port,
+                "commands": list(event.commands),
+                "delayed_commands": [
+                    {"delay_s": delay_s, "command": command}
+                    for delay_s, command in event.delayed_commands
+                ],
+            }
+            for event in getattr(plan, "event_commands", ())
         ],
     }
 
@@ -216,14 +249,21 @@ class TrajectoryRecorder:
         self._play_thread: Optional[threading.Thread] = None
         self._block_until  = 0.0  # perf_counter: suppress teleop until this time
 
+        # ── Delayed IO timer tracking ─────────────────────────────────────────
+        # stop_all() cancels these so blow-off pulses don't fire after stop.
+        self._pending_timers: List[threading.Timer] = []
+        self._pending_timers_lock = threading.Lock()
+
         # ── Recorded data ────────────────────────────────────────────────────
         self._frames: List[Dict] = []   # [{timeStamp, j1..j4}] degrees
+        self._events: List[Dict] = []   # [{timeStamp, kind, channel, value, port?}]
         self._rec_t0 = 0.0
         self._last_rec_t = 0.0          # timestamp of last stored frame
         self._last_rec_q = np.zeros(4)   # joint values of last stored frame
 
         # ── Loaded trajectory (ready for playback) ───────────────────────────
         self.loaded_frames: List[Dict] = []
+        self.loaded_events: List[Dict] = []
         self.loaded_name: str = ""
 
         os.makedirs(self._traj_dir, exist_ok=True)
@@ -238,6 +278,7 @@ class TrajectoryRecorder:
         self.is_recording = True
         self._block_until = 0.0
         self._frames = []
+        self._events = []
         self._rec_t0 = self._time_fn()
         self._last_rec_t = -999.0
         self._last_rec_q = np.full(4, np.nan)
@@ -322,9 +363,11 @@ class TrajectoryRecorder:
         try:
             data = json.loads(json_str)
             frames = data if isinstance(data, list) else data.get("frames", [])
+            events = [] if isinstance(data, list) else data.get("events", [])
             filename = data.get("filename", "unity_trajectory.json") if isinstance(data, dict) else "unity_trajectory.json"
             
             self._frames = frames
+            self._events = events if isinstance(events, list) else []
             return self.save_as(filename)
         except Exception as e:
             self._log.error(f"Failed to parse Unity trajectory JSON: {e}")
@@ -342,10 +385,12 @@ class TrajectoryRecorder:
             with open(path, "r") as f:
                 data = json.load(f)
             frames = data if isinstance(data, list) else data.get("frames", [])
+            events = [] if isinstance(data, list) else data.get("events", [])
             if not frames:
                 self._log.error("Trajectory file is empty")
                 return False
             self.loaded_frames = frames
+            self.loaded_events = events if isinstance(events, list) else []
             self.loaded_name = name
             dur = frames[-1]["timeStamp"] - frames[0]["timeStamp"]
             self._log.info(f"📂 Loaded {name}: {len(frames)} frames, {dur:.1f}s")
@@ -354,12 +399,18 @@ class TrajectoryRecorder:
             self._log.error(f"Failed to load trajectory: {e}")
             return False
 
-    def load_frames(self, frames: List[Dict], name: str = "inline_trajectory") -> bool:
+    def load_frames(
+        self,
+        frames: List[Dict],
+        name: str = "inline_trajectory",
+        events: Optional[List[Dict]] = None,
+    ) -> bool:
         """Load already-materialized trajectory frames for immediate playback."""
         if not frames:
             self._log.error("Trajectory frame list is empty")
             return False
         self.loaded_frames = frames
+        self.loaded_events = list(events or [])
         self.loaded_name = name
         dur = frames[-1]["timeStamp"] - frames[0]["timeStamp"]
         self._log.info(f"📂 Loaded {name}: {len(frames)} frames, {dur:.1f}s")
@@ -494,6 +545,114 @@ class TrajectoryRecorder:
         window = median_dt * PREVIEW_LOOKAHEAD_FRAMES
         return max(PREVIEW_LOOKAHEAD_MIN_SEC, min(PREVIEW_LOOKAHEAD_MAX_SEC, window))
 
+    def _event_bool_value(self, event):
+        if "value" in event:
+            return bool(event["value"])
+        if "boolValue" in event:
+            return bool(event["boolValue"])
+        if "state" in event:
+            return bool(event["state"])
+        return False
+
+    def _event_port(self, event):
+        try:
+            return int(event.get("port", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _event_channel(self, event):
+        channel = event.get("channel") or event.get("name") or event.get("tool") or ""
+        return str(channel).strip().lower()
+
+    def _translate_digital_event(self, event):
+        """Translate a robot-neutral captured IO event to MG400 dashboard cmds."""
+        channel = self._event_channel(event)
+        value = self._event_bool_value(event)
+        port = self._event_port(event)
+
+        if channel in {"vacuum", "suction", "suction_cup"}:
+            vac_port = motion_config.VACUUM_DO_PORT
+            blow_port = motion_config.BLOW_DO_PORT
+            if vac_port <= 0 or blow_port <= 0:
+                raise ValueError(
+                    f"Vacuum/blow DO ports must be > 0 "
+                    f"(VACUUM_DO_PORT={vac_port}, BLOW_DO_PORT={blow_port}). "
+                    "Check motion_config.py."
+                )
+            if value:
+                return (
+                    vac_port,
+                    (
+                        do_execute(vac_port, True).render(),
+                        do_execute(blow_port, False).render(),
+                    ),
+                    (),
+                )
+            return (
+                vac_port,
+                (
+                    do_execute(vac_port, False).render(),
+                    do_execute(blow_port, True).render(),
+                ),
+                (
+                    (
+                        float(motion_config.BLOW_DURATION),
+                        do_execute(blow_port, False).render(),
+                    ),
+                ),
+            )
+
+        channel_ports = {
+            "green_light": motion_config.GREEN_LIGHT_DO_PORT,
+            "light_green": motion_config.GREEN_LIGHT_DO_PORT,
+            "yellow_light": motion_config.YELLOW_LIGHT_DO_PORT,
+            "light_yellow": motion_config.YELLOW_LIGHT_DO_PORT,
+            "red_light": motion_config.RED_LIGHT_DO_PORT,
+            "light_red": motion_config.RED_LIGHT_DO_PORT,
+        }
+        port = port or channel_ports.get(channel, 0)
+        if port <= 0 and channel.startswith("do"):
+            try:
+                port = int(channel[2:])
+            except ValueError:
+                port = 0
+        if port <= 0:
+            raise ValueError(f"unsupported digital output channel: {channel!r}")
+
+        return port, (do_execute(port, value).render(),), ()
+
+    def _compile_event_commands(self, source_frames, target_t, source_target_t):
+        if not self.loaded_events:
+            return ()
+
+        source_t0 = float(source_frames[0]["timeStamp"])
+        original_duration = float(source_target_t[-1]) if len(source_target_t) else 0.0
+        event_commands = []
+        for idx, event in enumerate(self.loaded_events):
+            kind = str(event.get("kind") or "digital_output").strip().lower()
+            if kind not in {"digital_output", "io", "tool"}:
+                raise ValueError(f"unsupported event kind: {kind!r}")
+
+            original_t = max(0.0, float(event.get("timeStamp", source_t0)) - source_t0)
+            if original_duration > 0:
+                original_t = min(original_t, original_duration)
+            retimed_t = float(np.interp(original_t, source_target_t, target_t))
+            port, commands, delayed = self._translate_digital_event(event)
+            event_commands.append(
+                CompiledPlaybackEventCommand(
+                    index=idx,
+                    target_time_s=retimed_t,
+                    original_target_time_s=original_t,
+                    kind=kind,
+                    channel=self._event_channel(event),
+                    value=self._event_bool_value(event),
+                    port=port,
+                    commands=tuple(commands),
+                    delayed_commands=tuple(delayed),
+                )
+            )
+        return tuple(sorted(event_commands, key=lambda item: item.target_time_s))
+
     def compile_loaded_plan(self) -> CompiledPlaybackPlan:
         """Compile the loaded trajectory into a pre-timed MG400 playback job.
 
@@ -538,10 +697,19 @@ class TrajectoryRecorder:
                 )
             )
 
+        event_commands = self._compile_event_commands(
+            source_frames,
+            target_t,
+            source_target_t,
+        )
+        if event_commands:
+            total_dur = max(total_dur, max(e.target_time_s for e in event_commands))
+
         return CompiledPlaybackPlan(
             source_name=self.loaded_name or "inline_trajectory",
             waypoints=tuple(dict(frame) for frame in frames),
             queued_commands=tuple(queued_commands),
+            event_commands=event_commands,
             original_duration_s=float(timing.original_duration_s),
             retimed_duration_s=float(timing.retimed_duration_s),
             total_duration_s=total_dur,
@@ -625,6 +793,60 @@ class TrajectoryRecorder:
         except Exception:
             return False
 
+    def _send_playback_event_command(self, command: str) -> bool:
+        if self._send_dash is None:
+            self._log.warn(f"⚠️  Cannot send playback IO event without dashboard channel: {command}")
+            return False
+        return bool(self._send_dash(command))
+
+    def _cancel_pending_timers(self) -> None:
+        """Cancel all outstanding delayed IO command timers (called from stop_all)."""
+        with self._pending_timers_lock:
+            for timer in self._pending_timers:
+                timer.cancel()
+            self._pending_timers.clear()
+
+    def _schedule_delayed_event_command(self, delay_s: float, command: str) -> None:
+        def _send_later():
+            try:
+                self._send_playback_event_command(command)
+            except Exception:
+                pass
+            finally:
+                # Prune dead refs so the list doesn't grow indefinitely.
+                with self._pending_timers_lock:
+                    self._pending_timers[:] = [
+                        t for t in self._pending_timers if t.is_alive()
+                    ]
+
+        timer = threading.Timer(max(0.0, float(delay_s)), _send_later)
+        timer.daemon = True
+        with self._pending_timers_lock:
+            self._pending_timers.append(timer)
+        timer.start()
+
+    def _dispatch_event_command(self, event: CompiledPlaybackEventCommand, elapsed: float):
+        for command in event.commands:
+            self._send_playback_event_command(command)
+        for delay_s, command in event.delayed_commands:
+            self._schedule_delayed_event_command(delay_s, command)
+        self._emit_playback_event(
+            "io_event_queued",
+            index=event.index,
+            kind=event.kind,
+            channel=event.channel,
+            value=event.value,
+            port=event.port,
+            commands=list(event.commands),
+            delayed_commands=[
+                {"delay_s": delay_s, "command": command}
+                for delay_s, command in event.delayed_commands
+            ],
+            target_time_s=event.target_time_s,
+            original_target_time_s=event.original_target_time_s,
+            elapsed_s=float(elapsed),
+        )
+
     def _playback_complete(self, idx, elapsed, total_dur, target_q):
         if idx < len(target_q):
             return False
@@ -677,6 +899,7 @@ class TrajectoryRecorder:
             return
 
         idx = 1
+        event_idx = 0
         t_start = self._time_fn()
         self._emit_playback_event(
             "playback_start",
@@ -690,6 +913,13 @@ class TrajectoryRecorder:
         )
         while not self._stop_flag.is_set():
             elapsed = self._time_fn() - t_start
+
+            while (
+                event_idx < len(plan.event_commands)
+                and plan.event_commands[event_idx].target_time_s <= elapsed
+            ):
+                self._dispatch_event_command(plan.event_commands[event_idx], elapsed)
+                event_idx += 1
             
             # 1. Pre-send any waypoints that fall within the current lookahead window
             while idx - 1 < len(plan.queued_commands) and target_t[idx] <= elapsed + plan.lookahead_s:
@@ -728,7 +958,10 @@ class TrajectoryRecorder:
                     pass
                     
             # 3. Check loop termination
-            if self._playback_complete(idx, elapsed, total_dur, target_q):
+            if (
+                event_idx >= len(plan.event_commands)
+                and self._playback_complete(idx, elapsed, total_dur, target_q)
+            ):
                 break
             if self._playback_timed_out(elapsed, total_dur):
                 break
@@ -798,6 +1031,7 @@ class TrajectoryRecorder:
         was_playing   = self.is_playing
 
         self.is_recording = False
+        self._cancel_pending_timers()
         self._stop_flag.set()
 
         if self._play_thread and self._play_thread.is_alive():
@@ -853,8 +1087,8 @@ class TrajectoryRecorder:
             return ""
         try:
             with open(path, "w") as f:
-                json.dump({"frames": frames}, f, indent=4)
-            self._log.info(f"💾 Saved {len(frames)} frames → {path}")
+                json.dump({"frames": frames, "events": self._events}, f, indent=4)
+            self._log.info(f"💾 Saved {len(frames)} frames, {len(self._events)} events → {path}")
             return path
         except Exception as e:
             self._log.error(f"Save failed: {e}")
