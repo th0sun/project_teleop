@@ -9,15 +9,19 @@ from mg400_protocol.dashboard import (
     acc_j,
     clear_error,
     continue_,
+    continue_script,
     disable_robot,
     emergency_stop,
     enable_robot,
     get_pose,
     get_tool,
     pause,
+    pause_script,
     reset_robot,
+    run_script,
     speed_factor,
     speed_j,
+    stop_script,
 )
 from mg400_protocol.feedback import (
     FEEDBACK_PACKET_SIZE,
@@ -113,6 +117,61 @@ class MG400ProtocolTest(unittest.TestCase):
     def test_dashboard_introspection_commands(self):
         self.assertEqual(get_tool().render(), "GetTool()")
         self.assertEqual(get_pose().render(), "GetPose()")
+
+    def test_run_script_renders_with_double_quoted_project_name(self):
+        # Reference: 4-axis TCP/IP Remote Control Interface Guide
+        # V1.6.0.0 (2024/04/19) example: ``RunScript("demo")``.
+        # The manual prescribes the project name wrapped in double quotes;
+        # this asserts our builder matches that wire format exactly.
+        self.assertEqual(run_script("demo").render(), 'RunScript("demo")')
+        self.assertEqual(
+            run_script("vr_lesson_42").render(), 'RunScript("vr_lesson_42")'
+        )
+
+    def test_run_script_rejects_empty_or_unsafe_project_names(self):
+        for bad in ("", "   ", '"abc"', "abc(def)", "abc,def", "a\nb"):
+            with self.assertRaises(ValueError, msg=f"should reject {bad!r}"):
+                run_script(bad)
+        with self.assertRaises(TypeError):
+            run_script(None)  # type: ignore[arg-type]
+
+    def test_runscript_lifecycle_commands_match_manual_verbs(self):
+        # Reference: 4-axis manual sections "StopScript / PauseScript /
+        # ContinueScript (Immediate command)".  Vendor Python SDK uses the
+        # generic Stop / Pause / Continue which also affect RunScript per
+        # its docstring; we expose the manual-named verbs explicitly so
+        # callers can distinguish project-lifecycle from motion-queue
+        # lifecycle.
+        self.assertEqual(stop_script().render(), "StopScript()")
+        self.assertEqual(pause_script().render(), "PauseScript()")
+        self.assertEqual(continue_script().render(), "ContinueScript()")
+
+    def test_run_script_rejects_backslash_to_avoid_quote_escape_confusion(self):
+        # Project name is wrapped in double quotes per the 4-axis manual
+        # example RunScript("demo"); a stray backslash could be interpreted
+        # as a quote-escape on the controller side and shift the parser's
+        # quote boundary, so reject it at the builder.
+        with self.assertRaises(ValueError):
+            run_script("demo\\")
+        with self.assertRaises(ValueError):
+            run_script("a\\b")
+
+    def test_runscript_builders_re_exported_from_package_root(self):
+        # Once a vendor verb is documented in the 4-axis PDF and shipped
+        # via dashboard.py, downstream adapter / runtime code should be
+        # able to grab it from the package root the same way the existing
+        # builders are surfaced.
+        from mg400_protocol import (
+            continue_script as continue_script_root,
+            pause_script as pause_script_root,
+            run_script as run_script_root,
+            stop_script as stop_script_root,
+        )
+
+        self.assertEqual(run_script_root("demo").render(), 'RunScript("demo")')
+        self.assertEqual(stop_script_root().render(), "StopScript()")
+        self.assertEqual(pause_script_root().render(), "PauseScript()")
+        self.assertEqual(continue_script_root().render(), "ContinueScript()")
 
     def test_alarm_catalog_loads_vendor_alarm_json(self):
         catalog = AlarmCatalog.from_files(

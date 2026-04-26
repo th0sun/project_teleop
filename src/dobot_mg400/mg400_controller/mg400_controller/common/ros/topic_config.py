@@ -44,6 +44,9 @@ class TeleopTopicConfig:
     trajectory_data: str = motion_config.TRAJECTORY_DATA_TOPIC
     unity_trajectory: str = motion_config.UNITY_TRAJECTORY_TOPIC
     unity_joint_cmd: str = motion_config.UNITY_TOPIC
+    teach_job_request: str = motion_config.TEACH_JOB_REQUEST_TOPIC
+    teach_job_status: str = motion_config.TEACH_JOB_STATUS_TOPIC
+    teach_job_artifact: str = motion_config.TEACH_JOB_ARTIFACT_TOPIC
 
 
 DEFAULT_TELEOP_TOPICS = TeleopTopicConfig()

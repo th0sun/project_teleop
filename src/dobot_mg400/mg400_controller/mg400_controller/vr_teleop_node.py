@@ -53,6 +53,7 @@ from mg400_controller.common.utils.error_handler import ErrorHandler
 from mg400_controller.common.utils.collision_haptic import CollisionHaptic
 from mg400_controller.common.trajectory.trajectory_recorder import TrajectoryRecorder
 from mg400_controller.common.trajectory.trajectory_recorder import frames_from_joint_trajectory_msg
+from mg400_controller.common.trajectory.teach_job_handler import TeachJobHandler
 from mg400_controller.common.utils.teleop_logger import TeleopLogger
 from mg400_controller.common.logic.safety_monitor import SafetyMonitor
 from mg400_controller.common.logic.teleop_controller import TeleopController
@@ -147,6 +148,7 @@ class TeleopNode(Node):
             teach_status_callback=self._teach_status_callback,
             traj_data_callback=self._traj_data_callback,
             joint_trajectory_callback=self._joint_trajectory_callback,
+            teach_job_request_callback=self._teach_job_request_callback,
             topics=self.topics,
         )
         
@@ -195,6 +197,22 @@ class TeleopNode(Node):
             get_robot_mode_fn=self.feedback.get_robot_mode,
             waypoint_callback=self._playback_waypoint_callback,
             target_callback=self._playback_target_callback,
+        )
+
+        # Job-request dispatcher for /teach/job_request (compile/preview_sim/
+        # execute/export/stop/record_*).  Replaces the implicit "publish
+        # JointTrajectory == execute now" behaviour.  Status / artifact replies
+        # go to /teach/job_status and /teach/job_artifact.
+        self.teach_job_handler = TeachJobHandler(
+            recorder=self.trajectory_recorder,
+            publish_status_fn=lambda payload: self.publishers.teach_job_status.publish(
+                String(data=payload)
+            ),
+            publish_artifact_fn=lambda payload: self.publishers.teach_job_artifact.publish(
+                String(data=payload)
+            ),
+            logger=self.get_logger(),
+            allow_real_execute_fn=lambda: bool(self.connection.connected),
         )
 
         self.interactive = InteractiveCommandHandler(
@@ -408,7 +426,16 @@ class TeleopNode(Node):
 
     # ── Teach & Repeat callbacks ──────────────────────────────────────────────
     def _teach_status_callback(self, msg):
-        """Handle /unity/teach_status: Record | Stop | Save | Load:<name> | Preview"""
+        """Handle /unity/teach_status: Record | Stop | Save | Load:<name> | Preview.
+
+        DEPRECATED in favour of /teach/job_request.  Retained because the
+        ``Save`` semantics overlap with the host-side recorder pipeline.
+        """
+        self.get_logger().warn(
+            f"⚠️  Legacy /unity/teach_status used. Prefer /teach/job_request "
+            f"(topic: {self.topics.teach_job_request})",
+            once=True,
+        )
         status = msg.data.strip()
         tr = self.trajectory_recorder
         self.get_logger().info(f"🎓 Teach status: {status}")
@@ -449,7 +476,17 @@ class TeleopNode(Node):
                 self.get_logger().info(f"🎓 Unity trajectory saved → {path}")
 
     def _joint_trajectory_callback(self, msg):
-        """Handle Unity's saved teach-repeat JointTrajectory and play it."""
+        """Handle Unity's saved teach-repeat JointTrajectory and play it.
+
+        DEPRECATED auto-play path: publishing JointTrajectory implicitly meant
+        "execute now".  Use /teach/job_request with action='execute' instead.
+        Kept for backwards compatibility while Unity migrates.
+        """
+        self.get_logger().warn(
+            "⚠️  Legacy JointTrajectory auto-play path used. Migrate Unity to "
+            f"/teach/job_request (topic: {self.topics.teach_job_request})",
+            once=True,
+        )
         frames = frames_from_joint_trajectory_msg(msg)
         if not frames:
             self.get_logger().warn("⚠️ Unity JointTrajectory had no valid 4-joint points")
@@ -469,6 +506,20 @@ class TeleopNode(Node):
                 f"{frames[-1]['timeStamp'] - frames[0]['timeStamp']:.2f}s; starting playback"
             )
             tr.start_preview()
+
+    def _teach_job_request_callback(self, msg):
+        """Dispatch a structured /teach/job_request payload via TeachJobHandler.
+
+        The handler emits status updates on /teach/job_status and (for compile
+        actions) the compiled artifact on /teach/job_artifact.  See
+        ``teach_job_handler.py`` for the full schema.
+        """
+        try:
+            payload = msg.data if isinstance(msg.data, str) else str(msg.data)
+        except Exception:
+            self.get_logger().error("teach_job_request: cannot read .data field")
+            return
+        self.teach_job_handler.handle(payload)
 
     def _playback_waypoint_callback(self, q_rad):
         """Called by TrajectoryRecorder when a waypoint is queued (sent to robot).

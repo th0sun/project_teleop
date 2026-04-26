@@ -39,6 +39,8 @@ class TeleopPublishers:
     playback_unity: object
     traj_preview: object
     haptic: object
+    teach_job_status: object
+    teach_job_artifact: object
 
 
 @dataclass
@@ -50,6 +52,7 @@ class TeleopSubscriptions:
     teach_status: object
     traj_data: object
     unity_trajectory: object
+    teach_job_request: object
     unity: object = None
 
 
@@ -72,6 +75,8 @@ def create_publishers(node, topics: TeleopTopicConfig = DEFAULT_TELEOP_TOPICS):
         playback_unity=node.create_publisher(JointState, topics.playback_unity, 10),
         traj_preview=node.create_publisher(String, topics.traj_preview, 10),
         haptic=node.create_publisher(String, topics.haptic, 10),
+        teach_job_status=node.create_publisher(String, topics.teach_job_status, 10),
+        teach_job_artifact=node.create_publisher(String, topics.teach_job_artifact, 10),
     )
 
 
@@ -85,6 +90,7 @@ def create_subscriptions(
     teach_status_callback,
     traj_data_callback,
     joint_trajectory_callback,
+    teach_job_request_callback,
     topics: TeleopTopicConfig = DEFAULT_TELEOP_TOPICS,
 ):
     return TeleopSubscriptions(
@@ -113,6 +119,12 @@ def create_subscriptions(
             JointTrajectory,
             topics.unity_trajectory,
             joint_trajectory_callback,
+            10,
+        ),
+        teach_job_request=node.create_subscription(
+            String,
+            topics.teach_job_request,
+            teach_job_request_callback,
             10,
         ),
     )

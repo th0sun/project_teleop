@@ -38,6 +38,9 @@ from mg400_controller.common.config.motion_config import (  # noqa: E402
     DASHBOARD_CMD_TOPIC,
     ROS_PING_TOPIC,
     SAFETY_TOPIC,
+    TEACH_JOB_ARTIFACT_TOPIC,
+    TEACH_JOB_REQUEST_TOPIC,
+    TEACH_JOB_STATUS_TOPIC,
     TOOL_ACTUAL_TOPIC,
     TRAJECTORY_DATA_TOPIC,
     UNITY_TRAJECTORY_TOPIC,
@@ -91,7 +94,9 @@ class TeleopRosWiringTest(unittest.TestCase):
         self.assertEqual(publishers.heartbeat.topic, ROS_PING_TOPIC)
         self.assertEqual(publishers.safety.topic, SAFETY_TOPIC)
         self.assertEqual(publishers.tool_actual.topic, TOOL_ACTUAL_TOPIC)
-        self.assertEqual(len(node.publish_calls), 17)
+        self.assertEqual(publishers.teach_job_status.topic, TEACH_JOB_STATUS_TOPIC)
+        self.assertEqual(publishers.teach_job_artifact.topic, TEACH_JOB_ARTIFACT_TOPIC)
+        self.assertEqual(len(node.publish_calls), 19)
 
     def test_create_subscriptions_binds_expected_topics(self):
         node = FakeNode()
@@ -103,6 +108,7 @@ class TeleopRosWiringTest(unittest.TestCase):
             "teach_status_callback": lambda msg: None,
             "traj_data_callback": lambda msg: None,
             "joint_trajectory_callback": lambda msg: None,
+            "teach_job_request_callback": lambda msg: None,
         }
 
         subscriptions = create_subscriptions(node, **callbacks)
@@ -111,7 +117,8 @@ class TeleopRosWiringTest(unittest.TestCase):
         self.assertEqual(subscriptions.dashboard_cmd.topic, DASHBOARD_CMD_TOPIC)
         self.assertEqual(subscriptions.traj_data.topic, TRAJECTORY_DATA_TOPIC)
         self.assertEqual(subscriptions.unity_trajectory.topic, UNITY_TRAJECTORY_TOPIC)
-        self.assertEqual(len(node.subscription_calls), 7)
+        self.assertEqual(subscriptions.teach_job_request.topic, TEACH_JOB_REQUEST_TOPIC)
+        self.assertEqual(len(node.subscription_calls), 8)
 
     def test_attach_unity_subscription_uses_unity_topic(self):
         node = FakeNode()
@@ -144,6 +151,7 @@ class TeleopRosWiringTest(unittest.TestCase):
             "teach_status_callback": lambda msg: None,
             "traj_data_callback": lambda msg: None,
             "joint_trajectory_callback": lambda msg: None,
+            "teach_job_request_callback": lambda msg: None,
         }
         topics = TeleopTopicConfig(
             unity_joint_cmd="/robot_a/unity/joint_cmd",

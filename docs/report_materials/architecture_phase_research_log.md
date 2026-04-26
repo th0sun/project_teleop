@@ -867,3 +867,161 @@ Remaining gap:
   - preview,
   - export,
   - or execute on a specific robot backend.
+
+## 19. Teach-and-Repeat job-request contract (Unity ↔ ROS)
+
+Problem closed:
+
+- Section 18 left two implicit auto-execute paths between Unity and ROS:
+  - `/unity/teach_status` (string verbs `Record / Save / Load:<n> / Preview`)
+    that no Unity script actually published
+  - `/mg400/joint_trajectory_controller/command` whose mere arrival made the
+    ROS side immediately call `TrajectoryRecorder.start_preview()`
+- Result: the Unity "Send To Real Robot" button was hardwired to
+  "execute on the real robot now", with no way to ask ROS to
+  compile-only / preview-on-sim / export the artifact.
+
+Change made:
+
+- New typed contract on `std_msgs/String` JSON over three topics:
+  - `/teach/job_request` — Unity → ROS submission (action enum)
+  - `/teach/job_status` — ROS → Unity lifecycle echoes
+  - `/teach/job_artifact` — ROS → Unity compiled-plan reply
+- `JobRequest` schema:
+  ```json
+  {
+    "job_id": "uuid-v4",
+    "action": "compile|preview_sim|execute|export|stop|record_start|record_stop",
+    "target": "mg400",
+    "trajectory": {"filename": "...", "frames": [{timeStamp, j1..j4 deg}, ...]},
+    "options": {"speed_scale": 1.0, "go_home": false, "export_path": "..."},
+    "submitted_at_unity_sec": 12345.6
+  }
+  ```
+- `JobStatus` schema with `stage ∈ {received, compiled, preview_started,
+  executing, done, failed, stopped}` plus an `error_code` enum
+  (`BAD_PAYLOAD / EMPTY_TRAJECTORY / EXECUTE_FORBIDDEN / ALREADY_PLAYING /
+  TARGET_MISMATCH / UNKNOWN_ACTION / EXPORT_FAILED`).
+
+ROS-side wiring (`mg400_controller`):
+
+- New rclpy-free dispatcher
+  `mg400_controller/common/trajectory/teach_job_handler.py`
+  with `parse_job_request`, `JobRequest`, `JobStatus`, `TeachJobHandler`.
+- Wired into `vr_teleop_node.py`:
+  - new subscription on `/teach/job_request`
+  - new publishers on `/teach/job_status` and `/teach/job_artifact`
+  - constructor passes `allow_real_execute_fn=lambda: connection.connected`
+    so `execute` requests are gated on a live robot session.
+- Legacy `_joint_trajectory_callback` and `_teach_status_callback` now log a
+  deprecation warning (once) but continue to work, so existing Unity builds
+  do not break during migration.
+
+Unity-side wiring (`TeleOp`):
+
+- New `Assets/Scripts/TeachJobPublisher.cs`:
+  - registers publisher on `/teach/job_request`
+  - subscribes `/teach/job_status` and `/teach/job_artifact`
+  - exposes `SubmitJob(action, frames, fileName, options)` and
+    `OnStatus / OnArtifact` UnityEvents
+  - hand-rolled JSON builder so `JsonUtility` does not have to round-trip the
+    trajectory on the hot path.
+- `ContinuousTeachAndRepeat.cs`:
+  - Save now also submits a `Compile` job so ROS can validate and emit a
+    compiled artifact without moving the robot.
+  - Send To Real Robot now submits an `Execute` job; the legacy
+    `JointTrajectory` publish is retained behind
+    `legacyPublishJointTrajectory` for safe rollback only.
+  - Status text in the VR HUD is driven by `OnStatus` events instead of
+    guessing from local UI flags.
+  - New helpers `RequestCompilePreview()` and `RequestRemoteStop(goHome)`
+    expose the contract to additional UI buttons without re-implementing the
+    publisher.
+
+Tests:
+
+- `test/test_teach_job_handler.py` (24 cases) covers parse failures, every
+  action's happy path, target mismatch, real-robot gating, already-playing
+  collisions, export-path defaulting, and JSON serialisation including
+  metadata round-trip and progress clamping.
+- `test/test_teleop_ros_wiring.py` extended to assert the new
+  `teach_job_status` / `teach_job_artifact` publishers and
+  `teach_job_request` subscription wire up via `topics.*` overrides — keeps
+  multi-robot namespace remapping (`/robot_a/teach/...`) honest.
+
+Why this matters:
+
+- Unity buttons are no longer hardwired to motion behaviour; the ROS adapter
+  decides what to do with each action.
+- The same contract trivially fans out to additional executors:
+  - simulator backend: handles `preview_sim` without touching real robot
+  - MG400 RunScript path (research log §17 next steps): handles `execute` by
+    deploying a Lua project and triggering `RunScript()` instead of streaming
+    `JointMovJ` waypoints
+  - dataset-style export: `action="export"` writes the compiled artifact to
+    a known path so capture sessions can be archived without a robot.
+- `error_code` and `metadata` fields give the VR HUD enough detail to show
+  why an execute was refused (joint limit, robot disconnected, etc.) instead
+  of a vague red "Failed" toast.
+
+Open follow-ups:
+
+- Once the contract is exercised on a real Quest 3 build, drop
+  `legacyPublishJointTrajectory` and delete `_joint_trajectory_callback`.
+- Add `/teach/job_request` to the topic-namespace remap surface used in
+  `test_teleop_ros_wiring.py::test_topic_parameters_can_override_unity_contract_topics`
+  for multi-robot deployments (`/robot_a/teach/...`).
+- Wire a sim-only adapter that consumes `preview_sim` so VR users can
+  rehearse a trajectory without enabling the real arm.
+
+## 20. MG400 RunScript protocol surface added (no executor yet)
+
+Change made:
+
+- `mg400_protocol/dashboard.py` gains four documented dashboard-port verbs:
+  - `run_script(project_name)` → ``RunScript("<name>")``
+  - `stop_script()` → ``StopScript()``
+  - `pause_script()` → ``PauseScript()``
+  - `continue_script()` → ``ContinueScript()``
+- Project-name validation rejects empty strings and characters that would
+  break the vendor parser (``"``, ``(``, ``)``, ``,``, control chars), and
+  the wire form quotes the name to match the manual example
+  ``RunScript("demo")``.
+- Tests in `test_mg400_protocol.py` now assert the rendered strings against
+  the manual example and exercise the rejection rules.
+
+Sources cross-checked:
+
+- Manual: `docs/reference_manuals/dobot/TCP_IP Remote Control Interface
+  Guide (4axis)_20240419_en.pdf`, sections "RunScript / StopScript /
+  PauseScript / ContinueScript (Immediate command)".
+- Vendor SDK: `Dobot_TCP_IP_Python_V4/dobot_api.py:307-337` -- exposes
+  `RunScript / Stop / Pause / Continue`.  Its `Stop / Pause / Continue`
+  docstrings explicitly note those generic commands also operate on a
+  running RunScript project, so callers may pick whichever verb expresses
+  the intent better (project lifecycle vs motion-queue lifecycle).
+
+Why this matters:
+
+- We now have the documented entry point for *controller-side* program
+  playback on MG400 -- the host can hand off "run this saved project"
+  with one short dashboard command instead of streaming per-waypoint
+  motion over TCP at runtime.
+
+What is intentionally NOT in this change:
+
+- No project-deployer.  The MG400 4-axis TCP/IP API does not document any
+  ``upload`` / ``download`` / ``import`` / ``export`` primitive, so a Lua
+  or Blockly project still has to reach the controller via DobotStudio
+  Pro (or out-of-band SSH/SCP) before `RunScript` can play it.  This
+  remains the load-bearing gap for a fully programmatic teach-then-replay
+  pipeline and needs hardware proof (Wireshark on a "Save to robot"
+  action, or filesystem inspection at `/dobot/userdata/project/...`).
+- No adapter wiring into `TeachJobHandler` action `execute`.  Once the
+  deployer story is closed, `execute` against an MG400 target can choose
+  between (a) the existing host-streamed `JointMovJ` path and (b) deploy
+  a Lua project from the compiled artifact and call `run_script(...)`.
+- No hardware probe yet of how `RunScript` behaves against a real MG400
+  controller.  The protocol surface compiles and renders the documented
+  wire format, but acceptance is still primary-source ("manual + SDK
+  agree") rather than packet-on-wire.

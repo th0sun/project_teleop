@@ -65,6 +65,14 @@ TRAJ_PREVIEW_TOPIC = "/teleop/traj_preview"
 TEACH_STATUS_TOPIC = "/unity/teach_status"
 TRAJECTORY_DATA_TOPIC = "/unity/trajectory_data"
 UNITY_TRAJECTORY_TOPIC = "/mg400/joint_trajectory_controller/command"
+# Job-request contract: explicit teach-and-repeat job submission channel.
+# Replaces the legacy "publish JointTrajectory == execute now" behaviour with a
+# typed action enum (compile / preview_sim / execute / export / stop / record_*)
+# so the ROS adapter can decide between dry compile, simulator preview, real
+# robot execute, or artifact export without overloading topic semantics.
+TEACH_JOB_REQUEST_TOPIC = "/teach/job_request"
+TEACH_JOB_STATUS_TOPIC = "/teach/job_status"
+TEACH_JOB_ARTIFACT_TOPIC = "/teach/job_artifact"
 TOOL_ACTUAL_TOPIC = "/mg400/tool_vector_actual"
 TOOL_TARGET_TOPIC = "/mg400/tool_vector_target"
 FLANGE_ACTUAL_TOPIC = "/robot/flange_actual"
