@@ -108,4 +108,33 @@ BLOW_DURATION = 0.4                 # วินาที: ระยะเวล�
 # replayed verbatim).  0.5° matches the recorder's RECORD_MIN_DELTA so the
 # simplifier does not collapse motion that recording considered worth
 # capturing in the first place.
-PATH_SIMPLIFY_TOLERANCE_DEG = 0.5
+PATH_SIMPLIFY_TOLERANCE_DEG = 1.0   # was 0.5 — doubled: smoother curves drop more intermediate pts
+
+# 🔀 Mixed-primitive segment classification
+# After RDP simplifies the waypoint count, the segment classifier groups
+# consecutive waypoints into typed segments that map to the most efficient
+# MG400 motion command:
+#   LINE    → MovL   (single Cartesian linear command)
+#   ARC     → Arc    (single Cartesian arc via 3 defining points)
+#   GENERAL → JointMovJ chain (fallback, one command per waypoint)
+#
+# This dramatically reduces queue depth for trajectories with long straight
+# runs (pick-place) or smooth curves (freehand demonstrations).
+#
+# Set USE_MIXED_PRIMITIVES = False to disable and revert to the original
+# JointMovJ-only pipeline for diagnosis or safety.
+USE_MIXED_PRIMITIVES = True
+SEGMENT_ENABLE_ARC = True           # Arc(through, end) command — 1 cmd per smooth curve vs N JointMovJ
+SEGMENT_LINE_TOLERANCE_MM = 2.0    # max Cartesian deviation (mm) for MovL  (was 1.0 — too tight for FK noise)
+SEGMENT_ARC_TOLERANCE_MM = 3.0     # max circle-fit error (mm) for Arc       (was 2.0)
+SEGMENT_R_TOLERANCE_DEG = 2.0      # max wrist/yaw deviation allowed for primitive compression
+SEGMENT_MIN_POINTS_FOR_ARC = 3     # minimum waypoints to attempt arc fit
+
+# Dynamic Cartesian Speed Configuration
+# The system calculates the physical Cartesian distance of the segment and the
+# desired timestamp delta to compute the required mm/s velocity.
+# SpeedL is then calculated as: (velocity_mm_s / CARTESIAN_SPEED_AT_100_PERCENT_MM_S) * 100
+CARTESIAN_SPEED_AT_100_PERCENT_MM_S = 1000.0  # Reference 100% Cartesian speed (mm/s)
+SEGMENT_MIN_SPEED_L = 5                       # Minimum SpeedL percentage
+SEGMENT_MAX_SPEED_L = 100                     # Maximum SpeedL percentage
+SEGMENT_ACC_L = 80                            # Default AccL % for Cartesian commands
