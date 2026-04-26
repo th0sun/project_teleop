@@ -201,6 +201,9 @@ class TrajectoryRecorder:
         self._waypoint_cb = waypoint_callback
         self._target_cb = target_callback
         self._playback_event_cb = playback_event_callback
+        self._playback_event_cbs = []
+        if playback_event_callback is not None:
+            self._playback_event_cbs.append(playback_event_callback)
         self._get_robot_mode = get_robot_mode_fn
         self._traj_dir = TRAJ_DIR if traj_dir is None else traj_dir
         self._time_fn = time.time if time_fn is None else time_fn
@@ -393,13 +396,32 @@ class TrajectoryRecorder:
             cp=cp,
         ).render()
 
-    def _emit_playback_event(self, event_name, **payload):
-        if self._playback_event_cb is None:
+    def add_playback_event_callback(self, callback: Callable):
+        """Register an additional playback event observer."""
+        if callback is None:
             return
-        try:
-            self._playback_event_cb(event_name, payload)
-        except Exception:
-            pass
+        self._playback_event_cbs.append(callback)
+
+    def set_playback_event_callback(self, callback: Optional[Callable]):
+        """Replace playback event observers.
+
+        Kept for integration code that needs a single owner of playback
+        lifecycle events; most callers should use ``add_playback_event_callback``
+        so measurement/debug observers can coexist with status publishers.
+        """
+        self._playback_event_cb = callback
+        self._playback_event_cbs = []
+        if callback is not None:
+            self._playback_event_cbs.append(callback)
+
+    def _emit_playback_event(self, event_name, **payload):
+        if not self._playback_event_cbs:
+            return
+        for callback in list(self._playback_event_cbs):
+            try:
+                callback(event_name, payload)
+            except Exception:
+                pass
 
     def _get_current_position_deg(self):
         if self._get_pos is None:
@@ -592,10 +614,18 @@ class TrajectoryRecorder:
             timeout_sec=PREVIEW_START_TIMEOUT_SEC,
         )
 
-    def _playback_complete(self, idx, elapsed, total_dur, target_q):
-        if elapsed >= total_dur + PREVIEW_ABSOLUTE_TIMEOUT_SEC:
+    def _flush_motion_queue_after_timeout(self):
+        if self._send_dash is None:
+            return False
+        try:
+            self._send_dash(reset_robot().render())
+            self._sleep_fn(0.2)
+            self._send_dash(enable_robot().render())
             return True
+        except Exception:
+            return False
 
+    def _playback_complete(self, idx, elapsed, total_dur, target_q):
         if idx < len(target_q):
             return False
 
@@ -610,6 +640,9 @@ class TrajectoryRecorder:
             return True
 
         return elapsed >= total_dur + PREVIEW_FINAL_EXTRA_TIMEOUT_SEC
+
+    def _playback_timed_out(self, elapsed, total_dur):
+        return elapsed >= total_dur + PREVIEW_ABSOLUTE_TIMEOUT_SEC
 
     def _play_worker(self):
         """Execute a precompiled playback job while publishing monitoring data."""
@@ -697,17 +730,42 @@ class TrajectoryRecorder:
             # 3. Check loop termination
             if self._playback_complete(idx, elapsed, total_dur, target_q):
                 break
+            if self._playback_timed_out(elapsed, total_dur):
+                break
                 
             self._sleep_fn(PREVIEW_POLL_SEC) # 100Hz interpolation and polling loop
 
         final_max_error, final_error, final_position, final_robot_mode = self._final_target_state(target_q)
         final_target = np.asarray(target_q[-1], dtype=float)
+        elapsed_total = float(self._time_fn() - t_start)
+        timed_out = bool(
+            not self._stop_flag.is_set()
+            and self._playback_timed_out(elapsed_total, total_dur)
+            and (
+                final_max_error is None
+                or final_max_error > PREVIEW_FINAL_TOLERANCE_DEG
+                or final_robot_mode == MG400_ROBOT_MODE_RUNNING
+            )
+        )
+        success = bool(
+            not self._stop_flag.is_set()
+            and not timed_out
+            and (
+                final_max_error is None
+                or final_max_error <= PREVIEW_FINAL_TOLERANCE_DEG
+            )
+            and final_robot_mode != MG400_ROBOT_MODE_RUNNING
+        )
+        queue_flushed = self._flush_motion_queue_after_timeout() if timed_out else False
 
         self.is_playing = False
         self._emit_playback_event(
             "playback_complete",
             stopped=bool(self._stop_flag.is_set()),
-            elapsed_s=float(self._time_fn() - t_start),
+            timed_out=timed_out,
+            success=success,
+            queue_flushed=queue_flushed,
+            elapsed_s=elapsed_total,
             final_max_error_deg=None if final_max_error is None else float(final_max_error),
             final_error_deg=None if final_error is None else [float(v) for v in final_error],
             final_q_actual_deg=None if final_position is None else [float(v) for v in final_position],
@@ -716,6 +774,16 @@ class TrajectoryRecorder:
         )
         if self._stop_flag.is_set():
             self._log.info("⏹️  Playback stopped")
+        elif timed_out:
+            self._log.warn(
+                "⚠️  Preview timed out before final target "
+                f"(max error={final_max_error} deg, robot_mode={final_robot_mode})"
+            )
+        elif not success:
+            self._log.warn(
+                "⚠️  Preview ended without confirmed final settle "
+                f"(max error={final_max_error} deg, robot_mode={final_robot_mode})"
+            )
         else:
             self._log.info("✅ Preview complete")
 

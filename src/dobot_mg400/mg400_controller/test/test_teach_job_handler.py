@@ -16,6 +16,8 @@ from mg400_controller.common.trajectory.teach_job_handler import (  # noqa: E402
     ERR_BAD_PAYLOAD,
     ERR_EMPTY_TRAJECTORY,
     ERR_EXECUTE_FORBIDDEN,
+    ERR_PLAYBACK_FAILED,
+    ERR_PLAYBACK_TIMEOUT,
     ERR_TARGET_MISMATCH,
     ERR_UNKNOWN_ACTION,
     JobRequest,
@@ -67,6 +69,7 @@ class FakeRecorder:
         self.stop_all_called_with = None
         self.start_recording_called = 0
         self.stop_recording_called = 0
+        self.playback_event_callbacks = []
 
     # -- stub plan ------------------------------------------------------
     def set_compile_plan(self, plan):
@@ -114,6 +117,13 @@ class FakeRecorder:
         self.stop_recording_called += 1
         self.is_recording = False
         return list(self.loaded_frames)
+
+    def add_playback_event_callback(self, callback):
+        self.playback_event_callbacks.append(callback)
+
+    def emit_playback_complete(self, **payload):
+        for callback in list(self.playback_event_callbacks):
+            callback("playback_complete", payload)
 
 
 class FakeCompiledPlan:
@@ -298,6 +308,63 @@ class TeachJobHandlerTest(unittest.TestCase):
         terminal = self._decoded_status()[-1]
         self.assertEqual(terminal["stage"], STAGE_EXECUTING)
         self.assertFalse(terminal["metadata"]["sim"])
+
+    def test_execute_emits_done_when_recorder_reports_success(self):
+        payload = json.dumps({
+            "job_id": "j-exec-done",
+            "action": ACTION_EXECUTE,
+            "trajectory": _frames_payload(),
+        })
+        self.handler.handle(payload)
+        self.recorder.emit_playback_complete(
+            stopped=False,
+            timed_out=False,
+            success=True,
+            final_max_error_deg=0.0,
+        )
+
+        terminal = self._decoded_status()[-1]
+        self.assertEqual(terminal["job_id"], "j-exec-done")
+        self.assertEqual(terminal["stage"], STAGE_DONE)
+        self.assertIsNone(terminal["error_code"])
+        self.assertEqual(terminal["metadata"]["final_max_error_deg"], 0.0)
+
+    def test_execute_emits_failed_when_recorder_times_out(self):
+        payload = json.dumps({
+            "job_id": "j-exec-timeout",
+            "action": ACTION_EXECUTE,
+            "trajectory": _frames_payload(),
+        })
+        self.handler.handle(payload)
+        self.recorder.emit_playback_complete(
+            stopped=False,
+            timed_out=True,
+            success=False,
+            final_max_error_deg=8.5,
+        )
+
+        terminal = self._decoded_status()[-1]
+        self.assertEqual(terminal["stage"], STAGE_FAILED)
+        self.assertEqual(terminal["error_code"], ERR_PLAYBACK_TIMEOUT)
+        self.assertEqual(terminal["metadata"]["final_max_error_deg"], 8.5)
+
+    def test_execute_emits_failed_when_final_settle_not_confirmed(self):
+        payload = json.dumps({
+            "job_id": "j-exec-unsettled",
+            "action": ACTION_EXECUTE,
+            "trajectory": _frames_payload(),
+        })
+        self.handler.handle(payload)
+        self.recorder.emit_playback_complete(
+            stopped=False,
+            timed_out=False,
+            success=False,
+            final_max_error_deg=1.25,
+        )
+
+        terminal = self._decoded_status()[-1]
+        self.assertEqual(terminal["stage"], STAGE_FAILED)
+        self.assertEqual(terminal["error_code"], ERR_PLAYBACK_FAILED)
 
     def test_execute_blocked_when_real_robot_disallowed(self):
         self.handler = TeachJobHandler(

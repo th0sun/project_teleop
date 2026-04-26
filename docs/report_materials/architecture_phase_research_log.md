@@ -1025,3 +1025,159 @@ What is intentionally NOT in this change:
   controller.  The protocol surface compiles and renders the documented
   wire format, but acceptance is still primary-source ("manual + SDK
   agree") rather than packet-on-wire.
+
+## 21. Phase 1 closeout + Phase 2 kickoff
+
+### Phase 1 — done
+
+The teach-repeat job bridge is now feature-complete at the protocol /
+contract layer.  Concretely:
+
+- `/teach/job_request`, `/teach/job_status`, `/teach/job_artifact` are
+  declared in `motion_config.py`, surfaced through `topic_config.py` for
+  multi-robot remap, and wired in `teleop_interfaces.py` (publishers +
+  subscriptions) and `vr_teleop_node.py` (callbacks + handler instance).
+- `TeachJobHandler` (rclpy-free, `mg400_controller/common/trajectory/teach_job_handler.py`)
+  dispatches `compile / preview_sim / execute / export / stop /
+  record_start / record_stop`.
+- `execute` now publishes a terminal `done`, `failed`, or `stopped` job
+  status from the recorder's `playback_complete` event.  Playback timeout
+  no longer masquerades as success; it emits `PLAYBACK_TIMEOUT` and flushes
+  the motion queue with `ResetRobot()` / `EnableRobot()` when the dashboard
+  channel exists.
+- `preview_sim` is **safety-gated** to compile-only and emits
+  `stage="preview_ready"` plus `metadata.real_robot_moved=False`, so the
+  action that says "sim" never drives the MG400.  Defensive guard in
+  `_handle_play(sim=True)` fails loud if a future caller reroutes the path.
+- Unity side (`TeleOp`):
+  - `Assets/Scripts/TeachJobPublisher.cs` (+ `.cs.meta` tracked) builds /
+    publishes job requests and surfaces `OnStatus / OnArtifact` events.
+  - `ContinuousTeachAndRepeat.cs` auto-resolves / auto-attaches the
+    publisher, falls back to the legacy `JointTrajectory` channel only
+    when the new channel is unavailable, and renders `preview_ready` /
+    `compiled` / `preview_started` / `executing` / `done` / `failed` /
+    `stopped` distinctly in the HUD.
+- `mg400_protocol` exposes the documented MG400 controller-side execution
+  verbs from PDF 4-axis V1.6.0.0 (2024/04/19): `run_script`, `stop_script`,
+  `pause_script`, `continue_script`.  Project name is double-quoted per
+  the manual example `RunScript("demo")` and validated against characters
+  that would break the vendor parser (now including `\\`).  All four are
+  re-exported from `mg400_protocol.__init__` for downstream adapters.
+
+Findings closed in this phase:
+
+| # | Finding | Closed by |
+|---|---------|-----------|
+| 1 | `preview_sim` accidentally moved real robot | `8ea1932 feat(teach-repeat): add structured job bridge` (subsequent commit on `feat/multi-robot-teaching-architecture`: compile-only `_handle_preview_sim` + new `STAGE_PREVIEW_READY`) |
+| 2 | Unity demo silently no-ops without `TeachJobPublisher` | Unity branch `feat/teach-repeat-job-bridge` (auto-attach + legacy fallback in `ContinuousTeachAndRepeat`) |
+| 3 | `TeachJobPublisher.cs.meta` not tracked → GUID drift across machines | Unity `19b49b5 feat(teach-repeat): add ros job bridge` (meta committed alongside `.cs`) |
+| 4 | Unity HUD missing `preview_ready` case | Unity branch `feat/teach-repeat-job-bridge` (`_OnTeachJobStatus` switch update) |
+| 5 | `mg400_protocol` package root missing `run_script` / lifecycle verbs | ROS `feat/multi-robot-teaching-architecture` head (`__init__.py` re-export + `_RUN_SCRIPT_FORBIDDEN` adds `\\`) |
+
+Phase 1 test ledger (all green at closeout):
+
+| Suite | Tests |
+|-------|-------|
+| `test_teach_job_handler.py` | 28 |
+| `test_teach_job_acceptance.py` | 3 |
+| `test_teach_job_handler_integration.py` | 4 |
+| `test_teleop_ros_wiring.py` | 5 |
+| `test_trajectory_recorder.py` | 14 |
+| `test_mg400_protocol.py` | 14 |
+
+Total: **68 tests** passing on `feat/multi-robot-teaching-architecture`.
+
+What is intentionally NOT in Phase 1:
+
+- Real `RunScript` controller-side executor.  The protocol surface
+  exists, but no project deployer + no hardware proof yet — see §17,
+  §20, and the deploy-gap notes below.
+- Sim-only motion backend.  `preview_sim` compiles + publishes the
+  artifact but does not animate anything; an adapter that consumes
+  `preview_sim` must land in Phase 2 to make the action visible.
+- Multi-robot namespace cutover for the new topics in
+  `test_topic_parameters_can_override_unity_contract_topics`.
+
+### Phase 2 — start
+
+Goal: prove the end-to-end teach-repeat flow works against the **MG400
+Mock** (and one real-arm dry run if hardware time is available) using
+the `/teach/job_request` contract.  No new architecture; just exercise
+what Phase 1 wired up.
+
+Acceptance criteria (each tracked against Unity build + ROS Mock):
+
+- A1. **Save → compile**: pressing Save in Unity submits an `action="compile"`
+  job, ROS replies with `stage="received"` then `stage="compiled"` plus
+  a compiled artifact on `/teach/job_artifact`.  Unity HUD shows
+  "Compiled (...)".
+- A2. **Sim preview → no real motion**: a `preview_sim` job emits
+  `stage="preview_ready"` with `metadata.real_robot_moved == False`.
+  No `JointMovJ` strings appear on the MG400 motion port during the run
+  (verified via Mock log capture).
+- A3. **Send → execute**: an `execute` job triggers playback against
+  the Mock.  `stage="executing"` is emitted; on completion the recorder
+  emits `playback_complete`, and `TeachJobHandler` converts that into
+  terminal `done` or `failed` status for Unity.
+- A4. **Disconnected fail-loud**: with the robot not connected,
+  `execute` returns `stage="failed"` `error_code="EXECUTE_FORBIDDEN"`.
+  Unity HUD shows the red failure state, not a silent toast.
+- A5. **Replay timing / path-error measurable**: the Mock playback can
+  be inspected with `tools/demo_lift/measure_replay_timing.py` and
+  `render_replay_animation.py` (already on this branch) to capture
+  baseline numbers for the demo deck.
+
+Phase 2 smoke results on local MG400 Mock (`127.0.0.1:29999/30003/30004`):
+
+| Trajectory | Result | Evidence |
+|------------|--------|----------|
+| `unity_mock_test.json` | PASS for host-streamed replay | `playback_success=True`, `playback_timed_out=False`, final joint error `[0,0,0,0]`, final XYZ error `0.0 mm`, max path deviation `2.247 mm` |
+| `money.json` | FAIL for current host-streamed replay | `playback_timeout`, completion event final error approx `[24.62,3.98,44.69,0] deg`; the recorder now reports failure and flushes the queue instead of claiming success |
+
+Interpretation:
+
+- The **job contract and safety gates are working**.
+- The **current host-streamed `JointMovJ` executor is not acceptable for
+  dense/long Unity captures** like `money.json`; it falls behind the taught
+  timing and must not be presented as a reliable teach-repeat executor.
+- For demo-day reliability, use short/simple trajectories for the existing
+  host-streamed executor, and keep the controller-side `RunScript` / offline
+  program path as the real fix for dense teach-repeat jobs.
+
+Tooling added in this phase:
+
+- `src/dobot_mg400/mg400_controller/test/test_teach_job_handler_integration.py`
+  — software-only integration test that loads
+  `_supporting_materials/data/trajectories/json_trajectories/unity_mock_test.json`
+  and walks every acceptance action through `TeachJobHandler` with a
+  fake recorder, asserting status sequence, artifact emission, and the
+  "no real motion" guarantee from A2.
+- `tools/demo_lift/send_teach_job_request.py` — dev-side CLI that
+  converts a Unity JSON trajectory into a job-request payload and
+  optionally publishes it to `/teach/job_request`.  `--print` /
+  `--dry-run` modes work without any ROS runtime, so the script doubles
+  as documentation of the wire format.
+
+Blockers still in the way of demo day:
+
+- B1. **No project deployer for MG400 RunScript path.**  Compiled artifact
+  + `run_script` builder both exist, but there is no programmatic way
+  to push a Lua / Blockly project onto the controller.  Fall-back for
+  the demo: stay on the host-streamed `JointMovJ` executor only for
+  short/simple jobs that pass Mock acceptance.  Dense jobs must be blocked
+  or routed to a future controller-side executor.  Tracked in §17 / §20.
+- B2. **No sim adapter consuming `preview_sim`.**  Today the action
+  produces an artifact but nothing animates.  Either wire
+  `mg400_simulator/unity_simulator.py` through the contract or document
+  to operators that "Sim Preview Ready" means "validated, not animated".
+- B3. **`/teach/...` topics not yet exercised in the multi-robot namespace
+  test.**  Adding remap coverage there is a one-line Phase 2 chore
+  before the first multi-arm demo.
+- B4. **No Unity-side automated test.**  Unity changes still rely on
+  build-and-run.  EditMode tests via Unity Test Framework are out of
+  scope until a Quest 3 build station is wired into CI.
+- B5. **Host-streamed replay is a demo fallback, not the final architecture.**
+  `money.json` proves that dense captures can overwhelm queued `JointMovJ`
+  playback.  The system now fails loud and flushes on timeout, but the
+  product direction remains controller-side/offline execution for real
+  teach-repeat fidelity.

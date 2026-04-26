@@ -170,6 +170,37 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertFalse(recorder._playback_complete(1, 1.5, 1.0, target_q))
         self.assertTrue(recorder._playback_complete(1, 3.1, 1.0, target_q))
 
+    def test_playback_complete_does_not_succeed_on_absolute_timeout_with_feedback(self):
+        target_q = np.array([
+            [0.0, 0.0, 0.0, 0.0],
+            [20.0, 10.0, 0.0, 0.0],
+        ])
+        feed = PositionFeed([
+            [40.0, 30.0, 0.0, 0.0],
+            [40.0, 30.0, 0.0, 0.0],
+        ])
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            get_position_fn=feed,
+            traj_dir=self.temp_dir.name,
+        )
+
+        self.assertFalse(recorder._playback_complete(2, 999.0, 1.0, target_q))
+        self.assertTrue(recorder._playback_timed_out(999.0, 1.0))
+
+    def test_timeout_flushes_motion_queue_when_dashboard_channel_exists(self):
+        dashboard_commands = []
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            dashboard_send_fn=dashboard_commands.append,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+
+        self.assertTrue(recorder._flush_motion_queue_after_timeout())
+        self.assertEqual(dashboard_commands, ["ResetRobot()", "EnableRobot()"])
+
     def test_segment_speed_j_scales_with_delta_over_time(self):
         recorder = TrajectoryRecorder(
             command_send_fn=lambda cmd: True,

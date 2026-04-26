@@ -42,7 +42,7 @@ JobStatus schema::
       "stage": "received|compiled|preview_started|executing|done|failed|stopped",
       "progress": 0.0..1.0,
       "message": "...",
-      "error_code": null | "BAD_PAYLOAD" | "EMPTY_TRAJECTORY" | "ROBOT_DISCONNECTED" | "EXECUTE_FORBIDDEN" | "ALREADY_PLAYING" | "EXPORT_FAILED" | "UNKNOWN_ACTION",
+      "error_code": null | "BAD_PAYLOAD" | "EMPTY_TRAJECTORY" | "ROBOT_DISCONNECTED" | "EXECUTE_FORBIDDEN" | "ALREADY_PLAYING" | "EXPORT_FAILED" | "UNKNOWN_ACTION" | "PLAYBACK_TIMEOUT" | "PLAYBACK_FAILED",
       "ros_time_sec": 1234.5,
       "metadata": {...}
     }
@@ -99,6 +99,8 @@ ERR_ALREADY_PLAYING = "ALREADY_PLAYING"
 ERR_EXPORT_FAILED = "EXPORT_FAILED"
 ERR_UNKNOWN_ACTION = "UNKNOWN_ACTION"
 ERR_TARGET_MISMATCH = "TARGET_MISMATCH"
+ERR_PLAYBACK_TIMEOUT = "PLAYBACK_TIMEOUT"
+ERR_PLAYBACK_FAILED = "PLAYBACK_FAILED"
 
 
 @dataclass(frozen=True)
@@ -247,6 +249,10 @@ class TeachJobHandler:
         self._allow_real_execute = allow_real_execute_fn or (lambda: True)
         self._accepted_targets = tuple(accepted_targets)
         self._time_fn = time_fn or time.time
+        self._active_execute_request: Optional[JobRequest] = None
+        add_event_cb = getattr(self._recorder, "add_playback_event_callback", None)
+        if callable(add_event_cb):
+            add_event_cb(self._handle_playback_event)
 
     # ── Public entry point ──────────────────────────────────────────────────
     def handle(self, json_str: str) -> JobStatus:
@@ -411,8 +417,10 @@ class TeachJobHandler:
                               "Real-robot execute denied (robot disconnected or gated)")
 
         try:
+            self._active_execute_request = request
             self._recorder.start_preview()
         except Exception as exc:
+            self._active_execute_request = None
             return self._fail(request, ERR_BAD_PAYLOAD, f"Playback start failed: {exc}")
 
         return self._succeed(
@@ -488,6 +496,54 @@ class TeachJobHandler:
             message=f"Recording stopped ({len(frames)} frames)",
             metadata={"frame_count": len(frames)},
         )
+
+    def _handle_playback_event(self, event_name: str, payload: Dict[str, Any]):
+        """Publish terminal job status when the recorder finishes playback."""
+        if event_name != "playback_complete" or self._active_execute_request is None:
+            return
+
+        request = self._active_execute_request
+        self._active_execute_request = None
+        metadata = dict(payload or {})
+        if metadata.get("stopped"):
+            self._emit(self._build_status(
+                job_id=request.job_id,
+                stage=STAGE_STOPPED,
+                message="Playback stopped",
+                action=request.action,
+                metadata=metadata,
+            ))
+            return
+
+        if metadata.get("timed_out"):
+            self._emit(self._build_status(
+                job_id=request.job_id,
+                stage=STAGE_FAILED,
+                message="Playback timed out before final target was reached",
+                error_code=ERR_PLAYBACK_TIMEOUT,
+                action=request.action,
+                metadata=metadata,
+            ))
+            return
+
+        if not metadata.get("success", False):
+            self._emit(self._build_status(
+                job_id=request.job_id,
+                stage=STAGE_FAILED,
+                message="Playback ended without confirmed final settle",
+                error_code=ERR_PLAYBACK_FAILED,
+                action=request.action,
+                metadata=metadata,
+            ))
+            return
+
+        self._emit(self._build_status(
+            job_id=request.job_id,
+            stage=STAGE_DONE,
+            message="Playback complete",
+            action=request.action,
+            metadata=metadata,
+        ))
 
     # ── Helpers ─────────────────────────────────────────────────────────────
     def _load_trajectory_or_fail(self, request: JobRequest) -> bool:

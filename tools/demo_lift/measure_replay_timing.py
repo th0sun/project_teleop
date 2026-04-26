@@ -429,11 +429,18 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
         (e for e in reversed(events.events) if e["event"] == "playback_complete"),
         {},
     )
+    playback_timed_out = bool(playback_complete.get("timed_out", False))
+    playback_success = bool(playback_complete.get("success", False))
     final_target = np.array([
         frames[-1]["j1"], frames[-1]["j2"], frames[-1]["j3"], frames[-1]["j4"]
     ], dtype=float)
     final_target_tool = target_tool_vectors[-1]
     return {
+        "status": "ok" if playback_success else (
+            "playback_timeout" if playback_timed_out else "playback_unsettled"
+        ),
+        "playback_success": playback_success,
+        "playback_timed_out": playback_timed_out,
         "sample_count": len(window),
         "post_settle_sample_count": max(0, len(post_window) - len(window)),
         "planned_duration_s": round(frames[-1]["timeStamp"] - frames[0]["timeStamp"], 3),
@@ -451,6 +458,8 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
         "completion_error_deg": [
             round(float(v), 4) for v in np.abs(completion_sample.q_actual_deg - final_target)
         ],
+        "completion_event_success": playback_complete.get("success"),
+        "completion_event_timed_out": playback_complete.get("timed_out"),
         "completion_event_error_deg": playback_complete.get("final_error_deg"),
         "final_error_deg": [
             round(float(v), 4) for v in np.abs(final_sample.q_actual_deg - final_target)
@@ -567,6 +576,8 @@ def main():
 
     print("\nReplay timing result")
     print(f"  status:              {result.get('status', 'ok')}")
+    print(f"  playback_success:    {result.get('playback_success')}")
+    print(f"  playback_timed_out:  {result.get('playback_timed_out')}")
     print(f"  trajectory:          {result['trajectory_name']}")
     print(f"  planned_duration_s:   {result['planned_duration_s']}")
     print(f"  measured_duration_s:  {result['measured_duration_s']}")
