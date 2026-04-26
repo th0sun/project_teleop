@@ -38,6 +38,7 @@ for _pkg in (
 from mg400_controller.common.trajectory.trajectory_recorder import (  # noqa: E402
     TrajectoryRecorder,
 )
+from mg400_controller.common.utils.kinematics import KinematicsCalculator  # noqa: E402
 from tcp_interface.realtime_packet import RealtimePacketType  # noqa: E402
 
 MOCK_IP = os.environ.get("MG400_MOCK_HOST", "172.10.0.2")
@@ -48,6 +49,7 @@ PKT_SIZE = np.dtype(RealtimePacketType).itemsize
 
 MODE_ENABLE = 5
 MODE_RUNNING = 7
+KINEMATICS = KinematicsCalculator()
 
 
 class Logger:
@@ -252,6 +254,42 @@ def _interp_target(frames: List[Dict], elapsed_s: float) -> np.ndarray:
     return np.array([np.interp(elapsed_s, t, q[:, axis]) for axis in range(4)])
 
 
+def _frame_tool_vectors(frames: List[Dict]) -> np.ndarray:
+    return np.array([
+        KINEMATICS.forward_kinematics([frame["j1"], frame["j2"], frame["j3"], frame["j4"]])
+        for frame in frames
+    ], dtype=float)
+
+
+def _interp_tool_target(frames: List[Dict], tool_vectors: np.ndarray, elapsed_s: float) -> np.ndarray:
+    t = np.array([f["timeStamp"] - frames[0]["timeStamp"] for f in frames], dtype=float)
+    elapsed_s = max(float(t[0]), min(float(t[-1]), elapsed_s))
+    return np.array([np.interp(elapsed_s, t, tool_vectors[:, axis]) for axis in range(tool_vectors.shape[1])])
+
+
+def _point_to_segment_distance(point: np.ndarray, start: np.ndarray, end: np.ndarray) -> float:
+    segment = end - start
+    denom = float(np.dot(segment, segment))
+    if denom <= 1e-12:
+        return float(np.linalg.norm(point - start))
+    alpha = float(np.dot(point - start, segment) / denom)
+    alpha = max(0.0, min(1.0, alpha))
+    projection = start + alpha * segment
+    return float(np.linalg.norm(point - projection))
+
+
+def _nearest_path_xyz_error(point_xyz: np.ndarray, target_tool_vectors: np.ndarray) -> float:
+    xyz_path = target_tool_vectors[:, :3]
+    if len(xyz_path) == 0:
+        return 0.0
+    if len(xyz_path) == 1:
+        return float(np.linalg.norm(point_xyz - xyz_path[0]))
+    return min(
+        _point_to_segment_distance(point_xyz, xyz_path[idx], xyz_path[idx + 1])
+        for idx in range(len(xyz_path) - 1)
+    )
+
+
 def _first_arrival_time(
     samples: List[FeedbackSample],
     start_t: float,
@@ -301,11 +339,36 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
     end_t = events.playback_complete_t or (start_t + frames[-1]["timeStamp"])
     window = [s for s in samples if start_t <= s.t <= end_t]
     post_window = [s for s in samples if s.t >= start_t]
+    target_tool_vectors = _frame_tool_vectors(frames)
     errors = []
+    xyz_errors = []
+    nearest_path_xyz_errors = []
+    yaw_errors = []
+    sample_rows = []
     for sample in window:
         elapsed = sample.t - start_t
         target = _interp_target(frames, elapsed)
-        errors.append(float(np.max(np.abs(sample.q_actual_deg - target))))
+        joint_error = float(np.max(np.abs(sample.q_actual_deg - target)))
+        errors.append(joint_error)
+        target_tool = _interp_tool_target(frames, target_tool_vectors, elapsed)
+        xyz_error = float(np.linalg.norm(sample.tool_vector_actual[:3] - target_tool[:3]))
+        path_dev = _nearest_path_xyz_error(sample.tool_vector_actual[:3], target_tool_vectors)
+        yaw_error = float(abs(sample.tool_vector_actual[3] - target_tool[3]))
+        xyz_errors.append(xyz_error)
+        nearest_path_xyz_errors.append(path_dev)
+        yaw_errors.append(yaw_error)
+        sample_rows.append({
+            "elapsed_s": round(float(elapsed), 4),
+            "robot_mode": int(sample.robot_mode),
+            "q_actual_deg": [round(float(v), 4) for v in sample.q_actual_deg],
+            "q_target_feedback_deg": [round(float(v), 4) for v in sample.q_target_deg],
+            "tool_actual": [round(float(v), 4) for v in sample.tool_vector_actual],
+            "tool_target_interp": [round(float(v), 4) for v in target_tool],
+            "joint_error_deg": round(joint_error, 4),
+            "xyz_error_mm": round(xyz_error, 4),
+            "path_dev_mm": round(path_dev, 4),
+            "yaw_error_deg": round(yaw_error, 4),
+        })
 
     waypoint_rows = []
     for idx, frame in enumerate(frames):
@@ -318,12 +381,32 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
             tolerance_deg=1.0,
             earliest_elapsed_s=max(0.0, target_t),
         )
+        target_tool = target_tool_vectors[idx]
+        hit_xyz_error = None
+        hit_yaw_error = None
+        if arrival is not None:
+            arrival_abs_t = start_t + arrival
+            arrival_sample = next(
+                (sample for sample in window if sample.t >= arrival_abs_t),
+                None,
+            )
+            if arrival_sample is not None:
+                hit_xyz_error = round(
+                    float(np.linalg.norm(arrival_sample.tool_vector_actual[:3] - target_tool[:3])),
+                    4,
+                )
+                hit_yaw_error = round(
+                    float(abs(arrival_sample.tool_vector_actual[3] - target_tool[3])),
+                    4,
+                )
         waypoint_rows.append({
             "index": idx,
             "target_time_s": round(target_t, 3),
             "arrival_time_s": None if arrival is None else round(arrival, 3),
             "timing_error_s": None if arrival is None else round(arrival - target_t, 3),
             "target_deg": [round(float(v), 3) for v in q],
+            "hit_xyz_error_mm": hit_xyz_error,
+            "hit_yaw_error_deg": hit_yaw_error,
         })
 
     command_rows = []
@@ -349,6 +432,7 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
     final_target = np.array([
         frames[-1]["j1"], frames[-1]["j2"], frames[-1]["j3"], frames[-1]["j4"]
     ], dtype=float)
+    final_target_tool = target_tool_vectors[-1]
     return {
         "sample_count": len(window),
         "post_settle_sample_count": max(0, len(post_window) - len(window)),
@@ -357,6 +441,13 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
         "post_settle_observed_s": round(max(0.0, final_sample.t - end_t), 3),
         "max_tracking_error_deg": round(max(errors) if errors else 0.0, 4),
         "mean_tracking_error_deg": round(float(np.mean(errors)) if errors else 0.0, 4),
+        "max_xyz_error_mm": round(max(xyz_errors) if xyz_errors else 0.0, 4),
+        "mean_xyz_error_mm": round(float(np.mean(xyz_errors)) if xyz_errors else 0.0, 4),
+        "rmse_xyz_error_mm": round(float(np.sqrt(np.mean(np.square(xyz_errors)))) if xyz_errors else 0.0, 4),
+        "max_nearest_path_xyz_error_mm": round(max(nearest_path_xyz_errors) if nearest_path_xyz_errors else 0.0, 4),
+        "mean_nearest_path_xyz_error_mm": round(float(np.mean(nearest_path_xyz_errors)) if nearest_path_xyz_errors else 0.0, 4),
+        "max_yaw_error_deg": round(max(yaw_errors) if yaw_errors else 0.0, 4),
+        "mean_yaw_error_deg": round(float(np.mean(yaw_errors)) if yaw_errors else 0.0, 4),
         "completion_error_deg": [
             round(float(v), 4) for v in np.abs(completion_sample.q_actual_deg - final_target)
         ],
@@ -366,6 +457,15 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
         ],
         "final_q_actual_deg": [round(float(v), 4) for v in final_sample.q_actual_deg],
         "final_target_deg": [round(float(v), 4) for v in final_target],
+        "final_xyz_error_mm": round(float(np.linalg.norm(final_sample.tool_vector_actual[:3] - final_target_tool[:3])), 4),
+        "final_yaw_error_deg": round(float(abs(final_sample.tool_vector_actual[3] - final_target_tool[3])), 4),
+        "final_tool_actual": [round(float(v), 4) for v in final_sample.tool_vector_actual],
+        "final_tool_target": [round(float(v), 4) for v in final_target_tool],
+        "target_tool_path": [
+            [round(float(v), 4) for v in tool]
+            for tool in target_tool_vectors
+        ],
+        "sample_rows": sample_rows,
         "waypoints": waypoint_rows,
         "commands": command_rows,
         "queued_waypoint_events": [
@@ -472,15 +572,25 @@ def main():
     print(f"  measured_duration_s:  {result['measured_duration_s']}")
     print(f"  post_settle_s:        {result['post_settle_observed_s']}")
     print(f"  samples:              {result['sample_count']}")
-    print(f"  max_error_deg:        {result['max_tracking_error_deg']}")
-    print(f"  mean_error_deg:       {result['mean_tracking_error_deg']}")
+    print(f"  max_joint_error_deg:  {result['max_tracking_error_deg']}")
+    print(f"  mean_joint_error_deg: {result['mean_tracking_error_deg']}")
+    print(f"  max_xyz_error_mm:     {result['max_xyz_error_mm']}")
+    print(f"  mean_xyz_error_mm:    {result['mean_xyz_error_mm']}")
+    print(f"  rmse_xyz_error_mm:    {result['rmse_xyz_error_mm']}")
+    print(f"  max_path_dev_mm:      {result['max_nearest_path_xyz_error_mm']}")
+    print(f"  mean_path_dev_mm:     {result['mean_nearest_path_xyz_error_mm']}")
+    print(f"  max_yaw_error_deg:    {result['max_yaw_error_deg']}")
+    print(f"  mean_yaw_error_deg:   {result['mean_yaw_error_deg']}")
     print(f"  completion_error_deg: {result['completion_error_deg']}")
     print(f"  final_error_deg:      {result['final_error_deg']}")
+    print(f"  final_xyz_error_mm:   {result['final_xyz_error_mm']}")
+    print(f"  final_yaw_error_deg:  {result['final_yaw_error_deg']}")
     print("\nWaypoint arrival timing (1 deg tolerance)")
     for row in result["waypoints"]:
         print(
             f"  #{row['index']} target={row['target_time_s']:>5}s "
             f"arrival={row['arrival_time_s']}s error={row['timing_error_s']}s "
+            f"xyz_hit={row['hit_xyz_error_mm']}mm yaw_hit={row['hit_yaw_error_deg']}deg "
             f"q={row['target_deg']}"
         )
     print("\nQueued waypoint events")
