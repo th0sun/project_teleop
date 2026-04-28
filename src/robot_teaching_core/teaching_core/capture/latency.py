@@ -36,6 +36,16 @@ class TargetLatencyCompensator:
         self._prev_target_t = None
         self._ema_target_vel = np.zeros(joint_count)
 
+    @property
+    def target_velocity(self) -> np.ndarray:
+        """Filtered target velocity in rad/s for the configured joint count."""
+        return self._ema_target_vel.copy()
+
+    @property
+    def target_speed(self) -> float:
+        """Max absolute filtered target velocity in rad/s."""
+        return float(np.max(np.abs(self._ema_target_vel)))
+
     def compensate(
         self,
         q_safe,

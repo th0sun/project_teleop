@@ -53,6 +53,7 @@ Current parameters:
 ```text
 DYNAMIC_PROXIMITY_BASE_RAD = 0.005
 DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25
+LIVE_TARGET_FAST_VELOCITY_RAD_S = 1.5
 ```
 
 The runtime still parses `QTarget`, `RunQueuedCmd`, and `CurrentCommandId` for
@@ -76,6 +77,7 @@ The chosen default strategy therefore focuses on:
 - letting `CP` blend only with naturally queued successor commands
 - overwriting intermediate hand targets with the newest target
 - sending only when the robot is near the previous accepted target
+- suppressing fast sweep-through targets until the operator's target slows
 - avoiding low-speed batch interpolation in production mode
 - using CP as a smoothness helper, not as the main control mechanism
 

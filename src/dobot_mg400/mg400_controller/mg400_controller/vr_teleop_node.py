@@ -761,6 +761,7 @@ class TeleopNode(Node):
                 now=now,
                 queue_backlog_rad=queue_backlog_rad,
                 run_queued_cmd=run_queued_cmd,
+                target_velocity=self.target_compensator.target_velocity,
             )
 
             if should_send:

@@ -20,6 +20,7 @@ from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import ( PROXIMITY_THRESHOLD,
      STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
     TARGET_CHANGE_THRESHOLD, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC,
+    LIVE_TARGET_FAST_VELOCITY_RAD_S,
 )
 
 class TeleopController:
@@ -86,7 +87,15 @@ class TeleopController:
             
         return False
 
-    def should_send_command(self, latest_target, q_current, now=None, queue_backlog_rad=None, run_queued_cmd=None):
+    def should_send_command(
+        self,
+        latest_target,
+        q_current,
+        now=None,
+        queue_backlog_rad=None,
+        run_queued_cmd=None,
+        target_velocity=None,
+    ):
         """
         The Core Decision Logic: Should we send a command?
 
@@ -98,6 +107,9 @@ class TeleopController:
                 pacing intentionally ignores it because real-world tests showed
                 queue-state gating can make live teleop follow old queue tails.
             run_queued_cmd: accepted for wiring compatibility; see above.
+            target_velocity: filtered Unity/VR target velocity in rad/s.  When
+                the operator is sweeping quickly, do not promote that passing
+                point into the MG400 FIFO queue.
         
         Returns:
             (bool, str): (Should Send?, Reason)
@@ -116,6 +128,9 @@ class TeleopController:
         # Calculate Distances
         dist_to_last = np.max(np.abs(q_current - self.last_sent_target))
         change_in_target = np.max(np.abs(latest_target - self.last_sent_target))
+        target_velocity_mag = 0.0
+        if target_velocity is not None:
+            target_velocity_mag = float(np.max(np.abs(target_velocity)))
 
         # ========================================================
         # 🚀 STRATEGY A: VELOCITY-BASED DYNAMIC PROXIMITY
@@ -127,6 +142,8 @@ class TeleopController:
         
         if dist_to_last < trigger_distance:
             if change_in_target > SPATIAL_THRESHOLD:
+                if target_velocity_mag > LIVE_TARGET_FAST_VELOCITY_RAD_S:
+                    return False, f"TargetMovingFast_Vel{target_velocity_mag:.3f}"
                 return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
         
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)

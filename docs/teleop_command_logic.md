@@ -97,6 +97,8 @@ the safer state handling added later:
 - keep only the newest Unity/VR target on the host side;
 - send as little as possible;
 - send only when the robot is physically near the previous accepted target;
+- defer sending while the Unity/VR target is sweeping very fast, so transient
+  hand positions do not become MG400 queued commands;
 - commit `last_sent_target` only after `sender.send(...)` succeeds;
 - never reintroduce timer-driven forced sends such as `RateFloor`.
 
@@ -106,7 +108,8 @@ Sending by time fills that queue with stale hand samples. A hard
 loyal to the previous queued target. The short-pipeline experiment also looked
 good in code but could still refill the FIFO with stale tail targets in live
 testing. The current compromise is latest-target coalescing plus dynamic
-proximity based on real robot position.
+proximity based on real robot position, with a target-stability gate for fast
+hand sweeps.
 
 ## Git History Around 2026-02-24
 
@@ -669,6 +672,7 @@ max(abs(QActual - last_sent_target)) < base + velocity * lookahead
 
 - `DYNAMIC_PROXIMITY_BASE_RAD = 0.005`
 - `DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25`
+- `LIVE_TARGET_FAST_VELOCITY_RAD_S = 1.5`
 - `TeleopController` no longer mutates `last_sent_target` inside
   `should_send_command()`. Send-state is now committed only after
   `sender.send(...)` succeeds, through `mark_command_sent(...)`.

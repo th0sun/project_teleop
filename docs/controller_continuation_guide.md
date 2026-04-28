@@ -151,6 +151,9 @@ Current behavior:
 - send only when the robot is physically near the previous accepted target
 - compute the send window from dynamic proximity:
   `base + robot_velocity * lookahead`
+- suppress sends while the filtered Unity/VR target velocity is above
+  `LIVE_TARGET_FAST_VELOCITY_RAD_S`; this prevents fast sweep-through samples
+  from entering the MG400 FIFO just before the operator stops
 - commit `last_sent_target` only after the motion socket accepts the command
   through `mark_command_sent(...)`
 - keep the existing stuck-recovery path for the case where the robot stops far

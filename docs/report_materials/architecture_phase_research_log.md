@@ -1518,10 +1518,14 @@ Current production policy:
 
 - `DYNAMIC_PROXIMITY_BASE_RAD = 0.005 rad`
 - `DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 s`
+- `LIVE_TARGET_FAST_VELOCITY_RAD_S = 1.5 rad/s`
 - `STUCK_TIME_THRESHOLD = 0.3 s`
 - `TARGET_CHANGE_THRESHOLD = 0.005 rad`
 - Queue-state feedback is still parsed and logged, but it is not the primary
   live-send gate.
+- Fast sweep-through Unity/VR targets are deferred until the filtered target
+  velocity drops, so the robot is less likely to execute one or two stale
+  sweep points after the operator stops.
 - Send-state is committed only after `sender.send(...)` succeeds via
   `mark_command_sent(...)`.
 

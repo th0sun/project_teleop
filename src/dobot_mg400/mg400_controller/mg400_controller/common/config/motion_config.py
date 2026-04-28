@@ -34,6 +34,7 @@ TARGET_CHANGE_THRESHOLD = 0.005  # rad (~0.3°) - Target ต้องเปล�
 # กำหนดค่าสำหรับ Dynamic Proximity
 DYNAMIC_PROXIMITY_BASE_RAD = 0.005   # rad (~0.3°) - 24/02-style base gate
 DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำหรับคำนวณระยะเพิ่มตามความเร็ว
+LIVE_TARGET_FAST_VELOCITY_RAD_S = 1.5 # rad/s - defer sends while hand target is sweeping fast
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection

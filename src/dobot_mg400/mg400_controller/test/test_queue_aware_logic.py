@@ -109,6 +109,31 @@ class QueueAwareLogicTest(unittest.TestCase):
         self.assertTrue(should_send)
         self.assertTrue(reason.startswith("DynProx_"))
 
+    def test_dynamic_proximity_defers_fast_sweeping_target(self):
+        controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
+        controller.last_sent_target = np.zeros(4)
+        controller.robot_velocity = np.zeros(4)
+
+        should_send, reason = controller.should_send_command(
+            np.array([0.08, 0.0, 0.0, 0.0]),
+            np.array([0.001, 0.0, 0.0, 0.0]),
+            now=10.0,
+            target_velocity=np.array([2.0, 0.0, 0.0, 0.0]),
+        )
+
+        self.assertFalse(should_send)
+        self.assertTrue(reason.startswith("TargetMovingFast_"))
+
+        should_send, reason = controller.should_send_command(
+            np.array([0.08, 0.0, 0.0, 0.0]),
+            np.array([0.001, 0.0, 0.0, 0.0]),
+            now=10.1,
+            target_velocity=np.array([0.1, 0.0, 0.0, 0.0]),
+        )
+
+        self.assertTrue(should_send)
+        self.assertTrue(reason.startswith("DynProx_"))
+
     def test_dynamic_proximity_does_not_send_while_robot_is_far_from_last_target(self):
         controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
         controller.last_sent_target = np.zeros(4)

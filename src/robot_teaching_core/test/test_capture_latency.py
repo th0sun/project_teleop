@@ -26,6 +26,8 @@ class TargetLatencyCompensatorTest(unittest.TestCase):
 
         self.assertTrue(np.allclose(first, q0))
         self.assertAlmostEqual(second[0], 0.124)
+        self.assertAlmostEqual(compensator.target_velocity[0], 0.3)
+        self.assertAlmostEqual(compensator.target_speed, 0.3)
 
     def test_joint_count_is_configurable_for_non_mg400_adapters(self):
         compensator = TargetLatencyCompensator(DummyValidator(), joint_count=6)
