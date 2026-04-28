@@ -5,7 +5,13 @@
 # ==========================================
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WS="$(cd "$REPO_DIR/.." && pwd)"
+if [ -f "$REPO_DIR/install/setup.bash" ]; then
+    # Repo checked out directly as the colcon workspace root.
+    WS="$REPO_DIR"
+else
+    # Repo checked out inside a parent colcon workspace.
+    WS="$(cd "$REPO_DIR/.." && pwd)"
+fi
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 ROS_SETUP="${ROS_SETUP:-/opt/ros/$ROS_DISTRO/setup.bash}"
 
