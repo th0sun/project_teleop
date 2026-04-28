@@ -105,7 +105,7 @@ class TeleopNode(Node):
 
         # Level 3: RTT Heartbeat (ROS-side ping)
         self.topics = declare_topic_parameters(self)
-        self.publishers = create_publishers(self, topics=self.topics)
+        self.ros_publishers = create_publishers(self, topics=self.topics)
         self.create_timer(1.0, self._publish_heartbeat) # 1Hz Ping
 
         # --- Analytics Logging (Async) ---
@@ -151,7 +151,7 @@ class TeleopNode(Node):
         )
 
         # Subscriptions (Delayed UNITY to avoid race condition)
-        self.subscriptions = create_subscriptions(
+        self.ros_subscriptions = create_subscriptions(
             self,
             unity_pong_callback=self._unity_pong_callback,
             suction_callback=self._suction_callback,
@@ -181,7 +181,7 @@ class TeleopNode(Node):
         # PASS FEEDBACK HANDLER TO SENDER FOR SYNC
         self.feedback = FeedbackHandler(
             self.connection,
-            self.publishers.rviz,
+            self.ros_publishers.rviz,
             self.get_clock(),
             self.get_logger(),
             self.stop_event
@@ -198,7 +198,7 @@ class TeleopNode(Node):
             self.get_logger().info("⚠️  ErrorHandler disabled (set ENABLE_GET_ERROR=True for real robot)")
 
         # Collision-based Haptic Feedback for Quest 3 VR
-        self.collision_haptic = CollisionHaptic(self.publishers.haptic, self.get_logger())
+        self.collision_haptic = CollisionHaptic(self.ros_publishers.haptic, self.get_logger())
 
         # Trajectory Recorder (teach-and-repeat sequencer)
         self.trajectory_recorder = TrajectoryRecorder(
@@ -217,10 +217,10 @@ class TeleopNode(Node):
         # go to /teach/job_status and /teach/job_artifact.
         self.teach_job_handler = TeachJobHandler(
             recorder=self.trajectory_recorder,
-            publish_status_fn=lambda payload: self.publishers.teach_job_status.publish(
+            publish_status_fn=lambda payload: self.ros_publishers.teach_job_status.publish(
                 String(data=payload)
             ),
-            publish_artifact_fn=lambda payload: self.publishers.teach_job_artifact.publish(
+            publish_artifact_fn=lambda payload: self.ros_publishers.teach_job_artifact.publish(
                 String(data=payload)
             ),
             logger=self.get_logger(),
@@ -235,13 +235,13 @@ class TeleopNode(Node):
 
 
         # 5. Initialize Helpers
-        self.safety_monitor = SafetyMonitor(self.publishers.safety, self.get_logger(), self.error_handler)
+        self.safety_monitor = SafetyMonitor(self.ros_publishers.safety, self.get_logger(), self.error_handler)
 
         # 6. Start Threads
         self.feedback.start()
 
         # 5. Start Unity Subscriber (End of init to prevent race condition)
-        self.subscriptions.unity = attach_unity_subscription(
+        self.ros_subscriptions.unity = attach_unity_subscription(
             self,
             self._unity_callback,
             qos_profile,
@@ -276,7 +276,7 @@ class TeleopNode(Node):
         """Level 3: Send Ping to Unity to measure RTT"""
         msg = Int64()
         msg.data = int(self.get_clock().now().nanoseconds)
-        self.publishers.heartbeat.publish(msg)
+        self.ros_publishers.heartbeat.publish(msg)
 
     def _unity_pong_callback(self, msg):
         """
@@ -346,7 +346,7 @@ class TeleopNode(Node):
                 unity_xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_safe))
                 xyz_msg = Float64MultiArray()
                 xyz_msg.data = unity_xyz.tolist()
-                self.publishers.unity_xyz.publish(xyz_msg)
+                self.ros_publishers.unity_xyz.publish(xyz_msg)
             except Exception:
                 pass
 
@@ -479,7 +479,7 @@ class TeleopNode(Node):
                     "q": [[f["j1"], f["j2"], f["j3"], f["j4"]] for f in tr.loaded_frames]
                 }
                 pmsg = String(); pmsg.data = json.dumps(preview)
-                self.publishers.traj_preview.publish(pmsg)
+                self.ros_publishers.traj_preview.publish(pmsg)
             tr.start_preview()
         else:
             self.get_logger().warn(f"⚠️ Unknown teach status: {status}")
@@ -517,7 +517,7 @@ class TeleopNode(Node):
                 "q": [[f["j1"], f["j2"], f["j3"], f["j4"]] for f in frames]
             }
             pmsg = String(); pmsg.data = json.dumps(preview)
-            self.publishers.traj_preview.publish(pmsg)
+            self.ros_publishers.traj_preview.publish(pmsg)
             self.get_logger().info(
                 f"🎓 Unity JointTrajectory received: {len(frames)} points, "
                 f"{frames[-1]['timeStamp'] - frames[0]['timeStamp']:.2f}s; starting playback"
@@ -545,7 +545,7 @@ class TeleopNode(Node):
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.position = list(q_rad)
-        self.publishers.sent_command.publish(js)
+        self.ros_publishers.sent_command.publish(js)
 
     def _playback_target_callback(self, q_rad):
         """Called by TrajectoryRecorder at ~100Hz with the perfectly interpolated
@@ -556,13 +556,13 @@ class TeleopNode(Node):
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.position = list(q_rad)
-        self.publishers.playback_unity.publish(js)
+        self.ros_publishers.playback_unity.publish(js)
 
         try:
             xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_rad))
             xyz_msg = Float64MultiArray()
             xyz_msg.data = xyz.tolist()
-            self.publishers.unity_xyz.publish(xyz_msg)
+            self.ros_publishers.unity_xyz.publish(xyz_msg)
         except Exception:
             pass
 
@@ -643,23 +643,23 @@ class TeleopNode(Node):
 
             msg_act = Float64MultiArray()
             msg_act.data = tool_act.tolist()
-            self.publishers.tool_actual.publish(msg_act)
+            self.ros_publishers.tool_actual.publish(msg_act)
 
             msg_tgt = Float64MultiArray()
             msg_tgt.data = tool_tgt.tolist()
-            self.publishers.tool_target.publish(msg_tgt)
+            self.ros_publishers.tool_target.publish(msg_tgt)
 
             # Flange actual = FK of actual joints (no tool offset)
             flange = self.feedback.get_flange_actual()
             msg_flange = Float64MultiArray()
             msg_flange.data = flange.tolist()
-            self.publishers.flange_actual.publish(msg_flange)
+            self.ros_publishers.flange_actual.publish(msg_flange)
 
             # === PUBLISH DO STATUS (Bitmask) ===
             do_status = self.feedback.get_do_status()
             do_msg = Int64()
             do_msg.data = int(do_status)
-            self.publishers.do_status.publish(do_msg)
+            self.ros_publishers.do_status.publish(do_msg)
 
             if do_status != self.last_do_status:
                 self.get_logger().info(f"📣 DO STATUS CHANGED: {bin(do_status)} (Hex: {hex(do_status)})")
@@ -669,12 +669,12 @@ class TeleopNode(Node):
             current_mode = int(self.feedback.get_robot_mode())
             mode_msg = Int32()
             mode_msg.data = current_mode
-            self.publishers.robot_mode.publish(mode_msg)
+            self.ros_publishers.robot_mode.publish(mode_msg)
 
             err_info = self.feedback.get_error_status()
             err_msg = Int32()
             err_msg.data = int(err_info['error_status'])
-            self.publishers.error_status.publish(err_msg)
+            self.ros_publishers.error_status.publish(err_msg)
 
             # === PERIODIC TOOL INDEX QUERY (every ~5s at 50Hz = 250 cycles) ===
             self._tool_query_counter += 1
@@ -689,7 +689,7 @@ class TeleopNode(Node):
                             tidx = int(m.group(1))
                             ti_msg = Int32()
                             ti_msg.data = tidx
-                            self.publishers.tool_index.publish(ti_msg)
+                            self.ros_publishers.tool_index.publish(ti_msg)
                 except Exception:
                     pass
 
@@ -823,7 +823,7 @@ class TeleopNode(Node):
                     sent_msg = JointState()
                     sent_msg.header.stamp = self.get_clock().now().to_msg()
                     sent_msg.position = q_safe.tolist()
-                    self.publishers.sent_command.publish(sent_msg)
+                    self.ros_publishers.sent_command.publish(sent_msg)
 
                     # Update State in Controller
                     self.controller.mark_command_sent(q_safe, sent_mono)

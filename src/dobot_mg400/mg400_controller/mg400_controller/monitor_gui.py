@@ -74,7 +74,7 @@ class JointMonitorNode(Node):
         self.topics = declare_topic_parameters(self)
         self.control_publishers = create_control_publishers(self, topics=self.topics)
         self.telemetry = MonitorTelemetryState()
-        self.subscriptions = create_monitor_subscriptions(self, self.telemetry, topics=self.topics)
+        self.ros_subscriptions = create_monitor_subscriptions(self, self.telemetry, topics=self.topics)
 
     def request_suction(self, state):
         msg = Bool()
