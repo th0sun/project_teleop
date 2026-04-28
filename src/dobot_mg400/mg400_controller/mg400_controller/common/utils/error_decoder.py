@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
-import os
-import rospkg
+from pathlib import Path
 
 class RobotErrorDecoder:
     def __init__(self):
@@ -14,27 +13,34 @@ class RobotErrorDecoder:
     def _load_alarm_files(self):
         """Load alarm JSON files from config directory (ROS2 compatible)"""
         try:
-            from ament_index_python.packages import get_package_share_directory
-            
-            # ROS2 Share directory path (when built)
-            try:
-                package_path = get_package_share_directory('mg400_controller')
-                config_path = os.path.join(package_path, 'common', 'config')
-            except Exception:
-                # Fallback to absolute path for dev environment
-                config_path = "/Users/thesun/project_teleop_ws/project_teleop/src/dobot_mg400/mg400_controller/mg400_controller/common/config"
-            
-            controller_file = os.path.join(config_path, 'alarmController.json')
-            servo_file = os.path.join(config_path, 'alarmServo.json')
+            config_path = None
 
-            if os.path.exists(controller_file):
-                with open(controller_file, 'r', encoding='utf-8') as f:
+            # ROS2 share directory path when installed by colcon.
+            try:
+                from ament_index_python.packages import get_package_share_directory
+
+                package_path = get_package_share_directory('mg400_controller')
+                candidate = Path(package_path) / 'common' / 'config'
+                if candidate.exists():
+                    config_path = candidate
+            except Exception:
+                pass
+
+            # Source-tree fallback for tests/dev runs without installed package data.
+            if config_path is None:
+                config_path = Path(__file__).resolve().parents[1] / 'config'
+            
+            controller_file = config_path / 'alarmController.json'
+            servo_file = config_path / 'alarmServo.json'
+
+            if controller_file.exists():
+                with controller_file.open('r', encoding='utf-8') as f:
                     self.alarm_controller = json.load(f)
             else:
                 print(f"File not found: {controller_file}")
             
-            if os.path.exists(servo_file):
-                with open(servo_file, 'r', encoding='utf-8') as f:
+            if servo_file.exists():
+                with servo_file.open('r', encoding='utf-8') as f:
                     self.alarm_servo = json.load(f)
             else:
                 print(f"File not found: {servo_file}")
@@ -47,6 +53,13 @@ class RobotErrorDecoder:
         Find error description by ID
         Returns: (Description_EN, Cause_EN, Solution_EN)
         """
+        if int(error_id) == -2:
+            return (
+                "Collision detection alarm",
+                "Robot reported collision detection through GetErrorID().",
+                "Check the robot path and surrounding fixture, then clear the alarm after the collision cause is removed.",
+            )
+
         # Check Controller Alarms
         for alarm in self.alarm_controller:
             if alarm['id'] == error_id:

@@ -67,7 +67,7 @@ class ErrorHandler:
                 # Extract all numbers from the arrays
                 import re
                 nums = re.findall(r'-?\d+', content)
-                error_ids = [int(n) for n in nums if int(n) > 0] # Ignore 0 (no error) and -2 (collision placeholder)
+                error_ids = [int(n) for n in nums if int(n) != 0]
                 
                 if not error_ids:
                     return []
@@ -78,12 +78,13 @@ class ErrorHandler:
                 
                 parsed_errors = []
                 for eid in set(error_ids):
-                    desc, sol, _ = decoder.decode_error(eid)
+                    desc, cause, solution = decoder.decode_error(eid)
                     parsed_errors.append({
                         'id': eid,
                         'level': 2, # Assume error
                         'description': desc,
-                        'solution': sol,
+                        'cause': cause,
+                        'solution': solution,
                         'mode': 9,
                         'date': '',
                         'time': ''
