@@ -71,13 +71,14 @@ class DummyConnection:
 
 
 class QueueAwareLogicTest(unittest.TestCase):
-    def test_queue_backlog_blocks_default_send_until_queue_is_shallow(self):
+    def test_short_pipeline_fills_only_to_the_configured_tail_depth(self):
         controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
         controller.last_sent_target = np.zeros(4)
-        controller.last_sent_time = 123.0
+        controller.queue_tail_target = np.zeros(4)
+        controller.pipeline_depth = 1
 
+        q_current = np.array([0.03, 0.0, 0.0, 0.0])
         latest_target = np.array([0.05, 0.0, 0.0, 0.0])
-        q_current = np.zeros(4)
 
         should_send, reason = controller.should_send_command(
             latest_target,
@@ -86,28 +87,45 @@ class QueueAwareLogicTest(unittest.TestCase):
             queue_backlog_rad=0.02,
             run_queued_cmd=1,
         )
-        self.assertFalse(should_send)
-        self.assertTrue(reason.startswith("QueueBusy_Backlog"))
-        self.assertTrue(np.allclose(controller.last_sent_target, np.zeros(4)))
+        self.assertTrue(should_send)
+        self.assertTrue(reason.startswith("PipelineFill_"))
 
+        controller.mark_command_sent(latest_target, 10.0)
+        self.assertEqual(controller.pipeline_depth, 2)
+
+        next_target = np.array([0.09, 0.0, 0.0, 0.0])
         should_send, reason = controller.should_send_command(
-            latest_target,
+            next_target,
             q_current,
-            now=10.0,
-            queue_backlog_rad=0.0,
+            now=10.01,
+            queue_backlog_rad=0.05,
             run_queued_cmd=1,
         )
-        self.assertTrue(should_send)
-        self.assertTrue(reason.startswith("DynProx_"))
+        self.assertFalse(should_send)
+        self.assertTrue(reason.startswith("PipelineFull_"))
 
-        controller.mark_command_sent(latest_target, 456.0)
-        self.assertTrue(np.allclose(controller.last_sent_target, latest_target))
-        self.assertEqual(controller.last_sent_time, 456.0)
-        self.assertEqual(controller.queue_busy_start_time, 0)
+    def test_short_pipeline_does_not_send_when_latest_target_matches_tail(self):
+        controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
+        controller.last_sent_target = np.zeros(4)
+        controller.queue_tail_target = np.array([0.05, 0.0, 0.0, 0.0])
+        controller.pipeline_depth = 1
 
-    def test_queue_busy_escape_allows_stuck_recovery_when_robot_stops(self):
+        should_send, reason = controller.should_send_command(
+            np.array([0.055, 0.0, 0.0, 0.0]),
+            np.array([0.02, 0.0, 0.0, 0.0]),
+            now=10.0,
+            queue_backlog_rad=0.03,
+            run_queued_cmd=1,
+        )
+
+        self.assertFalse(should_send)
+        self.assertTrue(reason.startswith("TailSimilar_"))
+
+    def test_short_pipeline_full_allows_stuck_recovery_when_robot_stops(self):
         controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
         controller.last_sent_target = np.array([0.2, 0.0, 0.0, 0.0])
+        controller.queue_tail_target = np.array([0.2, 0.0, 0.0, 0.0])
+        controller.pipeline_depth = 2
         controller.robot_velocity = np.zeros(4)
 
         q_current = np.zeros(4)
@@ -121,7 +139,7 @@ class QueueAwareLogicTest(unittest.TestCase):
             run_queued_cmd=1,
         )
         self.assertFalse(should_send)
-        self.assertTrue(reason.startswith("QueueBusy_Backlog"))
+        self.assertTrue(reason.startswith("PipelineFull_"))
 
         should_send, reason = controller.should_send_command(
             latest_target,
@@ -143,9 +161,11 @@ class QueueAwareLogicTest(unittest.TestCase):
         self.assertTrue(should_send)
         self.assertTrue(reason.startswith("Stuck_"))
 
-    def test_queue_busy_escape_does_not_open_while_robot_is_moving(self):
+    def test_short_pipeline_full_stays_closed_while_robot_is_moving(self):
         controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
         controller.last_sent_target = np.array([0.2, 0.0, 0.0, 0.0])
+        controller.queue_tail_target = np.array([0.2, 0.0, 0.0, 0.0])
+        controller.pipeline_depth = 2
         controller.robot_velocity = np.array([0.02, 0.0, 0.0, 0.0])
 
         q_current = np.zeros(4)
@@ -166,7 +186,7 @@ class QueueAwareLogicTest(unittest.TestCase):
             run_queued_cmd=1,
         )
         self.assertFalse(should_send)
-        self.assertTrue(reason.startswith("QueueBusy_Backlog"))
+        self.assertTrue(reason.startswith("PipelineFull_"))
 
     def test_feedback_handler_parses_queue_target_and_running_state(self):
         handler = FeedbackHandler(
@@ -221,7 +241,7 @@ class QueueAwareLogicTest(unittest.TestCase):
         )
 
         self.assertTrue(should_send)
-        self.assertTrue(reason.startswith("DynProx_"))
+        self.assertTrue(reason.startswith("PipelineFill_"))
         self.assertEqual(controller.last_robot_time, prev_last_robot_time)
         self.assertTrue(np.allclose(controller.robot_velocity, prev_velocity))
 

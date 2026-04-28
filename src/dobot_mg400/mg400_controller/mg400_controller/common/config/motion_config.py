@@ -37,6 +37,16 @@ DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำห�
 QUEUE_BACKLOG_GATE_RAD = 0.01          # rad (~0.57°) - queue must nearly drain before sending next motion
 QUEUE_BUSY_ESCAPE_SEC = 0.30           # seconds - allow stuck recovery if queue state stays busy while motion stops
 
+# Realtime queue policy.
+#
+# short_pipeline keeps only a tiny rolling horizon in the MG400 controller:
+# current command + one queued tail target.  Unity/VR may publish much faster,
+# but ROS coalesces that stream into the latest useful tail target instead of
+# pushing every sample into the robot FIFO queue.
+REALTIME_PIPELINE_TARGET = 2            # active + next; enough for CP without long lag
+REALTIME_PIPELINE_MAX = 2               # hard cap for host-side estimated queue depth
+REALTIME_TAIL_CHANGE_RAD = 0.01         # latest target must differ from queued tail
+
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection
                                  # Analysis: 69% @ 0.003, 95%+ @ 0.002

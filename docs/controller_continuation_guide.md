@@ -143,22 +143,33 @@ Important contract:
   motion command is actually accepted/sent successfully.
 - `last_sent_time` inside `TeleopController` is monotonic loop time.
 
-## Queue-Aware Default Logic
+## Short-Pipeline Queue Logic
 
 Current behavior:
 
-- if `RunQueuedCmd == 1` and backlog is above `QUEUE_BACKLOG_GATE_RAD`,
-  block new sends
+- keep a tiny rolling robot queue, normally current command + one queued tail
+  target (`REALTIME_PIPELINE_TARGET = 2`)
+- coalesce fast Unity/VR samples on the host side and send only the newest
+  meaningful tail target (`REALTIME_TAIL_CHANGE_RAD`)
+- if the short pipeline is full, hold new sends instead of adding stale hand
+  samples to the MG400 FIFO queue
+- when the robot reaches the queued tail/blend window, refill with the newest
+  target currently known by ROS
 - if queue stays busy but robot velocity remains below
   `STUCK_VELOCITY_THRESHOLD` longer than `QUEUE_BUSY_ESCAPE_SEC`, allow the
   normal stuck-recovery path to run
-- once a send succeeds, reset stuck and queue-busy timers
+- once a send succeeds, advance the host-side pipeline estimate with
+  `mark_command_sent(...)`
 
 Why this matters:
 
 - MG400 follows queued motion commands serially
 - overfeeding the queue makes the robot chase old targets instead of the latest
   hand target
+- a hard `queue busy -> block` gate feels too loyal to the previous target
+- a fixed time-based send floor reintroduces queue buildup
+- CP needs at least one successor command to blend into, so the runtime keeps a
+  short 2-command pipeline instead of draining to zero every time
 - blocking forever is also wrong, so the stuck escape path must remain intact
 
 ## Mock Versus Real Robot

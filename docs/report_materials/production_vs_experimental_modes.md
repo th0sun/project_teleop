@@ -36,26 +36,35 @@ The important design choice is that the system keeps only the newest useful
 target from the operator and avoids filling the robot's internal motion queue
 with old intermediate targets.
 
-## Queue-Aware Default Logic
+## Short-Pipeline Queue Logic
 
 The production controller uses robot feedback to avoid sending too many queued
-commands:
+commands while still giving `CP` a next command to blend into.
 
 ```text
 queue_backlog = max(abs(QTarget[:4] - QActual[:4]))
 ```
 
-If:
+The runtime keeps a tiny rolling horizon:
 
 ```text
-RunQueuedCmd == 1
-and queue_backlog > QUEUE_BACKLOG_GATE_RAD
+current command + next queued tail target
 ```
 
-the controller waits instead of sending another command.
+Unity/VR may publish targets much faster than the robot can execute them.  ROS
+therefore keeps only the latest target on the host side and sends it only when
+the short pipeline has capacity or the previous tail target is nearly consumed.
+
+Default parameters:
+
+```text
+REALTIME_PIPELINE_TARGET = 2
+REALTIME_PIPELINE_MAX = 2
+REALTIME_TAIL_CHANGE_RAD = 0.01
+```
 
 To avoid waiting forever when the robot is stuck or feedback state remains busy,
-the controller also has an escape hatch:
+the controller still has an escape hatch:
 
 ```text
 QUEUE_BUSY_ESCAPE_SEC = 0.30
@@ -76,10 +85,31 @@ fast as possible." Sending too fast makes the robot follow old hand positions.
 The chosen default strategy therefore focuses on:
 
 - keeping the queue shallow
+- keeping enough queued work for `CP` to blend
 - overwriting intermediate hand targets with the newest target
-- sending one motion command at a time
+- sending only when the short pipeline has capacity
 - avoiding low-speed batch interpolation in production mode
 - using CP as a smoothness helper, not as the main control mechanism
+
+## Lesson Learned: Do Not Reintroduce Time-Based Sends
+
+Earlier experiments added a fixed `RateFloor` to force command sends on a
+timer.  That felt responsive in some cases but violated the production rule:
+the robot should not receive old hand samples just because a clock tick fired.
+For MG400 TCP, every extra motion command enters a FIFO controller queue.  A
+time floor can therefore make the robot chase stale targets.
+
+The final realtime rule is:
+
+```text
+send as little as possible, but keep a 2-command pipeline alive for CP
+```
+
+This replaced the older drain-gate-only behavior because a hard
+`queue busy -> block` rule made the robot too loyal to its previous target.
+Short-pipeline coalescing is the middle ground: it feeds just enough future
+motion for blending while still discarding intermediate Unity samples before
+they become robot queue entries.
 
 ## Archived Experimental Modes
 

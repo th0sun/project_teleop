@@ -1487,3 +1487,42 @@ Action taken:
   while preserving their subfolder layout.
 - Kept source files, tests, mock extension code, and markdown notes in the repo
   so they can still be reviewed and committed intentionally.
+
+### 2026-04-29 Follow-up — Realtime Short-Pipeline Lesson
+
+Decision:
+
+- Replace the realtime `queue busy -> block` runtime behavior with a single
+  production short-pipeline policy.
+- Do not keep a runtime mode switch between the old drain gate and the new
+  pipeline behavior.  The old behavior made debugging ambiguous and did not
+  match the desired live-control feel.
+
+Lesson learned:
+
+- A fixed `RateFloor` or any timer-driven forced send is the wrong abstraction
+  for MG400 live teleop.  It can feel responsive briefly, but it sends old hand
+  samples just because a clock fired, which fills the MG400 FIFO motion queue.
+- A hard drain gate is also too conservative: when `RunQueuedCmd` stays active,
+  it can make the robot keep honoring the previous target and ignore useful
+  latest-target updates for too long.
+- The desired realtime behavior is **coalescing with a tiny rolling horizon**:
+  keep only the newest host-side target, send as little as possible, but keep
+  enough queued work for `CP` to blend.
+
+Current production policy:
+
+- `REALTIME_PIPELINE_TARGET = 2`
+- `REALTIME_PIPELINE_MAX = 2`
+- `REALTIME_TAIL_CHANGE_RAD = 0.01 rad`
+- Host-side meaning: current command plus one queued tail target.
+- Unity/VR can publish faster than the robot can execute, but ROS only promotes
+  the latest useful target into the robot queue when the short pipeline has
+  capacity or the previous tail is effectively consumed.
+
+Why this matters for the report/demo:
+
+- The project is not claiming hard realtime servo control through Dobot TCP.
+- The production strategy is best-effort live control over a queued controller:
+  avoid stale queue buildup, preserve `CP` blending opportunity, and keep the
+  operator-facing target as fresh as the MG400 queue model allows.

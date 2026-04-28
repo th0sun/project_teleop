@@ -89,6 +89,22 @@ The selected value is stored in `robot_config.CONTROL_MODE`.
 The production logic path uses `latest_target`, which is latency-compensated in
 `_unity_callback()`, then paced by `TeleopController`.
 
+## Current Decision Snapshot
+
+The production realtime policy is now a short MG400 command pipeline:
+
+- keep only the newest Unity/VR target on the host side;
+- send as little as possible;
+- keep a two-command rolling horizon so `CP` still has a following command to
+  blend into;
+- never reintroduce timer-driven forced sends such as `RateFloor`.
+
+The reason is practical: MG400 TCP motion commands are queued by the controller.
+Sending by time fills that queue with stale hand samples. A hard
+`queue busy -> block` rule goes too far the other way and makes the robot too
+loyal to the previous queued target. The current compromise is latest-target
+coalescing plus a tiny CP-friendly queue.
+
 ## Git History Around 2026-02-24
 
 Checked commit:
@@ -311,9 +327,9 @@ Good parts for latest-target behavior:
 - feedback thread discards stale feedback packets and keeps only the latest
   1440-byte packet.
 
-Current risks that can still grow queue unnecessarily:
+Historical risks found before the 2026-04-29 short-pipeline change:
 
-### 1. Send gating does not use queue-state feedback
+### 1. Earlier send gating did not use queue-state feedback
 
 The project receives feedback fields corresponding to queue state and target
 state, such as:
@@ -323,21 +339,21 @@ state, such as:
 - `QActual`
 - `CurrentCommandId`
 
-But current default logic only gates on:
+Before the queue-aware pass, default logic only gated on:
 
 - `q_current` vs `last_sent_target`
 - `latest_target` vs `last_sent_target`
 - estimated robot velocity
 
-It does not check whether the robot still has queued motion pending.
+It did not check whether the robot still had queued motion pending.
 
-That means a new command can be sent while the robot is still effectively
+That meant a new command could be sent while the robot was still effectively
 chasing previously queued motion, as long as the local proximity heuristic says
 "close enough".
 
 ### 2. Dynamic proximity is based on actual position, not queue target
 
-Current gate:
+Earlier gate:
 
 ```text
 dist_to_last = max(abs(q_current - last_sent_target))
@@ -357,9 +373,9 @@ or a boolean queue-running signal such as `RunQueuedCmd`.
 Without those signals, the controller may keep feeding commands based on where
 the robot body is, instead of where the internal queue target already is.
 
-### 3. Wider dynamic base makes sending easier
+### 3. Wider dynamic base made sending easier
 
-Current:
+At the time of that analysis:
 
 - `DYNAMIC_PROXIMITY_BASE_RAD = 0.02` rad, about `1.1` degrees
 
@@ -372,7 +388,7 @@ the next queued command before the previous one is fully "drained".
 
 ### 4. CP=100 increases blending and can hide queue buildup
 
-`CP=100` is good for continuous motion, but it also means the robot will
+`CP=100` is good for continuous motion, but it also means the robot can
 transition aggressively between queued targets.
 
 That helps smoothness, but it can make it less obvious from `q_current` alone
@@ -380,14 +396,15 @@ how many future targets are already waiting.
 
 ### 5. Send-state is updated before send success is confirmed
 
-`TeleopController.should_send_command()` updates `last_sent_target` and
-`last_sent_time` before the code actually confirms `sender.send(...)` success.
+Earlier `TeleopController.should_send_command()` updated `last_sent_target` and
+`last_sent_time` before the code confirmed `sender.send(...)` success.
 
-If motion send fails, local controller state can temporarily believe a command
+If motion send failed, local controller state could temporarily believe a command
 was accepted when the robot never received it.
 
-This is not only a reliability issue; it also weakens queue reasoning because
-local "last sent" state can drift away from real robot queue state.
+That was not only a reliability issue; it also weakened queue reasoning because
+local "last sent" state could drift away from real robot queue state. Current
+code commits send state through `mark_command_sent(...)` after send success.
 
 ## Why The 6-Axis API File Is Not The Main Constraint
 
@@ -624,26 +641,29 @@ Why this is the best balance:
 
 If we want one sentence:
 
-- the best default design is "latest-target overwrite plus queue-backlog gate"
-  rather than "send faster" or "send more micro-steps"
+- the best default design is "latest-target overwrite plus a short
+  CP-friendly command pipeline" rather than "send faster" or "send more
+  micro-steps"
 
 ## Implemented On 2026-04-24
 
-The current branch now implements the first pass of Option B:
+The 2026-04-24 first pass implemented Option B.  On 2026-04-29 the runtime was
+tightened into a short-pipeline policy because the binary drain gate felt too
+loyal to the previous target during live control.
 
 - `FeedbackHandler` parses `QTarget`, `RunQueuedCmd`, and exposes
   `get_target_position()`, `get_queue_backlog()`, and `get_run_queued_cmd()`.
 - default mode now passes queue-state feedback into
   `TeleopController.should_send_command(...)`.
-- default mode blocks new sends with reason
-  `QueueBusy_Backlog...` when:
+- default mode coalesces Unity/VR samples into a tiny rolling MG400 pipeline:
 
 ```text
-RunQueuedCmd == 1
-and
-max(abs(QTarget[:4] - QActual[:4])) > QUEUE_BACKLOG_GATE_RAD
+current command + next queued tail target
 ```
 
+- `REALTIME_PIPELINE_TARGET = 2`
+- `REALTIME_PIPELINE_MAX = 2`
+- `REALTIME_TAIL_CHANGE_RAD = 0.01`
 - `QUEUE_BACKLOG_GATE_RAD` is currently `0.01` rad, about `0.57` degrees.
 - `TeleopController` no longer mutates `last_sent_target` inside
   `should_send_command()`. Send-state is now committed only after
@@ -662,12 +682,15 @@ Local validation completed:
 - `python3 -m py_compile` on the edited runtime files
 - `python3 -m unittest src/dobot_mg400/mg400_controller/test/test_queue_aware_logic.py`
 
-Current limitation of this first pass:
+Current limitation of the production pass:
 
-- the queue gate is binary and conservative;
-- it uses a single backlog threshold, not hysteresis;
-- it does not yet combine backlog with command-ID progress or robot mode beyond
-  the existing logic.
+- the host-side pipeline depth is an estimate because MG400 feedback does not
+  expose the full queued command list;
+- the design intentionally avoids timer-based forced sends such as `RateFloor`
+  because they can refill the FIFO with stale hand samples;
+- if the operator changes direction sharply after two commands are already in
+  the robot queue, the MG400 still has to consume some queued motion because
+  TCP `JointMovJ` is not a replace-current-target servo command.
 
 ## Unity Callback
 
