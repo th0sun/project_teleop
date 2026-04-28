@@ -143,23 +143,20 @@ Important contract:
   motion command is actually accepted/sent successfully.
 - `last_sent_time` inside `TeleopController` is monotonic loop time.
 
-## Short-Pipeline Queue Logic
+## Realtime Teleop Logic
 
 Current behavior:
 
-- keep a tiny rolling robot queue, normally current command + one queued tail
-  target (`REALTIME_PIPELINE_TARGET = 2`)
-- coalesce fast Unity/VR samples on the host side and send only the newest
-  meaningful tail target (`REALTIME_TAIL_CHANGE_RAD`)
-- if the short pipeline is full, hold new sends instead of adding stale hand
-  samples to the MG400 FIFO queue
-- when the robot reaches the queued tail/blend window, refill with the newest
-  target currently known by ROS
-- if queue stays busy but robot velocity remains below
-  `STUCK_VELOCITY_THRESHOLD` longer than `QUEUE_BUSY_ESCAPE_SEC`, allow the
-  normal stuck-recovery path to run
-- once a send succeeds, advance the host-side pipeline estimate with
-  `mark_command_sent(...)`
+- keep only the newest Unity/VR target on the host side
+- send only when the robot is physically near the previous accepted target
+- compute the send window from dynamic proximity:
+  `base + robot_velocity * lookahead`
+- commit `last_sent_target` only after the motion socket accepts the command
+  through `mark_command_sent(...)`
+- keep the existing stuck-recovery path for the case where the robot stops far
+  away from the accepted target
+- parse queue-state feedback for diagnostics, but do not use a host-side queue
+  depth estimate as the realtime send gate
 
 Why this matters:
 
@@ -168,9 +165,10 @@ Why this matters:
   hand target
 - a hard `queue busy -> block` gate feels too loyal to the previous target
 - a fixed time-based send floor reintroduces queue buildup
-- CP needs at least one successor command to blend into, so the runtime keeps a
-  short 2-command pipeline instead of draining to zero every time
-- blocking forever is also wrong, so the stuck escape path must remain intact
+- the short-pipeline estimator also failed in practice because it could refill
+  at the wrong time and still grow stale queue
+- the current path is therefore a 2026-02-24-style dynamic proximity gate with
+  the safer 2026-04 state-commit fix
 
 ## Mock Versus Real Robot
 

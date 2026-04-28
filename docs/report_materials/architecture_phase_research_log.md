@@ -1488,15 +1488,15 @@ Action taken:
 - Kept source files, tests, mock extension code, and markdown notes in the repo
   so they can still be reviewed and committed intentionally.
 
-### 2026-04-29 Follow-up — Realtime Short-Pipeline Lesson
+### 2026-04-29 Follow-up — Realtime Dynamic-Proximity Lesson
 
 Decision:
 
-- Replace the realtime `queue busy -> block` runtime behavior with a single
-  production short-pipeline policy.
-- Do not keep a runtime mode switch between the old drain gate and the new
-  pipeline behavior.  The old behavior made debugging ambiguous and did not
-  match the desired live-control feel.
+- Replace the realtime `queue busy -> block` runtime behavior with a
+  2026-02-24-style dynamic-proximity gate.
+- Do not keep a runtime mode switch between the old drain gate, the
+  short-pipeline experiment, and the current behavior.  Multiple live policies
+  made debugging ambiguous.
 
 Lesson learned:
 
@@ -1506,23 +1506,28 @@ Lesson learned:
 - A hard drain gate is also too conservative: when `RunQueuedCmd` stays active,
   it can make the robot keep honoring the previous target and ignore useful
   latest-target updates for too long.
-- The desired realtime behavior is **coalescing with a tiny rolling horizon**:
-  keep only the newest host-side target, send as little as possible, but keep
-  enough queued work for `CP` to blend.
+- The short-pipeline experiment looked good in software, but it introduced a
+  host-side queue-depth estimate.  On live control this estimate can refill at
+  the wrong moment and still grow stale queue.
+- The desired realtime behavior is **latest-target coalescing with dynamic
+  proximity**: keep only the newest host-side target, send as little as
+  possible, and use the robot's physical progress toward the last accepted
+  target as the send gate.
 
 Current production policy:
 
-- `REALTIME_PIPELINE_TARGET = 2`
-- `REALTIME_PIPELINE_MAX = 2`
-- `REALTIME_TAIL_CHANGE_RAD = 0.01 rad`
-- Host-side meaning: current command plus one queued tail target.
-- Unity/VR can publish faster than the robot can execute, but ROS only promotes
-  the latest useful target into the robot queue when the short pipeline has
-  capacity or the previous tail is effectively consumed.
+- `DYNAMIC_PROXIMITY_BASE_RAD = 0.005 rad`
+- `DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 s`
+- `STUCK_TIME_THRESHOLD = 0.3 s`
+- `TARGET_CHANGE_THRESHOLD = 0.005 rad`
+- Queue-state feedback is still parsed and logged, but it is not the primary
+  live-send gate.
+- Send-state is committed only after `sender.send(...)` succeeds via
+  `mark_command_sent(...)`.
 
 Why this matters for the report/demo:
 
 - The project is not claiming hard realtime servo control through Dobot TCP.
 - The production strategy is best-effort live control over a queued controller:
-  avoid stale queue buildup, preserve `CP` blending opportunity, and keep the
-  operator-facing target as fresh as the MG400 queue model allows.
+  avoid stale queue buildup and keep the operator-facing target as fresh as the
+  MG400 queue model allows.

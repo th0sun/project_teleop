@@ -91,19 +91,22 @@ The production logic path uses `latest_target`, which is latency-compensated in
 
 ## Current Decision Snapshot
 
-The production realtime policy is now a short MG400 command pipeline:
+The production realtime policy is now 2026-02-24-style dynamic proximity with
+the safer state handling added later:
 
 - keep only the newest Unity/VR target on the host side;
 - send as little as possible;
-- keep a two-command rolling horizon so `CP` still has a following command to
-  blend into;
+- send only when the robot is physically near the previous accepted target;
+- commit `last_sent_target` only after `sender.send(...)` succeeds;
 - never reintroduce timer-driven forced sends such as `RateFloor`.
 
 The reason is practical: MG400 TCP motion commands are queued by the controller.
 Sending by time fills that queue with stale hand samples. A hard
 `queue busy -> block` rule goes too far the other way and makes the robot too
-loyal to the previous queued target. The current compromise is latest-target
-coalescing plus a tiny CP-friendly queue.
+loyal to the previous queued target. The short-pipeline experiment also looked
+good in code but could still refill the FIFO with stale tail targets in live
+testing. The current compromise is latest-target coalescing plus dynamic
+proximity based on real robot position.
 
 ## Git History Around 2026-02-24
 
@@ -647,24 +650,25 @@ If we want one sentence:
 
 ## Implemented On 2026-04-24
 
-The 2026-04-24 first pass implemented Option B.  On 2026-04-29 the runtime was
-tightened into a short-pipeline policy because the binary drain gate felt too
-loyal to the previous target during live control.
+The 2026-04-24 first pass implemented Option B.  On 2026-04-29 the runtime
+briefly tested a short-pipeline policy, then reverted the live send gate to the
+2026-02-24 dynamic-proximity shape because the pipeline depth estimate still
+allowed stale queue growth during live control.
 
 - `FeedbackHandler` parses `QTarget`, `RunQueuedCmd`, and exposes
   `get_target_position()`, `get_queue_backlog()`, and `get_run_queued_cmd()`.
-- default mode now passes queue-state feedback into
-  `TeleopController.should_send_command(...)`.
-- default mode coalesces Unity/VR samples into a tiny rolling MG400 pipeline:
+- default mode still passes queue-state feedback into
+  `TeleopController.should_send_command(...)` for interface stability and
+  diagnostics, but live pacing intentionally ignores those fields.
+- default mode coalesces Unity/VR samples into one latest host-side target and
+  sends only when:
 
 ```text
-current command + next queued tail target
+max(abs(QActual - last_sent_target)) < base + velocity * lookahead
 ```
 
-- `REALTIME_PIPELINE_TARGET = 2`
-- `REALTIME_PIPELINE_MAX = 2`
-- `REALTIME_TAIL_CHANGE_RAD = 0.01`
-- `QUEUE_BACKLOG_GATE_RAD` is currently `0.01` rad, about `0.57` degrees.
+- `DYNAMIC_PROXIMITY_BASE_RAD = 0.005`
+- `DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25`
 - `TeleopController` no longer mutates `last_sent_target` inside
   `should_send_command()`. Send-state is now committed only after
   `sender.send(...)` succeeds, through `mark_command_sent(...)`.
@@ -684,13 +688,11 @@ Local validation completed:
 
 Current limitation of the production pass:
 
-- the host-side pipeline depth is an estimate because MG400 feedback does not
-  expose the full queued command list;
 - the design intentionally avoids timer-based forced sends such as `RateFloor`
   because they can refill the FIFO with stale hand samples;
-- if the operator changes direction sharply after two commands are already in
-  the robot queue, the MG400 still has to consume some queued motion because
-  TCP `JointMovJ` is not a replace-current-target servo command.
+- if the operator changes direction sharply after a command is already accepted
+  by the robot, the MG400 still has to consume that queued motion because TCP
+  `JointMovJ` is not a replace-current-target servo command.
 
 ## Unity Callback
 
@@ -892,7 +894,7 @@ Regression coverage:
   checks `should_send_command(...)` does not mutate `last_robot_time` or
   `robot_velocity` a second time
 
-## Queue Gate Escape Hatch
+## Retired Queue Gate Escape Hatch
 
 The first queue-aware implementation blocked new commands whenever:
 
@@ -901,30 +903,20 @@ RunQueuedCmd == 1
 and max(abs(QTarget[:4] - QActual[:4])) > QUEUE_BACKLOG_GATE_RAD
 ```
 
-That is the right default behavior for limiting queue depth, but it had one
-dangerous edge case: if real feedback left `RunQueuedCmd` high while the robot
-was stalled or paused, the controller could return `QueueBusy` forever and
-never reach stuck recovery.
+That was useful research, but live behavior showed it was too dependent on
+queue-state interpretation.  It could make the robot keep honoring an old
+queued target for too long.
 
-The controller now tracks `queue_busy_start_time` and uses:
-
-```text
-QUEUE_BUSY_ESCAPE_SEC = 0.30
-```
-
-Behavior after the change:
-
-- queue busy and robot still moving: keep blocking new commands
-- queue busy but robot velocity stays below `STUCK_VELOCITY_THRESHOLD` longer
-  than `QUEUE_BUSY_ESCAPE_SEC`: allow the normal stuck-detection logic to run
-- after a command is accepted by the motion socket, reset both stuck and queue
-  busy timers
+The production controller no longer uses `QUEUE_BACKLOG_GATE_RAD` or
+`QUEUE_BUSY_ESCAPE_SEC` in the live send decision.  Queue fields are still
+parsed for diagnostics.  The actual send gate is dynamic proximity from
+`QActual` to `last_sent_target`, plus normal velocity-based stuck recovery.
 
 Regression coverage:
 
-- queue backlog blocks sends while the queue is still active
-- queue busy can escape into stuck recovery when the robot is stopped
-- queue busy does not escape while the robot is still moving
+- queue-state feedback alone does not force extra live sends
+- dynamic proximity sends only near the previous accepted target
+- stuck recovery can retrigger when the robot is stopped far from target
 - timing path still uses one monotonic clock source
 
 ## Next Work

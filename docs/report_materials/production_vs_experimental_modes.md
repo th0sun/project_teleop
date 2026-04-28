@@ -36,42 +36,30 @@ The important design choice is that the system keeps only the newest useful
 target from the operator and avoids filling the robot's internal motion queue
 with old intermediate targets.
 
-## Short-Pipeline Queue Logic
+## Realtime Dynamic-Proximity Logic
 
-The production controller uses robot feedback to avoid sending too many queued
-commands while still giving `CP` a next command to blend into.
-
-```text
-queue_backlog = max(abs(QTarget[:4] - QActual[:4]))
-```
-
-The runtime keeps a tiny rolling horizon:
+The production controller currently uses the same core pacing idea that felt
+better in the 2026-02-24 hardware run: send only when the robot is physically
+close to the last accepted target, then send the newest Unity/VR target known
+by ROS.
 
 ```text
-current command + next queued tail target
+trigger_distance = base + robot_velocity * lookahead
+send when max(abs(QActual - last_sent_target)) < trigger_distance
 ```
 
-Unity/VR may publish targets much faster than the robot can execute them.  ROS
-therefore keeps only the latest target on the host side and sends it only when
-the short pipeline has capacity or the previous tail target is nearly consumed.
-
-Default parameters:
+Current parameters:
 
 ```text
-REALTIME_PIPELINE_TARGET = 2
-REALTIME_PIPELINE_MAX = 2
-REALTIME_TAIL_CHANGE_RAD = 0.01
+DYNAMIC_PROXIMITY_BASE_RAD = 0.005
+DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25
 ```
 
-To avoid waiting forever when the robot is stuck or feedback state remains busy,
-the controller still has an escape hatch:
-
-```text
-QUEUE_BUSY_ESCAPE_SEC = 0.30
-```
-
-If the robot stays below `STUCK_VELOCITY_THRESHOLD` longer than this while the
-queue remains busy, the controller allows normal stuck recovery to run.
+The runtime still parses `QTarget`, `RunQueuedCmd`, and `CurrentCommandId` for
+logging and future diagnostics, but live send pacing does not currently use
+those fields as a gate.  The short-pipeline experiment used a host-side queue
+depth estimate, but hardware feel showed that estimate could refill at the
+wrong time and keep adding stale targets to the MG400 FIFO queue.
 
 ## Why This Became The Final Mode
 
@@ -85,9 +73,9 @@ fast as possible." Sending too fast makes the robot follow old hand positions.
 The chosen default strategy therefore focuses on:
 
 - keeping the queue shallow
-- keeping enough queued work for `CP` to blend
+- letting `CP` blend only with naturally queued successor commands
 - overwriting intermediate hand targets with the newest target
-- sending only when the short pipeline has capacity
+- sending only when the robot is near the previous accepted target
 - avoiding low-speed batch interpolation in production mode
 - using CP as a smoothness helper, not as the main control mechanism
 
@@ -102,14 +90,15 @@ time floor can therefore make the robot chase stale targets.
 The final realtime rule is:
 
 ```text
-send as little as possible, but keep a 2-command pipeline alive for CP
+send as little as possible, only when the robot is near the last accepted target
 ```
 
 This replaced the older drain-gate-only behavior because a hard
 `queue busy -> block` rule made the robot too loyal to its previous target.
-Short-pipeline coalescing is the middle ground: it feeds just enough future
-motion for blending while still discarding intermediate Unity samples before
-they become robot queue entries.
+It also replaced the short-pipeline queue estimate because that looked good in
+software but could still refill the MG400 FIFO with stale tail targets in live
+testing.  The current behavior is closer to the 2026-02-24 dynamic-proximity
+logic, with safer state commits after `sender.send(...)` succeeds.
 
 ## Archived Experimental Modes
 
