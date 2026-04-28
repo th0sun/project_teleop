@@ -4,6 +4,31 @@
 # MG400 Tmux Interactive Launcher
 # ==========================================
 
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="$(cd "$REPO_DIR/.." && pwd)"
+ROS_DISTRO="${ROS_DISTRO:-humble}"
+ROS_SETUP="${ROS_SETUP:-/opt/ros/$ROS_DISTRO/setup.bash}"
+
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "❌ tmux not found. Install with: sudo apt install tmux"
+    exit 1
+fi
+
+if [ ! -f "$ROS_SETUP" ]; then
+    echo "❌ ROS setup not found: $ROS_SETUP"
+    echo "   Set ROS_DISTRO or ROS_SETUP, e.g. ROS_DISTRO=jazzy ./start_teleop.sh"
+    exit 1
+fi
+
+if [ ! -f "$WS/install/setup.bash" ]; then
+    echo "❌ Workspace is not built yet: $WS/install/setup.bash"
+    echo "   Run:"
+    echo "     cd $WS"
+    echo "     source $ROS_SETUP"
+    echo "     colcon build --symlink-install"
+    exit 1
+fi
+
 # 1. แสดงเมนู
 clear
 echo "=========================================="
@@ -24,10 +49,21 @@ fi
 # 2. Network & Docker
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
     echo "🐳 Starting Docker Mock..."
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "❌ docker not found. Install Docker first."
+        exit 1
+    fi
     export ROBOT_IP="172.10.0.2"
-    MOCK_COMPOSE="MG400_Mock/docker-compose.yml"
+    MOCK_COMPOSE="$REPO_DIR/MG400_Mock/docker-compose.yml"
     if [ ! -f "$MOCK_COMPOSE" ]; then
-        MOCK_COMPOSE="MG400_Mock/docker/docker-compose.yml"
+        MOCK_COMPOSE="$REPO_DIR/MG400_Mock/docker/docker-compose.yml"
+    fi
+    if [ ! -f "$MOCK_COMPOSE" ]; then
+        echo "❌ MG400 Mock docker compose file not found."
+        echo "   Checked:"
+        echo "     $REPO_DIR/MG400_Mock/docker-compose.yml"
+        echo "     $REPO_DIR/MG400_Mock/docker/docker-compose.yml"
+        exit 1
     fi
     docker compose -f "$MOCK_COMPOSE" up -d
 else
@@ -36,9 +72,7 @@ else
 fi
 
 # 3. Commands
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WS="$(cd "$REPO_DIR/.." && pwd)"
-_src="cd $WS && source install/setup.bash"
+_src="source \"$ROS_SETUP\" && cd \"$WS\" && source install/setup.bash"
 _ip="export ROBOT_IP=$ROBOT_IP"
 
 # note: exec bash ทำให้ pane ค้างไว้หลัง node หยุด, กด ↑ Enter รันใหม่ได้
@@ -99,7 +133,7 @@ tmux set -g pane-border-format " #{pane_index}: #{pane_title} "
 tmux select-pane -t "$PANE_A" -T "🤖 Teleop"
 tmux select-pane -t "$PANE_B" -T "📐 RViz"
 tmux select-pane -t "$PANE_C" -T "🔌 TCP/Sim"
-tmux select-pane -t "$PANE_D" -T "� UDP Bridge"
+tmux select-pane -t "$PANE_D" -T "🌉 UDP Bridge"
 
 tmux set -g status-right " 💡 Ctrl+C=stop | ↑Enter=restart | Shift+drag=copy | Ctrl+D=close pane | kill-server=exit all "
 tmux set -g status-right-length 90
