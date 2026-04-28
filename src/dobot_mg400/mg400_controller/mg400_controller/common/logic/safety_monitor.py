@@ -97,6 +97,20 @@ class SafetyMonitor:
                  self.logger.error(f"   1. Joint Limit Reached (Check J1-J4)")
                  self.logger.error(f"   2. Singularity Point (Arm too stretched/folded)")
                  self.logger.error(f"   3. Workspace Violation")
+
+        formatted_errors = (
+            [self.error_handler.format_error_message(e) for e in advanced_errors]
+            if (self.error_handler and advanced_errors)
+            else []
+        )
+        message = self._status_message(
+            has_error=has_error,
+            robot_mode=robot_mode,
+            basic_error_id=basic_error_id,
+            collision_state=int(status.get('collision_state', 0)),
+            max_temp=float(max_temp),
+            errors=formatted_errors,
+        )
         
         # 5. Publish Status for Dashboard (enhanced with error details)
         msg = {
@@ -106,8 +120,10 @@ class SafetyMonitor:
             'error_status': int(status.get('error_status', 0)),
             'robot_mode': int(status.get('robot_mode', 0)),
             'max_temp': float(max_temp),
+            'has_error': bool(has_error),
+            'message': message,
             # Add detailed error information (if error_handler enabled)
-            'errors': [self.error_handler.format_error_message(e) for e in advanced_errors] if (self.error_handler and advanced_errors) else [],
+            'errors': formatted_errors,
             'error_severity': self.error_handler.get_highest_severity(advanced_errors) if (self.error_handler and advanced_errors) else 0
         }
         
@@ -131,3 +147,20 @@ class SafetyMonitor:
                 ])
         except Exception:
             pass # Ignore log errors to prevent loop crash
+
+    def _status_message(self, *, has_error, robot_mode, basic_error_id, collision_state, max_temp, errors):
+        """Build one short operator-facing status string for Unity/dashboard UIs."""
+        if errors:
+            first = errors[0]
+            return f"Alarm {first.get('id', 0)}: {first.get('description', 'Robot alarm')}"
+        if collision_state > 0:
+            return f"Collision detected (state {collision_state})"
+        if has_error:
+            if basic_error_id != 0:
+                return f"Robot error status {basic_error_id} (mode {robot_mode})"
+            return f"Robot error mode {robot_mode}"
+        if max_temp > 65.0:
+            return f"Critical motor temperature {max_temp:.1f} C"
+        if max_temp > 55.0:
+            return f"High motor temperature {max_temp:.1f} C"
+        return "Robot OK"

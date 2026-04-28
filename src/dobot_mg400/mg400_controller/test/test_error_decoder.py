@@ -54,8 +54,21 @@ class RobotErrorDecoderTest(unittest.TestCase):
 
         self.assertIn(18, errors)
         self.assertIn(8992, errors)
+        self.assertIn("cause", errors[18])
         self.assertIn("Reselect", errors[18]["solution"])
         self.assertIn("restart controller", errors[8992]["solution"])
+
+    def test_format_error_message_includes_cause_for_unity_alarm_ui(self):
+        handler = ErrorHandler(
+            DummyConnection("0,{[[18],[],[],[],[],[]]},GetErrorID();"),
+            DummyLogger(),
+        )
+
+        formatted = handler.format_error_message(handler.check_errors()[0])
+
+        self.assertEqual(formatted["id"], 18)
+        self.assertIn("Inverse kinematics", formatted["description"])
+        self.assertIn("cause", formatted)
 
 
 if __name__ == "__main__":

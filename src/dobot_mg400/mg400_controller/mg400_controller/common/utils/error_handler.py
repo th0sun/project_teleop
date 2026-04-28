@@ -111,6 +111,7 @@ class ErrorHandler:
             'id': error.get('id', 0),
             'level': error.get('level', 0),
             'description': error.get('description', 'Unknown error'),
+            'cause': error.get('cause', ''),
             'solution': error.get('solution', 'No solution available'),
             'mode': error.get('mode', 'Unknown mode'),
             'timestamp': f"{error.get('date', '')} {error.get('time', '')}".strip()
