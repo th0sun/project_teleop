@@ -61,6 +61,10 @@ from mg400_controller.common.utils.latency_analyzer import LatencyAnalyzer
 from mg400_controller.common.utils.clock_calibrator import ClockCalibrator
 from mg400_controller.common.utils.mode_selection import select_control_mode
 from mg400_controller.common.utils.async_event_logger import AsyncEventLogger
+from mg400_controller.common.utils.unified_triple_logger import (
+    UnifiedTripleLogger,
+    prompt_enable_triple_logging,
+)
 from mg400_controller.common.ros.teleop_interfaces import (
     create_publishers,
     create_subscriptions,
@@ -75,44 +79,45 @@ from mg400_controller.common.ros.topic_config import declare_topic_parameters
 class TeleopNode(Node):
     def __init__(self):
         super().__init__('mg400_vr_teleop')
-        
+
         # 1. Initialize Modules
         self.stop_event = threading.Event()
-        
+
         self.connection = RobotConnection(self.get_logger())
         import mg400_controller.common.config.robot_config as cfg
-        
+
         # 1. Initialize logic modules
         self.validator = JointValidator(JOINT_LIMITS, ELBOW_ANGLE_LIMIT, self.get_logger())
         self.planner = MotionPlanner(cfg.CONTROL_MODE, self.get_logger())
         self.target_compensator = TargetLatencyCompensator(self.validator)
-        
+
         # Teleop Controller (The Brain)
         self.controller = TeleopController(self.validator, self.planner, self.get_logger())
-        
+
         self.latest_target = None
-        
+
         # 1. Initialize logic modules
         # Import MotionConfig for thresholds and Analyzer
         self.latency_analyzer = LatencyAnalyzer(motion_config)
-        
+
         # --- Clock Synchronization (Triple-Lock) ---
         self.clock_calibrator = ClockCalibrator(window_size=50) # Now estimates drift automatically
-        
+
         # Level 3: RTT Heartbeat (ROS-side ping)
         self.topics = declare_topic_parameters(self)
         self.publishers = create_publishers(self, topics=self.topics)
         self.create_timer(1.0, self._publish_heartbeat) # 1Hz Ping
-        
+
         # --- Analytics Logging (Async) ---
         self.csv_filename = f"teleop_analytics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         self.analytics_logger = None
-        
+
         # State Tracking
         self.target_recv_time = 0.0  # T2
         self.unity_send_time = 0.0   # T1
-        
+
         self._tool_query_counter = 0
+        self._sample_counter = 0  # For triple-layer logger decimation
 
         # File Logger
         self.teleop_logger = TeleopLogger("~/project_teleop_ws/logs")
@@ -128,16 +133,23 @@ class TeleopNode(Node):
                 'TELEOP_PERF': self.teleop_logger.log_performance_metrics,
             },
         )
+
+        # --- Triple-Layer Logger (Unity → ROS2 → Robot) ---
+        self.triple_logger = None
+        if prompt_enable_triple_logging():
+            self.triple_logger = UnifiedTripleLogger()
+            self.get_logger().info(f"🔬 Triple-layer logging enabled: {self.triple_logger.file_path}")
+
         self.get_logger().info(f"📊 Logging analytics to: {self.csv_filename} (Async Thread Started)")
         self.get_logger().info(f" Logging to: {self.teleop_logger.log_dir}")
-        
+
         # 2. Setup ROS Interfaces
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
-        
+
         # Subscriptions (Delayed UNITY to avoid race condition)
         self.subscriptions = create_subscriptions(
             self,
@@ -151,7 +163,7 @@ class TeleopNode(Node):
             teach_job_request_callback=self._teach_job_request_callback,
             topics=self.topics,
         )
-        
+
         # Suction Cup Control (Smart Trigger)
         self.suction_state = False
         self.suction_pending = False
@@ -162,9 +174,9 @@ class TeleopNode(Node):
         if not self.connection.connect():
             self.get_logger().error("Failed to connect to robot")
             return
-        
+
         self.connection.enable_robot()
-        
+
         # 4. Initialize Handlers
         # PASS FEEDBACK HANDLER TO SENDER FOR SYNC
         self.feedback = FeedbackHandler(
@@ -174,9 +186,9 @@ class TeleopNode(Node):
             self.get_logger(),
             self.stop_event
         )
-        
+
         self.sender = CommandSender(self.connection, self.feedback, self.get_logger())
-        
+
         # ErrorHandler (GetError API) - optional, disabled for simulator
         self.error_handler = None
         if ENABLE_GET_ERROR:
@@ -184,10 +196,10 @@ class TeleopNode(Node):
             self.get_logger().info("✅ ErrorHandler enabled (GetError API)")
         else:
             self.get_logger().info("⚠️  ErrorHandler disabled (set ENABLE_GET_ERROR=True for real robot)")
-        
+
         # Collision-based Haptic Feedback for Quest 3 VR
         self.collision_haptic = CollisionHaptic(self.publishers.haptic, self.get_logger())
-        
+
         # Trajectory Recorder (teach-and-repeat sequencer)
         self.trajectory_recorder = TrajectoryRecorder(
             command_send_fn=self.sender.send,
@@ -220,14 +232,14 @@ class TeleopNode(Node):
             self.get_logger(),
             self.stop_event
         )
-        
-        
+
+
         # 5. Initialize Helpers
         self.safety_monitor = SafetyMonitor(self.publishers.safety, self.get_logger(), self.error_handler)
-        
+
         # 6. Start Threads
         self.feedback.start()
-        
+
         # 5. Start Unity Subscriber (End of init to prevent race condition)
         self.subscriptions.unity = attach_unity_subscription(
             self,
@@ -235,20 +247,20 @@ class TeleopNode(Node):
             qos_profile,
             topics=self.topics,
         )
-        
+
         self.get_logger().info("✅ Teleop Node fully initialized and listening.")
         self.interactive.start()
-        
+
         # 6. Start Control Loop in a Dedicated High-Precision Thread (Isolates from ROS jitter/CPU load)
         self.control_loop_thread = threading.Thread(target=self._high_precision_control_loop, daemon=True)
         self.control_loop_thread.start()
-        
+
         # 7. Start Safety Monitor (1Hz)
         self.create_timer(1.0, self.check_safety_status)
-        
+
         # 8. Start Collision Haptic Publisher (20Hz) for Quest 3 VR
         self.create_timer(0.05, self._publish_haptic_feedback)
-        
+
         self.get_logger().info(f"✅ Teleop Node Ready")
         self.get_logger().info(
             f"🎓 Teach & Repeat: {self.topics.teach_status} + "
@@ -274,61 +286,61 @@ class TeleopNode(Node):
         try:
             parts = msg.data.split(',')
             if len(parts) < 2: return
-            
+
             ros_ping_ns = int(parts[0])
             unity_ts = float(parts[1])
             now_ns = self.get_clock().now().nanoseconds
-            
+
             # Calculate RTT
             rtt_sec = (now_ns - ros_ping_ns) * 1e-9
-            
+
             # Level 3 Estimation: Unity_Time = ROS_Time + Offset
             # So Offset = Unity_Time - (ROS_Time_at_Unity)
             # ROS_Time_at_Unity approx = ros_ping_ns + RTT/2
             ros_at_unity = (ros_ping_ns * 1e-9) + (rtt_sec / 2.0)
             true_offset = unity_ts - ros_at_unity
-            
+
             # We can use this to 'nudged' the calibrator or just log it
             # For now, ClockCalibrator's min-window is more robust against jitter
-            pass 
+            pass
         except Exception:
             pass
 
-    
+
     def _unity_callback(self, msg):
         """รับคำสั่งจาก Unity/VR - Store latest target only"""
         if not self.connection.connected or len(msg.position) < 4:
             return
-        
+
         try:
             # 1. Validate & Clamp Joints
             q_target = np.array(msg.position)
-            
+
             # 🛡️ Anti-NaN Protection
             if np.any(np.isnan(q_target)):
                 self.get_logger().warn("⚠️ Received NaN joints from Unity - ignoring command")
                 return
-                
+
             q_safe, was_clamped = self.validator.validate_and_clamp(q_target)
-            
+
             if was_clamped:
                 self.get_logger().warn("⚠️ Joint command exceeded limits - clamped to safe range", once=True)
-            
+
             # 2. Extract Unity timestamp (T1) and ROS timestamp (T2)
             unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             now_ros_sec = time.time()  # Use absolute time for sync and logging
-            
+
             # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION (Triple-Lock) ---
             # Level 2 & 3: Filtered Min-Window + Drift Compensation
             corrected_unity_time = self.clock_calibrator.calibrate(unity_send_time_sec, now_ros_sec)
-            
+
             # 3. Latency compensation based on measured Unity-to-ROS timing.
             q_compensated_safe = self.target_compensator.compensate(
                 q_safe,
                 corrected_unity_time,
                 now_ros_sec,
             )
-            
+
             # 📊 Publish Unity Input XYZ (FK of raw Unity joint angles, degrees)
             try:
                 unity_xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_safe))
@@ -337,30 +349,35 @@ class TeleopNode(Node):
                 self.publishers.unity_xyz.publish(xyz_msg)
             except Exception:
                 pass
-            
+
             # --- Log to CSV (Async) ---
             self.analytics_logger.put('CSV', [
                 now_ros_sec, corrected_unity_time,
                 q_safe[0], q_safe[1], q_safe[2], q_safe[3],
                 q_compensated_safe[0], q_compensated_safe[1], q_compensated_safe[2], q_compensated_safe[3]
             ])
-                
+
+            # --- Triple-Layer Log: Unity Layer ---
+            if self.triple_logger:
+                unity_joints_deg = tuple(np.degrees(q_safe))
+                self.triple_logger.log_unity_only(unity_joints_deg, now_ros_sec)
+
             # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
             self.latest_target = q_compensated_safe          # Latency-compensated target
             self.target_recv_time = now_ros_sec          # T2: ROS receive time
             self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
-            
+
         except Exception as e:
             self.get_logger().error(f"Error in _unity_callback: {e}")
 
     def _suction_callback(self, msg):
         """รับคำสั่งเปิด/ปิดหัวดูด/Gripper จาก Unity (Trigger Button)"""
         requested_state = msg.data
-        
+
         # ตรวจสอบว่าสถานะที่ขอมาต่างกับสถานะปัจจุบันหรือไม่
         if requested_state != self.suction_state:
             self.suction_requested_state = requested_state
-            
+
             if requested_state and motion_config.SMART_SUCTION_ENABLED and self.latest_target is not None:
                 self.suction_target_q = self.latest_target.copy()
                 self.suction_pending = True
@@ -386,7 +403,7 @@ class TeleopNode(Node):
             self.sender.set_digital_output(motion_config.VACUUM_DO_PORT, False)
             self.sender.set_digital_output(motion_config.BLOW_DO_PORT, True)
             self.get_logger().info(f"💨 [RELEASE] Vacuum OFF, Blow ON (for {motion_config.BLOW_DURATION}s)")
-            
+
             # ตั้งเวลาปิดพอร์ตเป่าลมอัตโนมัติ (Safety Timer)
             def turn_off_blow():
                 try:
@@ -395,9 +412,9 @@ class TeleopNode(Node):
                     self.suction_state = False
                 except Exception as e:
                     self.get_logger().error(f"Error in turn_off_blow timer: {e}")
-            
+
             threading.Timer(motion_config.BLOW_DURATION, turn_off_blow).start()
-    
+
     def _light_callback(self, msg):
         """Callback for external light control (e.g. from GUI)"""
         if len(msg.data) >= 2:
@@ -413,7 +430,7 @@ class TeleopNode(Node):
         cmd = msg.data.strip()
         if not cmd:
             return
-            
+
         if self.connection.connected:
             self.get_logger().info(f"📨 Dashboard Command received from GUI: {cmd}")
             # Add newline if missing as required by Dobot protocol
@@ -531,16 +548,16 @@ class TeleopNode(Node):
         self.publishers.sent_command.publish(js)
 
     def _playback_target_callback(self, q_rad):
-        """Called by TrajectoryRecorder at ~100Hz with the perfectly interpolated 
+        """Called by TrajectoryRecorder at ~100Hz with the perfectly interpolated
         real-time target (equivalent to race.py's target line).
-        Publishes to /teleop/playback_unity so the monitor draws the yellow target 
+        Publishes to /teleop/playback_unity so the monitor draws the yellow target
         line accurately in real-time.
         """
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.position = list(q_rad)
         self.publishers.playback_unity.publish(js)
-        
+
         try:
             xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_rad))
             xyz_msg = Float64MultiArray()
@@ -558,19 +575,19 @@ class TeleopNode(Node):
         target_hz = 200.0
         period = 1.0 / target_hz
         next_time = time.perf_counter() + period
-        
+
         while not self.stop_event.is_set():
             try:
                 self._control_loop_step()
             except Exception as e:
                 self.get_logger().error(f"Error in control loop: {e}")
-                
+
             # Precision Sleep
             now = time.perf_counter()
             sleep_time = next_time - now
             if sleep_time > 0:
                 time.sleep(sleep_time)
-            
+
             next_time += period
             # Prevent death spiral if severely lagging
             if time.perf_counter() > next_time + period:
@@ -579,17 +596,25 @@ class TeleopNode(Node):
     def _control_loop_step(self):
         """
         Main Control Logic (50Hz) - Called by high-precision thread
-        
+
         STRATEGY: "Proximity + Velocity-Based Stuck Detection"
         - Send when robot is CLOSE to last target (smooth real-time)
         - Send when robot is STUCK AND target changed significantly (safety)
         - NO TIMEOUT - Pure event-driven control
         """
+        # Increment sample counter for triple-layer logger
+        self._sample_counter += 1
+
         if self.connection.connected and self.latest_target is not None:
             q_current = self.feedback.get_current_position()
             # Use perf_counter for ultra-precise delta-time calculation in logic
             now = time.perf_counter()
-            
+
+            # --- Triple-Layer Log: Robot Layer (periodic, ~10Hz decimated) ---
+            if self.triple_logger and self._sample_counter % 5 == 0:
+                robot_joints_deg = tuple(np.degrees(q_current))
+                self.triple_logger.log_robot_feedback(robot_joints_deg, ros_timestamp=now)
+
             # === TEACH & REPEAT GATING ===
             # is_blocked: during playback OR during post-stop homing (5 s window)
             tr = self.trajectory_recorder
@@ -597,55 +622,55 @@ class TeleopNode(Node):
             if tr.is_recording and not is_blocked:
                 # We record the *TARGET* from VR/Simulator, not the actual robot pos
                 tr.record_tick(self.latest_target)
-            
+
             # === UPDATE VELOCITY ===
             # Delegate velocity tracking to controller
             self.controller.update_robot_state(q_current, now)
-            
+
             # === SMART SUCTION TRIGGER ===
             if self.suction_pending and self.suction_target_q is not None:
                 dist = np.max(np.abs(q_current - self.suction_target_q))
-                
+
                 # ถ้าระยะห่างน้อยกว่า Threshold ที่ตั้งไว้ (ถึงเป้าหมายแล้ว)
                 # หรือถ้าหุ่นยนต์หยุดนิ่งสนิทแล้ว (Stuck/Reached) ก็ให้ยิงคำสั่งได้เลยเหมือนกันป้องกันการค้าง
                 if dist < SUCTION_ACTIVATION_THRESHOLD or self.controller.stuck_start_time > 0:
                     self._handle_suction_cmd(self.suction_requested_state)
                     self.suction_pending = False
-            
+
             # === PUBLISH TOOL VECTORS (XYZ) ===
             tool_act = self.feedback.get_tool_vector()
             tool_tgt = self.feedback.get_target_tool_vector()
-            
+
             msg_act = Float64MultiArray()
             msg_act.data = tool_act.tolist()
             self.publishers.tool_actual.publish(msg_act)
-            
+
             msg_tgt = Float64MultiArray()
             msg_tgt.data = tool_tgt.tolist()
             self.publishers.tool_target.publish(msg_tgt)
-            
+
             # Flange actual = FK of actual joints (no tool offset)
             flange = self.feedback.get_flange_actual()
             msg_flange = Float64MultiArray()
             msg_flange.data = flange.tolist()
             self.publishers.flange_actual.publish(msg_flange)
-            
+
             # === PUBLISH DO STATUS (Bitmask) ===
             do_status = self.feedback.get_do_status()
             do_msg = Int64()
             do_msg.data = int(do_status)
             self.publishers.do_status.publish(do_msg)
-            
+
             if do_status != self.last_do_status:
                 self.get_logger().info(f"📣 DO STATUS CHANGED: {bin(do_status)} (Hex: {hex(do_status)})")
                 self.last_do_status = do_status
-            
+
             # === PUBLISH ROBOT MODE & ERROR ===
             current_mode = int(self.feedback.get_robot_mode())
             mode_msg = Int32()
             mode_msg.data = current_mode
             self.publishers.robot_mode.publish(mode_msg)
-            
+
             err_info = self.feedback.get_error_status()
             err_msg = Int32()
             err_msg.data = int(err_info['error_status'])
@@ -678,26 +703,26 @@ class TeleopNode(Node):
                     self.get_logger().error("🛑 Robot is in ERROR STATE (Mode 9). Auto-clearing error...")
                     self.connection.send_and_wait(clear_error().render())
                     self.last_clear_error_time = now
-            
+
             # === MOTION TRACKING (Latency Analyzer) ===
             # T4: Motion Start
             velocity_mag = np.max(np.abs(self.controller.robot_velocity))
-            
+
             # Update Analyzer Stats
             self.latency_analyzer.update_tracking(velocity_mag)
-            
+
             # Use absolute time for Latency Analyzer since T1/T2 are absolute
             now_abs = time.time()
-            
+
             if velocity_mag > motion_config.MOTION_START_THRESHOLD:
                 if self.latency_analyzer.mark_motion_start(now_abs):
                      self.get_logger().debug(f"Motion started: velocity={velocity_mag:.6f} rad/s")
-            
+
             # T5: Target Reached
             # Using basic check here to trigger detailed analysis
             dist = np.linalg.norm(q_current - self.latency_analyzer.current_cmd_target) if self.latency_analyzer.current_cmd_target is not None else 999
             is_stopped = velocity_mag < 0.005
-            
+
             if dist < 0.01 and is_stopped:
                 if self.latency_analyzer.mark_target_reached(now_abs):
                     # Get Full Report
@@ -705,7 +730,7 @@ class TeleopNode(Node):
                     if metrics:
                         # CLI Log
                         self.get_logger().info(report)
-                        
+
                         # CSV Log (Async)
                         self.analytics_logger.put('TELEOP_LATENCY', [
                             now_abs, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
@@ -715,7 +740,7 @@ class TeleopNode(Node):
                             metrics['target'], metrics['final_q'],
                             metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
                         ])
-            
+
             # === SKIP TELEOP COMMANDS DURING PLAYBACK / POST-STOP HOMING ===
             if is_blocked:
                 return  # monitoring data already published above; sequencer owns commands
@@ -723,28 +748,28 @@ class TeleopNode(Node):
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION
             # ---------------------------------------------------------
-            
+
             # ──────────────────────────────────────────────────────
             # DEFAULT QUEUE-AWARE PRODUCTION LOGIC
             # ──────────────────────────────────────────────────────
             queue_backlog_rad = self.feedback.get_queue_backlog()
             run_queued_cmd = self.feedback.get_run_queued_cmd()
-            
+
             should_send, send_reason = self.controller.should_send_command(
-                self.latest_target, 
+                self.latest_target,
                 q_current,
                 now=now,
                 queue_backlog_rad=queue_backlog_rad,
                 run_queued_cmd=run_queued_cmd,
             )
-            
+
             if should_send:
                 # 1. Format Command
                 # force_send=True when stuck: bypass should_skip_motion which silently drops commands
                 is_stuck_recovery = send_reason.startswith("Stuck")
                 cmd_str, q_safe = self.controller.format_command_string(
                     self.latest_target, q_current=q_current, force_send=is_stuck_recovery)
-                
+
                 if not cmd_str:
                     return
 
@@ -752,6 +777,20 @@ class TeleopNode(Node):
                 t3_cmd_send = time.time()
                 # 3. Send to Robot
                 if self.sender.send(cmd_str):
+                    # --- Triple-Layer Log: ROS Command Layer ---
+                    if self.triple_logger:
+                        ros_cmd_joints_deg = tuple(np.degrees(q_safe))
+                        unity_joints_deg = (
+                            tuple(np.degrees(self.latest_target))
+                            if self.latest_target is not None
+                            else None
+                        )
+                        self.triple_logger.log_ros_cmd(
+                            ros_cmd_joints_deg,
+                            unity_joints_deg,
+                            t3_cmd_send,
+                        )
+
                     # Start Tracking (T1-T3)
                     self.latency_analyzer.start_tracking(
                         self.unity_send_time,
@@ -760,18 +799,18 @@ class TeleopNode(Node):
                         q_safe,
                         current_q=q_current
                     )
-                                    
+
                     # File Log (CSV)
                     dist_to_last = np.max(np.abs(q_current - q_safe))
                     sent_mono = time.perf_counter()
                     time_since_last = sent_mono - self.controller.last_sent_time
                     velocity_mag = np.max(self.controller.robot_velocity)
-                    
+
                     robot_status = self.feedback.get_error_status()
-                    
+
                     # CLI Report
                     msg = self.latency_analyzer.format_sent_report(
-                        should_send, send_reason, q_current, self.latest_target, 
+                        should_send, send_reason, q_current, self.latest_target,
                         self.controller.last_sent_target, self.controller.last_sent_time,
                         self.controller.robot_velocity,
                         robot_mode=robot_status['robot_mode'],
@@ -779,16 +818,16 @@ class TeleopNode(Node):
                         time_since_last=time_since_last,
                     )
                     self.get_logger().info(msg)
-                    
+
                     # 📊 Publish Sent Command for GUI graph
                     sent_msg = JointState()
                     sent_msg.header.stamp = self.get_clock().now().to_msg()
                     sent_msg.position = q_safe.tolist()
                     self.publishers.sent_command.publish(sent_msg)
-                    
+
                     # Update State in Controller
                     self.controller.mark_command_sent(q_safe, sent_mono)
-                    
+
                     self.analytics_logger.put('TELEOP_PERF', [
                         now, self.unity_send_time, self.target_recv_time, t3_cmd_send,
                         0.0, 0.0, # Network delay calculated in analyzer report
@@ -796,19 +835,24 @@ class TeleopNode(Node):
                         dist_to_last, send_reason,
                         time_since_last, velocity_mag, self.controller.robot_velocity
                     ])
-    
+
     def shutdown(self):
         """ปิดทุกอย่างอย่างเรียบร้อย"""
         self.get_logger().info("Shutting down...")
         self.stop_event.set()
-        
+
         if self.analytics_logger:
             self.analytics_logger.close(timeout=1.0)
-        
+
+        # --- Close Triple-Layer Logger ---
+        if self.triple_logger:
+            self.triple_logger.close()
+            self.get_logger().info(f"🔬 Closed triple-layer log: {self.triple_logger.file_path}")
+
         self.feedback.stop()
         self.interactive.stop()
         self.connection.disconnect()
-        
+
         self.get_logger().info(f"📊 Closed analytics log: {self.csv_filename}")
 
     def execute_motion_command(self, q_target):
@@ -818,40 +862,40 @@ class TeleopNode(Node):
         """
         # 1. Validate
         q_safe, is_clamped = self.validator.validate_and_clamp(q_target)
-        
+
         # 2. Plan Command
         speed_percent = 50 # Default safe speed
         cmd_str = self.planner.format_command(q_safe, speed_percent)
-        
+
         if not cmd_str:
             return
-            
+
         # 3. Send & Sync (Blocking)
         self.get_logger().info(f"🔄 Executing Sync Motion to: {np.degrees(q_safe)}")
-        
+
         # เรียกใช้ New Sync Method
         success = self.sender.send_command_with_sync(cmd_str)
-        
+
         if success:
              self.get_logger().info("✅ Motion Complete (Synced)")
              self.controller.mark_command_sent(q_safe, time.perf_counter())
         else:
              self.get_logger().warn("⚠️ Motion Time-out or Failed")
-    
+
     def _publish_haptic_feedback(self):
         """
         Publish collision-based haptic feedback for Quest 3 VR (20Hz)
-        
+
         Reads collision state from feedback and sends haptic intensity to Unity/VR.
         """
         status = self.feedback.get_error_status()
         if not status:
             return
-        
+
         collision_state = status.get('collision_state', 0)
         self.collision_haptic.update_and_publish(collision_state)
-    
-    
+
+
     def check_safety_status(self):
         """
         Safety Monitor Protocol (1Hz) - Delegated to SafetyMonitor class
@@ -865,17 +909,17 @@ class TeleopNode(Node):
 def main():
     # เลือกโหมด
     select_control_mode()
-    
+
     # เริ่ม ROS
     rclpy.init()
     node = TeleopNode()
-    
-    # Use MultiThreadedExecutor to prevent the 50Hz control loop 
+
+    # Use MultiThreadedExecutor to prevent the 50Hz control loop
     # from blocking the Unity subscriber callbacks and vice versa.
     from rclpy.executors import MultiThreadedExecutor
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
-    
+
     try:
         executor.spin()
     except KeyboardInterrupt:

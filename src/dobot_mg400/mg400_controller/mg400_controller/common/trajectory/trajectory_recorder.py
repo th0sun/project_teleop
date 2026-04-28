@@ -34,14 +34,21 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Callable, Tuple, Any
 
 from mg400_controller.common.config import motion_config
-from mg400_protocol.commands import do_execute, joint_mov_j
+from mg400_protocol.commands import arc, do_execute, joint_mov_j, mov_l_cartesian
 from mg400_protocol.dashboard import enable_robot, reset_robot
+from mg400_controller.common.utils.kinematics import KinematicsCalculator
 from teaching_core.trajectory import (
     JointTimingLimits,
     TimedJointPoint,
     retime_joint_path,
     simplify_joint_path_rdp,
     speed_percent_for_segment,
+)
+from teaching_core.trajectory.segment_classifier import (
+    SegmentType,
+    classify_segments,
+    sample_command_arc_xyzr,
+    segment_summary,
 )
 
 
@@ -79,6 +86,8 @@ PREVIEW_LOOKAHEAD_FRAMES = 2.0
 PREVIEW_JOINT_SPEED_AT_100_DEG_S = 90.0
 PREVIEW_STREAM_REF_VEL_DEG_S = PREVIEW_JOINT_SPEED_AT_100_DEG_S
 MG400_ROBOT_MODE_RUNNING = 7
+PLAYBACK_PROFILE_PRESERVE_TIMING = "preserve_timing"
+PLAYBACK_PROFILE_FASTEST_PATH_REPEAT = "fastest_path_repeat"
 
 
 @dataclass(frozen=True)
@@ -122,6 +131,7 @@ class CompiledPlaybackPlan:
     # count; len(waypoints) is what the MG400 motion queue actually sees.
     raw_waypoint_count: int = 0
     simplify_tolerance_deg: float = 0.0
+    execution_profile: str = PLAYBACK_PROFILE_PRESERVE_TIMING
 
 
 def compiled_playback_plan_to_dict(plan: CompiledPlaybackPlan) -> Dict[str, Any]:
@@ -133,6 +143,9 @@ def compiled_playback_plan_to_dict(plan: CompiledPlaybackPlan) -> Dict[str, Any]
         "waypoint_count": len(plan.waypoints),
         "raw_waypoint_count": int(getattr(plan, "raw_waypoint_count", len(plan.waypoints))),
         "simplify_tolerance_deg": float(getattr(plan, "simplify_tolerance_deg", 0.0)),
+        "execution_profile": str(
+            getattr(plan, "execution_profile", PLAYBACK_PROFILE_PRESERVE_TIMING)
+        ),
         "queued_command_count": len(plan.queued_commands),
         "event_command_count": len(getattr(plan, "event_commands", ())),
         "original_duration_s": plan.original_duration_s,
@@ -498,6 +511,67 @@ class TrajectoryRecorder:
             float(frame["j4"]),
         )
 
+    def _playback_execution_profile(self) -> str:
+        profile = str(
+            getattr(
+                motion_config,
+                "PLAYBACK_EXECUTION_PROFILE",
+                PLAYBACK_PROFILE_PRESERVE_TIMING,
+            )
+        ).strip().lower()
+        if profile in {"fast", "fastest", PLAYBACK_PROFILE_FASTEST_PATH_REPEAT}:
+            return PLAYBACK_PROFILE_FASTEST_PATH_REPEAT
+        return PLAYBACK_PROFILE_PRESERVE_TIMING
+
+    def _fastest_path_repeat_enabled(self) -> bool:
+        return self._playback_execution_profile() == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT
+
+    def _stream_cp(self, *, is_final: bool) -> int:
+        if self._fastest_path_repeat_enabled():
+            key = "FAST_REPEAT_FINAL_CP" if is_final else "FAST_REPEAT_CP"
+            fallback = PREVIEW_FINAL_CP if is_final else PREVIEW_STREAM_CP
+            return int(getattr(motion_config, key, fallback))
+        return PREVIEW_FINAL_CP if is_final else PREVIEW_STREAM_CP
+
+    def _stream_acc_j(self) -> Optional[int]:
+        if not self._fastest_path_repeat_enabled():
+            return None
+        return int(getattr(motion_config, "FAST_REPEAT_ACC_J", 100))
+
+    def _stream_acc_l(self) -> int:
+        if self._fastest_path_repeat_enabled():
+            return int(getattr(motion_config, "FAST_REPEAT_ACC_L", 100))
+        return int(getattr(motion_config, "SEGMENT_ACC_L", 80))
+
+    def _max_commands_per_cycle(self) -> int:
+        if self._fastest_path_repeat_enabled():
+            return max(1, int(getattr(motion_config, "FAST_REPEAT_MAX_COMMANDS_PER_CYCLE", 1)))
+        return 1_000_000
+
+    def _fast_repeat_schedule_times(self, frames, fallback_target_t):
+        """Return command schedule times for fastest path repeat.
+
+        In this profile timestamps are used only to order path progress, not to
+        preserve the demonstrator's exact hand speed.  The schedule is a rough
+        joint-speed lower bound; execution uses a large lookahead so the robot
+        controller still gets queued work early.
+        """
+        if not self._fastest_path_repeat_enabled():
+            return fallback_target_t
+
+        speed_pct = int(getattr(motion_config, "FAST_REPEAT_SPEED_J", PREVIEW_STREAM_SPEEDJ))
+        speed_deg_s = max(
+            1e-3,
+            PREVIEW_JOINT_SPEED_AT_100_DEG_S * max(1, min(100, speed_pct)) / 100.0,
+        )
+        target_t = [0.0]
+        for idx in range(1, len(frames)):
+            prev_q = np.asarray(self._frame_q_deg(frames[idx - 1]), dtype=float)
+            q = np.asarray(self._frame_q_deg(frames[idx]), dtype=float)
+            max_delta = float(np.max(np.abs(q - prev_q)))
+            target_t.append(target_t[-1] + max_delta / speed_deg_s)
+        return np.asarray(target_t, dtype=float)
+
     def _retime_frames_for_playback(self, frames):
         """Return frames with preserved-or-stretched timestamps.
 
@@ -532,6 +606,8 @@ class TrajectoryRecorder:
         return retimed_frames, timing
 
     def _segment_speed_j(self, prev_frame, frame):
+        if self._fastest_path_repeat_enabled():
+            return int(getattr(motion_config, "FAST_REPEAT_SPEED_J", PREVIEW_STREAM_SPEEDJ))
         dt = max(float(frame["timeStamp"] - prev_frame["timeStamp"]), 1e-3)
         return speed_percent_for_segment(
             self._frame_q_deg(prev_frame),
@@ -542,7 +618,152 @@ class TrajectoryRecorder:
             max_percent=PREVIEW_STREAM_SPEEDJ,
         )
 
+    def _segment_speed_l(self, segment, frames):
+        """Calculate dynamic Cartesian SpeedL percentage based on timestamp dt."""
+        if self._fastest_path_repeat_enabled():
+            return int(getattr(motion_config, "FAST_REPEAT_SPEED_L", 100))
+
+        start_frame = frames[segment.start_idx]
+        end_frame = frames[segment.end_idx]
+        dt = max(float(end_frame["timeStamp"] - start_frame["timeStamp"]), 1e-3)
+
+        if segment.type.name == "LINE":
+            p1 = segment.cartesian_points[0].xyz()
+            p2 = segment.cartesian_points[-1].xyz()
+            dist = float(np.linalg.norm(p2 - p1))
+        elif segment.type.name == "ARC":
+            dist = 0.0
+            for i in range(1, len(segment.cartesian_points)):
+                p1 = segment.cartesian_points[i-1].xyz()
+                p2 = segment.cartesian_points[i].xyz()
+                dist += float(np.linalg.norm(p2 - p1))
+        else:
+            return self._segment_speed_j(start_frame, end_frame)
+
+        v_mm_s = dist / dt
+        ref_speed = getattr(motion_config, "CARTESIAN_SPEED_AT_100_PERCENT_MM_S", 1000.0)
+        speed_l = (v_mm_s / ref_speed) * 100.0
+
+        min_l = getattr(motion_config, "SEGMENT_MIN_SPEED_L", 5)
+        max_l = getattr(motion_config, "SEGMENT_MAX_SPEED_L", 100)
+        return int(max(min_l, min(max_l, speed_l)))
+
+    def _tool_pose_reachable(self, xyzr) -> bool:
+        return KinematicsCalculator().is_tool_pose_reachable(xyzr)
+
+    def _line_primitive_reachable(self, seg, samples: int = 12) -> bool:
+        start = np.array(seg.start_xyzr, dtype=float)
+        end = np.array(seg.end_xyzr, dtype=float)
+        for fraction in np.linspace(0.0, 1.0, max(2, samples)):
+            pose = start + (end - start) * float(fraction)
+            if not self._tool_pose_reachable(pose[:4]):
+                return False
+        return True
+
+    def _arc_primitive_points(self, seg, samples: int = 16):
+        through_xyzr = seg.through_xyzr
+        if through_xyzr is None:
+            return []
+        return sample_command_arc_xyzr(seg.start_xyzr, through_xyzr, seg.end_xyzr, samples)
+
+    def _arc_primitive_reachable(self, seg, samples: int = 16) -> bool:
+        points = self._arc_primitive_points(seg, samples=samples)
+        if not points:
+            return False
+        return all(self._tool_pose_reachable(point) for point in points)
+
+    def _frame_xyzr(self, frame) -> Tuple[float, float, float, float]:
+        """Return MG400 tool pose for one frame in controller coordinates."""
+        return tuple(float(v) for v in self._fk_for_classifier(*self._frame_q_deg(frame)))
+
+    @staticmethod
+    def _point_to_polyline_distance(point_xyz, polyline_xyz) -> float:
+        point = np.asarray(point_xyz, dtype=float)
+        polyline = np.asarray(polyline_xyz, dtype=float)
+        if len(polyline) == 0:
+            return 0.0
+        if len(polyline) == 1:
+            return float(np.linalg.norm(point - polyline[0]))
+
+        best = float("inf")
+        for start, end in zip(polyline[:-1], polyline[1:]):
+            segment = end - start
+            denom = float(np.dot(segment, segment))
+            if denom <= 1e-12:
+                dist = float(np.linalg.norm(point - start))
+            else:
+                t = float(np.dot(point - start, segment) / denom)
+                t = max(0.0, min(1.0, t))
+                closest = start + t * segment
+                dist = float(np.linalg.norm(point - closest))
+            best = min(best, dist)
+        return best
+
+    def _primitive_path_xyz(self, seg, primitive_type: SegmentType):
+        if primitive_type == SegmentType.LINE:
+            return np.asarray(
+                [
+                    np.asarray(seg.start_xyzr[:3], dtype=float),
+                    np.asarray(seg.end_xyzr[:3], dtype=float),
+                ],
+                dtype=float,
+            )
+        if primitive_type == SegmentType.ARC and seg.through_xyzr is not None:
+            samples = sample_command_arc_xyzr(
+                seg.start_xyzr,
+                seg.through_xyzr,
+                seg.end_xyzr,
+                samples=48,
+            )
+            return np.asarray([np.asarray(p[:3], dtype=float) for p in samples], dtype=float)
+        return np.asarray([], dtype=float)
+
+    def _raw_fit_error_mm(
+        self,
+        seg,
+        primitive_type: SegmentType,
+        source_frames,
+        raw_frames,
+    ) -> float:
+        """Max XYZ distance from raw Unity path to the emitted primitive path.
+
+        Classification happens after RDP simplification.  This guard checks the
+        command-shaped primitive against the original dense capture so a sparse
+        set of kept waypoints cannot accidentally approve an Arc/MovL that cuts
+        too far away from what the user taught.
+        """
+        if not source_frames or not raw_frames:
+            return 0.0
+        if primitive_type not in {SegmentType.LINE, SegmentType.ARC}:
+            return 0.0
+
+        primitive_path = self._primitive_path_xyz(seg, primitive_type)
+        if len(primitive_path) < 2:
+            return float("inf")
+
+        start_t = float(source_frames[seg.start_idx]["timeStamp"])
+        end_t = float(source_frames[seg.end_idx]["timeStamp"])
+        if start_t > end_t:
+            start_t, end_t = end_t, start_t
+
+        eps = 1e-6
+        raw_slice = [
+            frame for frame in raw_frames
+            if start_t - eps <= float(frame["timeStamp"]) <= end_t + eps
+        ]
+        if not raw_slice:
+            raw_slice = [source_frames[seg.start_idx], source_frames[seg.end_idx]]
+
+        max_error = 0.0
+        for frame in raw_slice:
+            raw_xyz = np.asarray(self._frame_xyzr(frame)[:3], dtype=float)
+            error = self._point_to_polyline_distance(raw_xyz, primitive_path)
+            max_error = max(max_error, error)
+        return float(max_error)
+
     def _lookahead_seconds(self, target_t):
+        if self._fastest_path_repeat_enabled():
+            return float(getattr(motion_config, "FAST_REPEAT_LOOKAHEAD_SEC", 10.0))
         if len(target_t) < 2:
             return PREVIEW_LOOKAHEAD_MIN_SEC
         diffs = np.diff(target_t)
@@ -694,6 +915,13 @@ class TrajectoryRecorder:
         This is the boundary we want for teach-and-repeat: compile the full job
         once, then let execution focus on dispatch/monitoring instead of
         recomputing waypoint timing inside the playback loop.
+
+        When ``motion_config.USE_MIXED_PRIMITIVES`` is True, the pipeline
+        classifies segments as LINE/ARC/GENERAL after RDP simplification
+        and emits the most efficient MG400 command for each segment type:
+          LINE    → single ``MovL``   (Cartesian linear)
+          ARC     → single ``Arc``    (Cartesian arc via 3 defining points)
+          GENERAL → per-waypoint ``JointMovJ`` chain (fallback)
         """
         if not self.loaded_frames:
             raise ValueError("No trajectory loaded for playback compilation")
@@ -722,29 +950,26 @@ class TrajectoryRecorder:
         source_target_t = np.array(
             [float(f["timeStamp"]) - source_t0_traj for f in source_frames]
         )
+        execution_profile = self._playback_execution_profile()
+        target_t = self._fast_repeat_schedule_times(frames, target_t)
+        if execution_profile == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT:
+            total_dur = max(total_dur, float(target_t[-1]) if len(target_t) else 0.0)
         lookahead = self._lookahead_seconds(target_t)
 
-        queued_commands = []
-        for idx in range(1, len(frames)):
-            frame = frames[idx]
-            prev_frame = frames[idx - 1]
-            speed_j = self._segment_speed_j(prev_frame, frame)
-            cp = PREVIEW_FINAL_CP if idx == len(frames) - 1 else PREVIEW_STREAM_CP
-            joints = self._frame_q_deg(frame)
-            queued_commands.append(
-                CompiledPlaybackCommand(
-                    index=idx,
-                    target_time_s=float(target_t[idx]),
-                    original_target_time_s=float(source_target_t[idx]),
-                    joints_deg=tuple(float(v) for v in joints),
-                    speed_j=int(speed_j),
-                    cp=int(cp),
-                    command=self._build_jointmovj_command(
-                        joints,
-                        speed_j=speed_j,
-                        cp=cp,
-                    ),
-                )
+        # ── Mixed-primitive classification ────────────────────────────
+        use_mixed = bool(getattr(motion_config, "USE_MIXED_PRIMITIVES", False))
+
+        if use_mixed:
+            queued_commands = self._compile_mixed_commands(
+                frames,
+                target_t,
+                source_target_t,
+                source_frames=source_frames,
+                raw_frames=raw_frames,
+            )
+        else:
+            queued_commands = self._compile_jointmovj_commands(
+                frames, target_t, source_target_t,
             )
 
         event_commands = self._compile_event_commands(
@@ -754,6 +979,11 @@ class TrajectoryRecorder:
         )
         if event_commands:
             total_dur = max(total_dur, max(e.target_time_s for e in event_commands))
+        if execution_profile == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT:
+            timeout_budget = len(queued_commands) * float(
+                getattr(motion_config, "FAST_REPEAT_TIMEOUT_PER_COMMAND_SEC", 1.0)
+            )
+            total_dur = max(total_dur, timeout_budget)
 
         return CompiledPlaybackPlan(
             source_name=self.loaded_name or "inline_trajectory",
@@ -768,7 +998,191 @@ class TrajectoryRecorder:
             lookahead_s=float(lookahead),
             raw_waypoint_count=raw_count,
             simplify_tolerance_deg=tolerance,
+            execution_profile=execution_profile,
         )
+
+    # ── Command compilation strategies ───────────────────────────────
+
+    def _compile_jointmovj_commands(
+        self, frames, target_t, source_target_t,
+    ) -> list:
+        """Original strategy: one JointMovJ per waypoint."""
+        queued_commands = []
+        for idx in range(1, len(frames)):
+            frame = frames[idx]
+            prev_frame = frames[idx - 1]
+            speed_j = self._segment_speed_j(prev_frame, frame)
+            cp = self._stream_cp(is_final=idx == len(frames) - 1)
+            joints = self._frame_q_deg(frame)
+            queued_commands.append(
+                CompiledPlaybackCommand(
+                    index=idx,
+                    target_time_s=float(target_t[idx]),
+                    original_target_time_s=float(source_target_t[idx]),
+                    joints_deg=tuple(float(v) for v in joints),
+                    speed_j=int(speed_j),
+                    cp=int(cp),
+                    command=self._build_jointmovj_command(
+                        joints,
+                        speed_j=speed_j,
+                        cp=cp,
+                        acc_j=self._stream_acc_j(),
+                    ),
+                )
+            )
+        return queued_commands
+
+    def _compile_mixed_commands(
+        self,
+        frames,
+        target_t,
+        source_target_t,
+        *,
+        source_frames=None,
+        raw_frames=None,
+    ) -> list:
+        """Mixed-primitive strategy: LINE→MovL, ARC→Arc, GENERAL→JointMovJ."""
+        joint_points = [self._frame_q_deg(f) for f in frames]
+
+        line_tol = float(getattr(motion_config, "SEGMENT_LINE_TOLERANCE_MM", 2.0))
+        arc_tol = float(getattr(motion_config, "SEGMENT_ARC_TOLERANCE_MM", 3.0))
+        max_arc_radius = float(getattr(motion_config, "SEGMENT_MAX_ARC_RADIUS_MM", 10000.0))
+        r_tol = float(getattr(motion_config, "SEGMENT_R_TOLERANCE_DEG", 10.0))
+        raw_fit_tol = float(getattr(motion_config, "SEGMENT_RAW_FIT_TOLERANCE_MM", 0.0))
+        min_arc = int(getattr(motion_config, "SEGMENT_MIN_POINTS_FOR_ARC", 3))
+        enable_arc = bool(getattr(motion_config, "SEGMENT_ENABLE_ARC", False))
+        acc_l = self._stream_acc_l()
+
+        segments = classify_segments(
+            joint_points,
+            fk_fn=self._fk_for_classifier,
+            line_tol_mm=line_tol,
+            arc_tol_mm=arc_tol,
+            max_arc_radius_mm=max_arc_radius,
+            r_tol_deg=r_tol,
+            min_points_for_arc=min_arc,
+            enable_arc=enable_arc,
+        )
+
+        summary = segment_summary(segments)
+        self._log.info(f"🔀 Mixed-primitive: {summary}")
+
+        queued_commands = []
+        for seg in segments:
+            end_idx = seg.end_idx
+            end_frame = frames[end_idx]
+            is_final = (end_idx == len(frames) - 1)
+            cp = self._stream_cp(is_final=is_final)
+
+            primitive_type = seg.type
+            if primitive_type == SegmentType.LINE and not self._line_primitive_reachable(seg):
+                self._log.warn(
+                    f"⚠️  MovL segment {seg.start_idx}->{seg.end_idx} is not IK-feasible; "
+                    "falling back to JointMovJ waypoints"
+                )
+                primitive_type = SegmentType.GENERAL
+            elif primitive_type == SegmentType.ARC and not self._arc_primitive_reachable(seg):
+                self._log.warn(
+                    f"⚠️  Arc segment {seg.start_idx}->{seg.end_idx} is not IK-feasible; "
+                    "falling back to JointMovJ waypoints"
+                )
+                primitive_type = SegmentType.GENERAL
+            elif raw_fit_tol > 0.0 and primitive_type in {SegmentType.LINE, SegmentType.ARC}:
+                raw_error = self._raw_fit_error_mm(
+                    seg,
+                    primitive_type,
+                    source_frames,
+                    raw_frames,
+                )
+                if raw_error > raw_fit_tol:
+                    self._log.warn(
+                        f"⚠️  {primitive_type.name} segment {seg.start_idx}->{seg.end_idx} "
+                        f"deviates {raw_error:.2f}mm from raw Unity path "
+                        f"(limit {raw_fit_tol:.2f}mm); falling back to JointMovJ waypoints"
+                    )
+                    primitive_type = SegmentType.GENERAL
+
+            if primitive_type == SegmentType.LINE:
+                # Single MovL command for the whole line segment
+                end_xyzr = seg.end_xyzr
+                speed_j = self._segment_speed_j(frames[seg.start_idx], end_frame)
+                speed_l = self._segment_speed_l(seg, frames)
+                cmd_str = mov_l_cartesian(
+                    target_xyzr=end_xyzr,
+                    speed_l=speed_l,
+                    acc_l=acc_l,
+                    cp=cp,
+                ).render()
+                queued_commands.append(
+                    CompiledPlaybackCommand(
+                        index=end_idx,
+                        target_time_s=float(target_t[end_idx]),
+                        original_target_time_s=float(source_target_t[end_idx]),
+                        joints_deg=tuple(float(v) for v in self._frame_q_deg(end_frame)),
+                        speed_j=int(speed_j),
+                        cp=int(cp),
+                        command=cmd_str,
+                    )
+                )
+
+            elif primitive_type == SegmentType.ARC:
+                # Single Arc command: through-point + end-point
+                through_xyzr = seg.through_xyzr
+                end_xyzr = seg.end_xyzr
+                speed_j = self._segment_speed_j(frames[seg.start_idx], end_frame)
+                speed_l = self._segment_speed_l(seg, frames)
+                cmd_str = arc(
+                    through_xyzr=through_xyzr,
+                    target_xyzr=end_xyzr,
+                    speed_l=speed_l,
+                    acc_l=acc_l,
+                    cp=cp,
+                ).render()
+                queued_commands.append(
+                    CompiledPlaybackCommand(
+                        index=end_idx,
+                        target_time_s=float(target_t[end_idx]),
+                        original_target_time_s=float(source_target_t[end_idx]),
+                        joints_deg=tuple(float(v) for v in self._frame_q_deg(end_frame)),
+                        speed_j=int(speed_j),
+                        cp=int(cp),
+                        command=cmd_str,
+                    )
+                )
+
+            else:  # GENERAL — fallback per-point JointMovJ
+                for idx in range(seg.start_idx + 1, seg.end_idx + 1):
+                    frame = frames[idx]
+                    prev_frame = frames[idx - 1]
+                    speed_j = self._segment_speed_j(prev_frame, frame)
+                    pt_cp = self._stream_cp(is_final=idx == len(frames) - 1)
+                    joints = self._frame_q_deg(frame)
+                    queued_commands.append(
+                        CompiledPlaybackCommand(
+                            index=idx,
+                            target_time_s=float(target_t[idx]),
+                            original_target_time_s=float(source_target_t[idx]),
+                            joints_deg=tuple(float(v) for v in joints),
+                            speed_j=int(speed_j),
+                            cp=int(pt_cp),
+                            command=self._build_jointmovj_command(
+                                joints,
+                                speed_j=speed_j,
+                                cp=pt_cp,
+                                acc_j=self._stream_acc_j(),
+                            ),
+                        )
+                    )
+
+        return queued_commands
+
+    @staticmethod
+    def _fk_for_classifier(j1, j2, j3, j4):
+        """FK adapter for segment classifier: (j1,j2,j3,j4) → (x,y,z,r)."""
+        kin = KinematicsCalculator()
+        result = kin.forward_kinematics([j1, j2, j3, j4])
+        # result is [x, y, z, rx, ry, rz]
+        return (float(result[0]), float(result[1]), float(result[2]), float(result[3]))
 
     def export_loaded_plan(self, path: str) -> str:
         """Compile + export the current playback job as a JSON artifact."""
@@ -899,8 +1313,8 @@ class TrajectoryRecorder:
             elapsed_s=float(elapsed),
         )
 
-    def _playback_complete(self, idx, elapsed, total_dur, target_q):
-        if idx < len(target_q):
+    def _playback_complete(self, all_commands_sent, elapsed, total_dur, target_q):
+        if not all_commands_sent:
             return False
 
         if self._get_pos is not None:
@@ -950,7 +1364,7 @@ class TrajectoryRecorder:
             self._log.warn("⚠️  Preview aborted: robot did not reach trajectory start in time")
             return
 
-        idx = 1
+        command_idx = 0
         event_idx = 0
         t_start = self._time_fn()
         self._emit_playback_event(
@@ -962,6 +1376,7 @@ class TrajectoryRecorder:
             original_timing_feasible=plan.original_timing_feasible,
             waypoints=n,
             execution_model="compiled_queue_plan",
+            execution_profile=plan.execution_profile,
         )
         while not self._stop_flag.is_set():
             elapsed = self._time_fn() - t_start
@@ -974,8 +1389,13 @@ class TrajectoryRecorder:
                 event_idx += 1
             
             # 1. Pre-send any waypoints that fall within the current lookahead window
-            while idx - 1 < len(plan.queued_commands) and target_t[idx] <= elapsed + plan.lookahead_s:
-                compiled = plan.queued_commands[idx - 1]
+            sent_this_cycle = 0
+            max_commands_per_cycle = self._max_commands_per_cycle()
+            while (
+                command_idx < len(plan.queued_commands)
+                and plan.queued_commands[command_idx].target_time_s <= elapsed + plan.lookahead_s
+            ):
+                compiled = plan.queued_commands[command_idx]
                 self._send(compiled.command)
                 self._emit_playback_event(
                     "waypoint_queued",
@@ -996,7 +1416,10 @@ class TrajectoryRecorder:
                     except Exception:
                         pass
                         
-                idx += 1
+                command_idx += 1
+                sent_this_cycle += 1
+                if sent_this_cycle >= max_commands_per_cycle:
+                    break
                 
             # 2. Publish smooth real-time target for accurate graphing (like race.py)
             if self._target_cb is not None:
@@ -1012,7 +1435,8 @@ class TrajectoryRecorder:
             # 3. Check loop termination
             if (
                 event_idx >= len(plan.event_commands)
-                and self._playback_complete(idx, elapsed, total_dur, target_q)
+                and command_idx >= len(plan.queued_commands)
+                and self._playback_complete(True, elapsed, total_dur, target_q)
             ):
                 break
             if self._playback_timed_out(elapsed, total_dur):

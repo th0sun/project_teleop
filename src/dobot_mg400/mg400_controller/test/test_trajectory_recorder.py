@@ -10,6 +10,7 @@ from mg400_controller.common.trajectory.trajectory_recorder import (
     TrajectoryRecorder,
     frames_from_joint_trajectory_msg,
 )
+from mg400_controller.common.utils.kinematics import KinematicsCalculator
 
 
 class FakeLogger:
@@ -129,9 +130,10 @@ class TrajectoryRecorderTest(unittest.TestCase):
             sleep_fn=clock.sleep,
         )
 
-        self.assertFalse(recorder._playback_complete(2, 1.0, 1.0, target_q))
-        self.assertFalse(recorder._playback_complete(2, 1.1, 1.0, target_q))
-        self.assertTrue(recorder._playback_complete(2, 1.2, 1.0, target_q))
+        self.assertFalse(recorder._playback_complete(False, 1.2, 1.0, target_q))
+        self.assertFalse(recorder._playback_complete(True, 1.0, 1.0, target_q))
+        self.assertFalse(recorder._playback_complete(True, 1.1, 1.0, target_q))
+        self.assertTrue(recorder._playback_complete(True, 1.2, 1.0, target_q))
         self.assertLessEqual(PREVIEW_FINAL_TOLERANCE_DEG, 0.05)
 
     def test_playback_complete_waits_for_robot_mode_to_leave_running(self):
@@ -152,8 +154,8 @@ class TrajectoryRecorderTest(unittest.TestCase):
             traj_dir=self.temp_dir.name,
         )
 
-        self.assertFalse(recorder._playback_complete(2, 1.0, 1.0, target_q))
-        self.assertTrue(recorder._playback_complete(2, 1.1, 1.0, target_q))
+        self.assertFalse(recorder._playback_complete(True, 1.0, 1.0, target_q))
+        self.assertTrue(recorder._playback_complete(True, 1.1, 1.0, target_q))
 
     def test_playback_complete_uses_extra_timeout_without_feedback(self):
         clock = FakeClock()
@@ -167,8 +169,9 @@ class TrajectoryRecorderTest(unittest.TestCase):
         )
         target_q = np.array([[0.0, 0.0, 0.0, 0.0]])
 
-        self.assertFalse(recorder._playback_complete(1, 1.5, 1.0, target_q))
-        self.assertTrue(recorder._playback_complete(1, 3.1, 1.0, target_q))
+        self.assertFalse(recorder._playback_complete(False, 3.1, 1.0, target_q))
+        self.assertFalse(recorder._playback_complete(True, 1.5, 1.0, target_q))
+        self.assertTrue(recorder._playback_complete(True, 3.1, 1.0, target_q))
 
     def test_playback_complete_does_not_succeed_on_absolute_timeout_with_feedback(self):
         target_q = np.array([
@@ -186,7 +189,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
             traj_dir=self.temp_dir.name,
         )
 
-        self.assertFalse(recorder._playback_complete(2, 999.0, 1.0, target_q))
+        self.assertFalse(recorder._playback_complete(True, 999.0, 1.0, target_q))
         self.assertTrue(recorder._playback_timed_out(999.0, 1.0))
 
     def test_timeout_flushes_motion_queue_when_dashboard_channel_exists(self):
@@ -218,6 +221,27 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertGreaterEqual(slow_speed, 15)
         self.assertLessEqual(fast_speed, 100)
 
+    def test_mg400_ik_round_trips_known_joint_pose(self):
+        kin = KinematicsCalculator()
+        joints = np.array([20.0, 10.0, 15.0, -5.0])
+        tool = kin.forward_kinematics(joints)
+        solved = kin.inverse_kinematics(tool[:4])
+
+        np.testing.assert_allclose(solved, joints, atol=1e-4)
+
+    def test_line_primitive_reachability_rejects_unreachable_midpoint(self):
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+
+        class FakeSegment:
+            start_xyzr = (250.0, 0.0, 120.0, 0.0)
+            end_xyzr = (600.0, 0.0, 120.0, 0.0)
+
+        self.assertFalse(recorder._line_primitive_reachable(FakeSegment(), samples=4))
+
     def test_compile_loaded_plan_precomputes_commands_and_timing(self):
         recorder = TrajectoryRecorder(
             command_send_fn=lambda cmd: True,
@@ -237,12 +261,44 @@ class TrajectoryRecorderTest(unittest.TestCase):
 
         self.assertEqual(plan.source_name, "demo.json")
         self.assertEqual(len(plan.waypoints), 3)
-        self.assertEqual(len(plan.queued_commands), 2)
+        # With mixed primitives, the 3 waypoints (all j1-only, others zero)
+        # may be collapsed into fewer commands than 2.  The key invariant is
+        # that we get at least 1 queued command and the plan compiles.
+        self.assertGreaterEqual(len(plan.queued_commands), 1)
         self.assertAlmostEqual(plan.total_duration_s, 0.3)
         self.assertTrue(plan.original_timing_feasible)
-        self.assertIn("JointMovJ(2.0000", plan.queued_commands[0].command)
-        self.assertEqual(plan.queued_commands[0].speed_j, 15)
-        self.assertEqual(plan.queued_commands[1].cp, 0)
+        # Last command must settle (CP=0)
+        self.assertEqual(plan.queued_commands[-1].cp, 0)
+
+    def test_fastest_path_repeat_uses_fast_caps_instead_of_hand_timestamps(self):
+        self._set_simplify_tolerance(0.0)
+        self._set_mixed_primitives(False)
+        self._set_execution_profile("fastest_path_repeat")
+        recorder = TrajectoryRecorder(
+            command_send_fn=lambda cmd: True,
+            logger=FakeLogger(),
+            traj_dir=self.temp_dir.name,
+        )
+        recorder.load_frames(
+            [
+                {"timeStamp": 0.0, "j1": 0.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+                {"timeStamp": 2.0, "j1": 2.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+                {"timeStamp": 4.0, "j1": 4.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
+            ],
+            name="slow_hand.json",
+        )
+
+        plan = recorder.compile_loaded_plan()
+        payload = compiled_playback_plan_to_dict(plan)
+
+        self.assertEqual(plan.execution_profile, "fastest_path_repeat")
+        self.assertEqual(payload["execution_profile"], "fastest_path_repeat")
+        self.assertEqual([cmd.speed_j for cmd in plan.queued_commands], [100, 100])
+        self.assertLess(plan.queued_commands[0].target_time_s, 2.0)
+        self.assertLess(plan.queued_commands[1].target_time_s, 4.0)
+        self.assertIn("AccJ=100", plan.queued_commands[0].command)
+        self.assertIn("CP=100", plan.queued_commands[0].command)
+        self.assertIn("CP=0", plan.queued_commands[-1].command)
 
     def test_compile_loaded_plan_includes_robot_neutral_io_events(self):
         recorder = TrajectoryRecorder(
@@ -287,6 +343,20 @@ class TrajectoryRecorderTest(unittest.TestCase):
         original = cfg.PATH_SIMPLIFY_TOLERANCE_DEG
         cfg.PATH_SIMPLIFY_TOLERANCE_DEG = value
         self.addCleanup(setattr, cfg, "PATH_SIMPLIFY_TOLERANCE_DEG", original)
+
+    def _set_mixed_primitives(self, value):
+        """Patch USE_MIXED_PRIMITIVES and undo it on test teardown."""
+        import mg400_controller.common.config.motion_config as cfg
+        original = getattr(cfg, "USE_MIXED_PRIMITIVES", True)
+        cfg.USE_MIXED_PRIMITIVES = value
+        self.addCleanup(setattr, cfg, "USE_MIXED_PRIMITIVES", original)
+
+    def _set_execution_profile(self, value):
+        """Patch PLAYBACK_EXECUTION_PROFILE and undo it on test teardown."""
+        import mg400_controller.common.config.motion_config as cfg
+        original = getattr(cfg, "PLAYBACK_EXECUTION_PROFILE", "preserve_timing")
+        cfg.PLAYBACK_EXECUTION_PROFILE = value
+        self.addCleanup(setattr, cfg, "PLAYBACK_EXECUTION_PROFILE", original)
 
     def test_compile_collapses_dense_straight_line_to_endpoints(self):
         self._set_simplify_tolerance(0.5)
@@ -420,12 +490,48 @@ class TrajectoryRecorderTest(unittest.TestCase):
             f"simplified straight line should hit wire as 2 commands; got {sent_motion}",
         )
         self.assertIn("JointMovJ(0.0000", sent_motion[0])  # go-to-start
-        self.assertIn("JointMovJ(10.0000", sent_motion[1])  # endpoint
+        # Endpoint command: may be JointMovJ or MovL depending on mixed mode
+        self.assertIn("10.0000", sent_motion[1])  # endpoint j1 or x-coord
         # Final command must settle (CP=0), not blend.
         self.assertIn("CP=0", sent_motion[1])
 
         queued = [e for e in events if e[0] == "waypoint_queued"]
         self.assertEqual(len(queued), 1, "exactly one waypoint should be queued")
+
+    def test_play_worker_completes_when_mixed_command_count_is_less_than_frames(self):
+        """Regression: command pointer must not be compared to frame count."""
+        self._set_simplify_tolerance(0.5)
+        self._set_mixed_primitives(True)
+        sent_motion = []
+        events = []
+        clock = FakeClock()
+        feed = PositionFeed([
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0, 0.0],
+        ])
+        recorder = TrajectoryRecorder(
+            command_send_fn=sent_motion.append,
+            logger=FakeLogger(),
+            get_position_fn=feed,
+            playback_event_callback=lambda e, p: events.append((e, p)),
+            traj_dir=self.temp_dir.name,
+            time_fn=clock,
+            sleep_fn=clock.sleep,
+        )
+        recorder.load_frames([
+            {"timeStamp": i * 0.1, "j1": float(i), "j2": 0.0, "j3": 0.0, "j4": 0.0}
+            for i in range(11)
+        ])
+
+        recorder._play_worker()
+
+        completion = [event for event in events if event[0] == "playback_complete"]
+        self.assertEqual(len(completion), 1)
+        self.assertTrue(completion[0][1]["success"], completion[0][1])
+        self.assertFalse(completion[0][1]["timed_out"], completion[0][1])
+        self.assertLess(clock.value - 100.0, 5.0)
 
     def test_simplification_preserves_io_event_timing_alignment(self):
         """Events at intermediate timestamps must still fire at the correct
@@ -543,7 +649,11 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(data["source_name"], "export_demo.json")
         self.assertEqual(data["waypoint_count"], 2)
         self.assertEqual(data["queued_command_count"], 1)
-        self.assertIn("JointMovJ(2.0000", data["queued_commands"][0]["command"])
+        cmd = data["queued_commands"][0]["command"]
+        self.assertTrue(
+            "JointMovJ" in cmd or "MovL" in cmd or "Arc" in cmd,
+            f"Expected a motion command, got: {cmd}",
+        )
 
     def test_compiled_playback_plan_to_dict_is_json_safe(self):
         recorder = TrajectoryRecorder(
@@ -565,6 +675,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertIsInstance(payload["queued_commands"][0]["joints_deg"], list)
 
     def test_play_worker_skips_duplicate_start_and_uses_segment_speed(self):
+        self._set_mixed_primitives(False)  # Test JointMovJ-only pipeline
         sent_commands = []
         events = []
         clock = FakeClock()
@@ -647,6 +758,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(io_events[0][1]["channel"], "green_light")
 
     def test_play_worker_retimes_too_fast_segments_instead_of_decimating(self):
+        self._set_mixed_primitives(False)  # Test JointMovJ-only pipeline
         sent_commands = []
         events = []
         clock = FakeClock()

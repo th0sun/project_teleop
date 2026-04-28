@@ -9,10 +9,14 @@ of scattering vendor literals through translator/executor code.
 from mg400_protocol.alarms import AlarmCatalog, AlarmInfo  # noqa: F401
 from mg400_protocol.commands import (  # noqa: F401
     DobotCommand,
+    arc,
+    circle,
     do_execute,
     joint_mov_j,
     mov_j,
     mov_l,
+    mov_l_cartesian,
+    mov_l_io,
 )
 from mg400_protocol.dashboard import (  # noqa: F401
     acc_j,

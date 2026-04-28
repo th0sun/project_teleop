@@ -1237,3 +1237,253 @@ Remaining follow-up:
   host-streamed motion is still limited by the existing executor.  For
   high-fidelity task replay, the controller-side/offline execution path
   remains the long-term fix.
+
+## 23. Phase 2 Evidence — Mixed Primitive Mock Replay
+
+Question:
+
+- Can the current mixed-primitive compiler (`MovL` / `Arc` / fallback
+  `JointMovJ`) make teach-and-repeat match the taught path when replayed
+  through the live MG400 Mock?
+
+What changed before testing:
+
+- Fixed the playback loop to use a separate command pointer instead of using
+  the same index as both waypoint index and queued-command index.  This matters
+  because one `MovL` or `Arc` can represent many taught frames.
+- Added wrist/R-path tolerance to segment classification so a path is not
+  collapsed to one primitive when the wrist orientation history is meaningful.
+- Added a 3D evidence renderer:
+  `tools/demo_lift/render_teach_repeat_3d.py`.
+
+Validation:
+
+- Unit tests passed:
+  - `test_mg400_protocol.py`
+  - `test_segment_classifier.py`
+  - `test_trajectory_recorder.py`
+  - total: `70 tests`
+- Live MG400 Mock TCP tests were run against
+  `127.0.0.1:29999/30003/30004`.
+
+Results:
+
+| Trajectory | Result | Evidence |
+|------------|--------|----------|
+| `unity_mock_test.json` | PASS geometry / FAIL timing-exactness | 3 frames -> 2 `MovL`; final error `0.0 mm`; planned `1.000 s`, measured `2.463 s`; max path deviation `0.0 mm`; max time-aligned XYZ error `67.4613 mm` |
+| `Pick_place_1.json` with Arc enabled | FAIL because Mock rejects Arc | 122 frames -> 80 simplified waypoints -> 38 commands (`26 MovL`, `12 Arc`); Mock logs `MotionCommands object has no attribute 'Arc'`; final XYZ error `617.2313 mm` |
+| `Pick_place_1.json` with Arc disabled | PASS geometry / FAIL timing-exactness | 122 frames -> 80 simplified waypoints -> 59 `MovL`; final error `0.0 mm`; planned `15.986 s`, measured `33.445 s`; max path deviation `5.5536 mm`; mean path deviation `0.356 mm` |
+| `Pick_place_1.json` JointMovJ-only | FAIL | 122 frames -> 80 simplified waypoints -> 79 `JointMovJ`; timeout at `46.854 s`; final XYZ error `15.1529 mm`; max path deviation `10.0966 mm`; mean path deviation `1.8932 mm` |
+
+Artifacts:
+
+- `docs/report_materials/mock_runs/unity_mock_test_mixed_probe.json`
+- `docs/report_materials/mock_runs/Pick_place_1_mixed_probe.json`
+- `docs/report_materials/mock_runs/Pick_place_1_noarc_speedfactor100_probe.json`
+- `docs/report_materials/mock_runs/Pick_place_1_jointmovj_speedfactor100_probe.json`
+- `docs/report_materials/figures/unity_mock_test_teach_repeat_3d.png`
+- `docs/report_materials/figures/unity_mock_test_replay.gif`
+- `docs/report_materials/figures/Pick_place_1_teach_repeat_3d.png`
+- `docs/report_materials/figures/Pick_place_1_noarc_teach_repeat_3d.png`
+- `docs/report_materials/figures/Pick_place_1_jointmovj_teach_repeat_3d.png`
+- `docs/report_materials/figures/Pick_place_1_replay.gif`
+- Detailed report:
+  `docs/report_materials/mixed_primitive_benchmark_report.md`
+
+Interpretation:
+
+- The mixed compiler is useful as an intermediate program/export layer.
+- It does reduce command count and can preserve geometry for simple paths.
+- It does not, by itself, solve teach-repeat timing for dense Unity captures:
+  after disabling Arc for Mock compatibility, path replay passes but repeat
+  duration is still about 2.1x the taught duration.
+- For `Pick_place_1.json`, using `MovL` for proven-straight Cartesian
+  segments is better than forcing JointMovJ-only, because the taught object is
+  the end-effector path, not just the joint-angle sequence.
+- Host-streamed TCP remains a fallback execution mode, not the final answer for
+  high-fidelity teaching.
+
+Important Mock caveat:
+
+- `MG400_Mock` has been restored to the clean submodule version.  It should be
+  kept as a baseline test backend.
+- Because that baseline does not implement `Arc`, the project default is now
+  `SEGMENT_ENABLE_ARC=False`.  Arc should be enabled only for a validated
+  backend/hardware target.
+
+Decision:
+
+- Do not mark mixed primitives as hardware-ready.
+- Keep the evidence tooling and use it for every future playback strategy.
+- For demo day, require a trajectory to pass Mock acceptance before calling it
+  safe for repeat.
+- Split acceptance into two labels: "path replay passed" and "timing matched".
+- Continue the controller-side/offline execution path (`RunScript` /
+  vendor-program deployment) as the real solution for dense teach-repeat jobs.
+
+### 2026-04-26 Follow-up
+
+Added a separate `tools/mg400_mock_extended/` backend instead of modifying the
+`MG400_Mock` submodule.  The extended backend mounts local override files over
+the upstream mock and implements `Arc(...)` so the compiler can be tested
+against the 4-axis manual command surface while keeping the upstream mock clean.
+
+Added compiler reachability checks:
+
+- `MovL` is emitted only when sampled points along the line are reachable by
+  MG400 IK.
+- `Arc` is emitted only when sampled points along the circular arc are
+  reachable by MG400 IK.
+- otherwise the segment falls back to `JointMovJ` over the taught waypoints.
+
+Latest live TCP evidence against `mg400_mock_extended`:
+
+| Trajectory | Commands | Mix | Planned | Measured | Max path dev | Final XYZ |
+|------------|---------:|-----|--------:|---------:|-------------:|----------:|
+| `money.json` | 85 | `55 MovL`, `9 Arc`, `21 JointMovJ` | `14.665 s` | `48.818 s` | `27.8857 mm` | `0.0 mm` |
+| `Pick_place_1.json` | 38 | `26 MovL`, `12 Arc` | `15.986 s` | `28.266 s` | `5.5786 mm` | `0.0 mm` |
+| `Pick_place_2.json` | 48 | `21 MovL`, `20 Arc`, `7 JointMovJ` | `21.712 s` | `34.278 s` | `3.7097 mm` | `0.0001 mm` |
+
+Decision:
+
+- Mixed primitive planning is useful and should stay, but it must be presented
+  as a geometric compiler, not a timestamp-perfect executor.
+- The result supports the user's design direction: compile the full Unity JSON
+  first, reduce dense points into path primitives, then execute a program.  It
+  also proves why live host-streaming remains the wrong final execution model.
+- Near-term demo acceptance should require two separate checks:
+  `path replay passed` and `timing matched`.  Current evidence passes geometry
+  for `Pick_place_1` / `Pick_place_2`, but does not pass timing.
+
+### 2026-04-26 Follow-up 2 — Fastest Path Repeat Profile
+
+Question:
+
+- If the goal is "follow the taught hand path as fast as the MG400 can execute"
+  rather than "preserve the exact VR hand timestamps", should replay still use
+  timestamp-derived `SpeedL` / `SpeedJ`?
+
+Decision:
+
+- No.  The project now separates two replay profiles:
+  - `preserve_timing`: preserve the taught timestamps when possible.
+  - `fastest_path_repeat`: preserve path geometry, ignore the hand timestamp as
+    a speed command, and use configured high speed/acc/CP limits.
+
+Why this matters:
+
+- Earlier mixed-primitive runs still produced many low `SpeedL` values because
+  `_segment_speed_l()` calculated speed from `distance / taught_dt`.
+- That behavior is correct for timing studies, but wrong for the user's demo
+  goal of making the robot complete the taught task as quickly as its own
+  constraints allow.
+- `CP=100` helps blending, but it does not remove robot limits.  The robot or
+  mock can still slow down due to acceleration, joint/workspace limits, final
+  exact-settle segments (`CP=0`), command parsing/queue behavior, or primitive
+  execution model.
+
+Implementation notes:
+
+- Added `PLAYBACK_EXECUTION_PROFILE = "preserve_timing"` to keep the current
+  default conservative.
+- Added `fastest_path_repeat` caps:
+  `FAST_REPEAT_SPEED_J`, `FAST_REPEAT_ACC_J`, `FAST_REPEAT_SPEED_L`,
+  `FAST_REPEAT_ACC_L`, `FAST_REPEAT_CP`, and `FAST_REPEAT_FINAL_CP`.
+- Fast mode feeds the command queue ahead of time, but now limits the sender to
+  one command per playback cycle.  A previous probe sent all commands in one
+  tick; TCP packet coalescing caused the mock path to fail even though command
+  generation was valid.
+
+Latest live TCP evidence against `mg400_mock_extended` using
+`--execution-profile fastest_path_repeat`:
+
+| Trajectory | Commands | Mix | Planned | Current measured | Fast measured | Max path dev | Final XYZ |
+|------------|---------:|-----|--------:|-----------------:|--------------:|-------------:|----------:|
+| `money.json` | 75 | `54 MovL`, `6 Arc`, `15 JointMovJ` | `14.665 s` | `46.014 s` | `39.115 s` | `36.1561 mm` | `0.0 mm` |
+| `Pick_place_1.json` | 29 | `18 MovL`, `8 Arc`, `3 JointMovJ` | `15.986 s` | `25.902 s` | `20.754 s` | `13.9291 mm` | `0.0 mm` |
+| `Pick_place_2.json` | 43 | `25 MovL`, `11 Arc`, `7 JointMovJ` | `21.712 s` | `33.960 s` | `27.959 s` | `10.1508 mm` | `0.0001 mm` |
+
+Artifacts:
+
+- `docs/report_materials/mock_runs/fastest_path_repeat/money_fastest_path_repeat.json`
+- `docs/report_materials/mock_runs/fastest_path_repeat/Pick_place_1_fastest_path_repeat.json`
+- `docs/report_materials/mock_runs/fastest_path_repeat/Pick_place_2_fastest_path_repeat.json`
+- `docs/report_materials/figures/money_fastest_path_repeat_3d.png`
+- `docs/report_materials/figures/Pick_place_1_fastest_path_repeat_3d.png`
+- `docs/report_materials/figures/Pick_place_2_fastest_path_repeat_3d.png`
+
+Interpretation:
+
+- Fastest-path repeat is better aligned with the demo goal than
+  timestamp-preserving replay.
+- It improves measured replay time on all three Unity trajectories while
+  preserving final pose accuracy on the extended mock.
+- It still does not make the robot "instant" or timestamp-perfect.  The
+  remaining delay is now mostly the robot/mock execution model and the number
+  and shape of primitives, not the original hand timestamps.
+- Next optimization should focus on path-quality tradeoffs and primitive
+  reduction without exceeding path deviation limits, plus hardware validation
+  of CP behavior on the real MG400.
+
+### 2026-04-26 Follow-up 3 — CP Support In Mock Extended
+
+Question:
+
+- Can the extended mock simulate `CP=R` well enough to distinguish
+  `CP=0` stop-at-waypoint behavior from `CP=100` queue-blended behavior?
+
+What changed:
+
+- Added `CP=` parsing to the local override for `JointMovJ`, `MovJ`, `MovL`,
+  and `Arc`.
+- Added queue lookahead in `tools/mg400_mock_extended/overrides/` so the
+  current motion can trim its endpoint when a successor motion is already
+  queued.
+- Added a short CP lookahead wait in the mock so line-by-line queued sends are
+  more likely to see the next motion before the first motion fully commits.
+- Blend strength is still heuristic, not vendor-firmware-exact, but it is now
+  calibrated against the user's real MG400 CP100 log:
+  straight-through points stay close to the taught waypoint, while sharp
+  turn-around points are trimmed more aggressively.
+
+Live TCP probe against `127.0.0.1:30999/31003/31004`:
+
+- Sequence `0 -> 45 -> 160`
+  - `CP=0` on the `0 -> 45` command:
+    closest sample at `45.0000`, speed at closest sample `0.0`,
+    samples within `+-0.5 deg` of the waypoint: `15`
+  - `CP=100` on the `0 -> 45` command:
+    closest sample at `44.5414`, speed at closest sample `119.0`,
+    samples within `+-0.5 deg` of the waypoint: `1`
+- Result:
+  the blended case no longer stops at the through waypoint, which is the
+  intended acceptance behavior for the extended mock.
+
+Cross-check with the real-hardware test material in
+`_supporting_materials/tools/robot_control_tools/points.txt`:
+
+- The file still contains queued `JointMovJ(..., CP=100)` commands.
+- The accompanying `robot_log.csv` is a real MG400 capture whose J1 extrema are
+  approximately `-123.8 deg` and `134.2 deg` for that CP100 sequence, meaning
+  the real robot did not fully touch the `-160` or `160` turn-around waypoints.
+- After the updated heuristic plus lookahead wait, the extended mock reaches
+  approximately `-132.8 deg` and `140.3 deg` on the same queued pattern.  That
+  is not exact firmware parity, but it is materially closer than the old mock,
+  which ignored `CP` and stopped at every point.
+
+### 2026-04-28 Follow-up — Artifact Cleanup Before Commit
+
+The repo root had accumulated ad-hoc probe videos, probe JSON files, temporary
+render scripts, logger test scripts, and one captured triple-layer CSV.  They
+were useful for investigation but made the main repo hard to review and unsafe
+to commit as-is.
+
+Action taken:
+
+- Moved root-level generated videos/probe JSON/scripts/docs/logs to
+  `_supporting_materials/generated/project_teleop_root_artifacts_20260428/`.
+- Moved bulky untracked report artifacts from `docs/report_materials/` to
+  `_supporting_materials/generated/project_teleop_report_artifacts_20260428/`
+  while preserving their subfolder layout.
+- Kept source files, tests, mock extension code, and markdown notes in the repo
+  so they can still be reviewed and committed intentionally.

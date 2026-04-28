@@ -4,7 +4,16 @@ from pathlib import Path
 import numpy as np
 
 from mg400_protocol.alarms import AlarmCatalog
-from mg400_protocol.commands import do_execute, joint_mov_j, mov_j, mov_l
+from mg400_protocol.commands import (
+    arc,
+    circle,
+    do_execute,
+    joint_mov_j,
+    mov_j,
+    mov_l,
+    mov_l_cartesian,
+    mov_l_io,
+)
 from mg400_protocol.dashboard import (
     acc_j,
     clear_error,
@@ -187,6 +196,116 @@ class MG400ProtocolTest(unittest.TestCase):
         self.assertIn("singularity", shoulder_singularity.description.lower())
         self.assertEqual(servo_current.source, "servo")
         self.assertIn("overcurrent", servo_current.description.lower())
+
+    # ── Mixed-primitive motion command builders ──────────────────────
+
+    def test_arc_renders_manual_example_format(self):
+        # Reference: 4-axis TCP/IP Guide, Arc section
+        # Arc(-350,-200,200,150,-300,-250,200,150)
+        cmd = arc(
+            through_xyzr=(-350.0, -200.0, 200.0, 150.0),
+            target_xyzr=(-300.0, -250.0, 200.0, 150.0),
+        )
+        self.assertEqual(
+            cmd.render(),
+            "Arc(-350.0000,-200.0000,200.0000,150.0000,"
+            "-300.0000,-250.0000,200.0000,150.0000)",
+        )
+
+    def test_arc_with_speed_and_cp(self):
+        cmd = arc(
+            through_xyzr=(100.0, 200.0, 50.0, 0.0),
+            target_xyzr=(150.0, 250.0, 50.0, 0.0),
+            speed_l=60,
+            acc_l=80,
+            cp=50,
+        )
+        rendered = cmd.render()
+        self.assertIn("SpeedL=60", rendered)
+        self.assertIn("AccL=80", rendered)
+        self.assertIn("CP=50", rendered)
+
+    def test_arc_rejects_wrong_point_count(self):
+        with self.assertRaises(ValueError):
+            arc(through_xyzr=(1, 2, 3), target_xyzr=(4, 5, 6, 7))
+        with self.assertRaises(ValueError):
+            arc(through_xyzr=(1, 2, 3, 4), target_xyzr=(5, 6, 7))
+
+    def test_circle_renders_manual_example_format(self):
+        # Reference: Circle(1,{-350,-200,200,150},{-300,-250,200,150})
+        cmd = circle(
+            count=1,
+            p1_xyzr=(-350.0, -200.0, 200.0, 150.0),
+            p2_xyzr=(-300.0, -250.0, 200.0, 150.0),
+        )
+        self.assertEqual(
+            cmd.render(),
+            "Circle(1,{-350.0000,-200.0000,200.0000,150.0000},"
+            "{-300.0000,-250.0000,200.0000,150.0000})",
+        )
+
+    def test_circle_rejects_zero_count(self):
+        with self.assertRaises(ValueError):
+            circle(0, (1, 2, 3, 4), (5, 6, 7, 8))
+
+    def test_mov_l_io_renders_with_io_trigger(self):
+        # Reference: MovLIO(-100,100,200,150,{0,50,1,0})
+        cmd = mov_l_io(
+            target_xyzr=(-100.0, 100.0, 200.0, 150.0),
+            io_triggers=[(0, 50, 1, 0)],
+        )
+        self.assertEqual(
+            cmd.render(),
+            "MovLIO(-100.0000,100.0000,200.0000,150.0000,{0,50,1,0})",
+        )
+
+    def test_mov_l_io_multiple_triggers(self):
+        cmd = mov_l_io(
+            target_xyzr=(100.0, 200.0, 50.0, 0.0),
+            io_triggers=[(0, 50, 1, 0), (1, 10, 2, 1)],
+            speed_l=70,
+        )
+        rendered = cmd.render()
+        self.assertIn("{0,50,1,0}", rendered)
+        self.assertIn("{1,10,2,1}", rendered)
+        self.assertIn("SpeedL=70", rendered)
+
+    def test_mov_l_io_rejects_bad_trigger_shape(self):
+        with self.assertRaises(ValueError):
+            mov_l_io(
+                target_xyzr=(1, 2, 3, 4),
+                io_triggers=[(0, 50, 1)],  # missing status
+            )
+
+    def test_mov_l_cartesian_uses_speed_l_not_speed_j(self):
+        cmd = mov_l_cartesian(
+            target_xyzr=(100.0, 200.0, 50.0, 0.0),
+            speed_l=60,
+            acc_l=80,
+            cp=50,
+        )
+        rendered = cmd.render()
+        self.assertIn("SpeedL=60", rendered)
+        self.assertIn("AccL=80", rendered)
+        self.assertNotIn("SpeedJ", rendered)
+
+    def test_new_builders_re_exported_from_package_root(self):
+        from mg400_protocol import (
+            arc as arc_root,
+            circle as circle_root,
+            mov_l_cartesian as mov_l_cartesian_root,
+            mov_l_io as mov_l_io_root,
+        )
+        self.assertEqual(
+            arc_root((-1, 0, 0, 0), (1, 0, 0, 0)).name,
+            "Arc",
+        )
+        self.assertEqual(circle_root(1, (0, 0, 0, 0), (1, 0, 0, 0)).name, "Circle")
+        self.assertEqual(mov_l_cartesian_root((0, 0, 0, 0)).name, "MovL")
+        self.assertEqual(
+            mov_l_io_root((0, 0, 0, 0), [(0, 50, 1, 0)]).name,
+            "MovLIO",
+        )
 
 
 if __name__ == "__main__":

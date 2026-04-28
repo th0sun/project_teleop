@@ -11,9 +11,11 @@ real robot's queued-command feedback fields.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import math
 import os
+import re
 import socket
 import sys
 import threading
@@ -38,6 +40,7 @@ for _pkg in (
 from mg400_controller.common.trajectory.trajectory_recorder import (  # noqa: E402
     TrajectoryRecorder,
 )
+from mg400_controller.common.config import motion_config  # noqa: E402
 from mg400_controller.common.utils.kinematics import KinematicsCalculator  # noqa: E402
 from tcp_interface.realtime_packet import RealtimePacketType  # noqa: E402
 
@@ -50,6 +53,7 @@ PKT_SIZE = np.dtype(RealtimePacketType).itemsize
 MODE_ENABLE = 5
 MODE_RUNNING = 7
 KINEMATICS = KinematicsCalculator()
+COMMAND_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_]+)\s*\(")
 
 
 class Logger:
@@ -119,7 +123,7 @@ class FeedbackMonitor:
                     break
                 arr = np.frombuffer(data, dtype=RealtimePacketType)
                 sample = FeedbackSample(
-                    t=time.monotonic(),
+                    t=time.time(),
                     robot_mode=int(arr["robot_mode"][0]),
                     q_actual_deg=np.array(arr["q_actual"][0][:4]),
                     q_target_deg=np.array(arr["q_target"][0][:4]),
@@ -146,7 +150,7 @@ class ReplayEvents:
     commands: List[CommandEvent] = field(default_factory=list)
 
     def callback(self, event_name: str, payload: Dict):
-        now = time.monotonic()
+        now = time.time()
         item = {"t": now, "event": event_name, **payload}
         self.events.append(item)
         if event_name == "playback_start":
@@ -177,8 +181,8 @@ def _dashboard_cmd(sock: socket.socket, cmd: str) -> str:
 
 
 def _wait_mode(monitor: FeedbackMonitor, mode: int, timeout_s: float = 8.0) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
         samples = monitor.snapshot()
         if samples and samples[-1].robot_mode == mode:
             return True
@@ -193,8 +197,8 @@ def _wait_near_q(
     tolerance_deg: float,
     timeout_s: float,
 ) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
         samples = monitor.snapshot()
         if samples:
             err = float(np.max(np.abs(samples[-1].q_actual_deg - target_deg)))
@@ -288,6 +292,11 @@ def _nearest_path_xyz_error(point_xyz: np.ndarray, target_tool_vectors: np.ndarr
         _point_to_segment_distance(point_xyz, xyz_path[idx], xyz_path[idx + 1])
         for idx in range(len(xyz_path) - 1)
     )
+
+
+def _command_name(command: str) -> str:
+    match = COMMAND_NAME_RE.match(command or "")
+    return match.group(1) if match else "unknown"
 
 
 def _first_arrival_time(
@@ -422,6 +431,12 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
             "elapsed_s": round(elapsed, 3),
             "command": command.command,
         })
+    playback_command_names = [
+        _command_name(row["command"])
+        for row in command_rows
+        if row["phase"] == "playback"
+    ]
+    command_type_counts = dict(sorted(Counter(playback_command_names).items()))
 
     final_sample = post_window[-1] if post_window else (window[-1] if window else samples[-1])
     completion_sample = window[-1] if window else final_sample
@@ -477,6 +492,8 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
         "sample_rows": sample_rows,
         "waypoints": waypoint_rows,
         "commands": command_rows,
+        "motion_command_count": len(playback_command_names),
+        "command_type_counts": command_type_counts,
         "queued_waypoint_events": [
             {
                 "index": e["index"],
@@ -492,7 +509,13 @@ def _analyse(frames: List[Dict], samples: List[FeedbackSample], events: ReplayEv
     }
 
 
-def run(out_path: Optional[Path], trajectory_json: Optional[Path] = None, post_settle_s: float = 0.5) -> Dict:
+def run(
+    out_path: Optional[Path],
+    trajectory_json: Optional[Path] = None,
+    post_settle_s: float = 0.5,
+    *,
+    speed_factor: Optional[int] = None,
+) -> Dict:
     print(f"Connecting to MG400 Mock at {MOCK_IP} ...")
     dash = _connect_dashboard()
     motion = _connect_motion()
@@ -500,7 +523,7 @@ def run(out_path: Optional[Path], trajectory_json: Optional[Path] = None, post_s
     events = ReplayEvents()
 
     def send_motion(command: str):
-        events.commands.append(CommandEvent(time.monotonic(), command))
+        events.commands.append(CommandEvent(time.time(), command))
         motion.sendall((command + "\n").encode())
         return True
 
@@ -508,11 +531,15 @@ def run(out_path: Optional[Path], trajectory_json: Optional[Path] = None, post_s
         monitor.start()
         time.sleep(0.2)
         print(f"EnableRobot: {_dashboard_cmd(dash, 'EnableRobot()')}")
+        if speed_factor is not None:
+            print(f"SpeedFactor: {_dashboard_cmd(dash, f'SpeedFactor({int(speed_factor)})')}")
         _wait_mode(monitor, MODE_ENABLE, timeout_s=8.0)
 
         # Start from home so the replay measurement is deterministic.
         _dashboard_cmd(dash, "ResetRobot()")
         _dashboard_cmd(dash, "EnableRobot()")
+        if speed_factor is not None:
+            _dashboard_cmd(dash, f"SpeedFactor({int(speed_factor)})")
         send_motion("JointMovJ(0,0,0,0)")
         time.sleep(0.1)
         _wait_mode(monitor, MODE_ENABLE, timeout_s=20.0)
@@ -540,6 +567,9 @@ def run(out_path: Optional[Path], trajectory_json: Optional[Path] = None, post_s
 
         result = _analyse(frames, monitor.snapshot(), events)
         result["trajectory_name"] = recorder.loaded_name
+        result["execution_profile"] = str(
+            getattr(motion_config, "PLAYBACK_EXECUTION_PROFILE", "preserve_timing")
+        )
         if out_path is not None:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -565,20 +595,97 @@ def main():
     parser.add_argument("--feedback-port", type=int, default=FEEDBACK_PORT)
     parser.add_argument("--trajectory-json", type=Path, default=None)
     parser.add_argument("--post-settle-s", type=float, default=0.5)
+    parser.add_argument(
+        "--speed-factor",
+        type=int,
+        default=None,
+        help="Optional dashboard SpeedFactor to set before replay.",
+    )
+    parser.add_argument(
+        "--execution-profile",
+        choices=("preserve_timing", "fastest_path_repeat"),
+        default=None,
+        help="Override PLAYBACK_EXECUTION_PROFILE for this probe.",
+    )
+    parser.add_argument(
+        "--cartesian-speed-ref-mm-s",
+        type=float,
+        default=None,
+        help="Override CARTESIAN_SPEED_AT_100_PERCENT_MM_S for this probe.",
+    )
+    parser.add_argument(
+        "--segment-min-speed-l",
+        type=int,
+        default=None,
+        help="Override SEGMENT_MIN_SPEED_L for this probe.",
+    )
+    parser.add_argument(
+        "--segment-acc-l",
+        type=int,
+        default=None,
+        help="Override SEGMENT_ACC_L for this probe.",
+    )
+    parser.add_argument(
+        "--absolute-timeout-s",
+        type=float,
+        default=None,
+        help="Override PREVIEW_ABSOLUTE_TIMEOUT_SEC for this probe.",
+    )
+    parser.add_argument(
+        "--mixed-primitives",
+        choices=("on", "off"),
+        default=None,
+        help="Override USE_MIXED_PRIMITIVES for this probe.",
+    )
+    parser.add_argument(
+        "--enable-arc",
+        choices=("on", "off"),
+        default=None,
+        help="Override SEGMENT_ENABLE_ARC for this probe.",
+    )
+    parser.add_argument(
+        "--no-waypoint-table",
+        action="store_true",
+        help="Suppress the verbose per-waypoint arrival table in stdout.",
+    )
     args = parser.parse_args()
 
     MOCK_IP = args.host
     DASHBOARD_PORT = args.dashboard_port
     MOTION_PORT = args.motion_port
     FEEDBACK_PORT = args.feedback_port
+    if args.cartesian_speed_ref_mm_s is not None:
+        motion_config.CARTESIAN_SPEED_AT_100_PERCENT_MM_S = float(args.cartesian_speed_ref_mm_s)
+    if args.execution_profile is not None:
+        motion_config.PLAYBACK_EXECUTION_PROFILE = args.execution_profile
+    if args.segment_min_speed_l is not None:
+        motion_config.SEGMENT_MIN_SPEED_L = int(args.segment_min_speed_l)
+    if args.segment_acc_l is not None:
+        motion_config.SEGMENT_ACC_L = int(args.segment_acc_l)
+    if args.absolute_timeout_s is not None:
+        import mg400_controller.common.trajectory.trajectory_recorder as recorder_module
 
-    result = run(args.out, trajectory_json=args.trajectory_json, post_settle_s=args.post_settle_s)
+        recorder_module.PREVIEW_ABSOLUTE_TIMEOUT_SEC = float(args.absolute_timeout_s)
+    if args.mixed_primitives is not None:
+        motion_config.USE_MIXED_PRIMITIVES = args.mixed_primitives == "on"
+    if args.enable_arc is not None:
+        motion_config.SEGMENT_ENABLE_ARC = args.enable_arc == "on"
+
+    result = run(
+        args.out,
+        trajectory_json=args.trajectory_json,
+        post_settle_s=args.post_settle_s,
+        speed_factor=args.speed_factor,
+    )
 
     print("\nReplay timing result")
     print(f"  status:              {result.get('status', 'ok')}")
     print(f"  playback_success:    {result.get('playback_success')}")
     print(f"  playback_timed_out:  {result.get('playback_timed_out')}")
     print(f"  trajectory:          {result['trajectory_name']}")
+    print(f"  execution_profile:   {result.get('execution_profile')}")
+    print(f"  motion_commands:     {result.get('motion_command_count')}")
+    print(f"  command_type_counts: {result.get('command_type_counts')}")
     print(f"  planned_duration_s:   {result['planned_duration_s']}")
     print(f"  measured_duration_s:  {result['measured_duration_s']}")
     print(f"  post_settle_s:        {result['post_settle_observed_s']}")
@@ -596,21 +703,22 @@ def main():
     print(f"  final_error_deg:      {result['final_error_deg']}")
     print(f"  final_xyz_error_mm:   {result['final_xyz_error_mm']}")
     print(f"  final_yaw_error_deg:  {result['final_yaw_error_deg']}")
-    print("\nWaypoint arrival timing (1 deg tolerance)")
-    for row in result["waypoints"]:
-        print(
-            f"  #{row['index']} target={row['target_time_s']:>5}s "
-            f"arrival={row['arrival_time_s']}s error={row['timing_error_s']}s "
-            f"xyz_hit={row['hit_xyz_error_mm']}mm yaw_hit={row['hit_yaw_error_deg']}deg "
-            f"q={row['target_deg']}"
-        )
-    print("\nQueued waypoint events")
-    for row in result["queued_waypoint_events"]:
-        print(
-            f"  #{row['index']} queued={row['queued_elapsed_s']:>5}s "
-            f"target={row['target_time_s']:>5}s lead={row['queue_lead_s']:>5}s "
-            f"SpeedJ={row['speed_j']} CP={row['cp']}"
-        )
+    if not args.no_waypoint_table:
+        print("\nWaypoint arrival timing (1 deg tolerance)")
+        for row in result["waypoints"]:
+            print(
+                f"  #{row['index']} target={row['target_time_s']:>5}s "
+                f"arrival={row['arrival_time_s']}s error={row['timing_error_s']}s "
+                f"xyz_hit={row['hit_xyz_error_mm']}mm yaw_hit={row['hit_yaw_error_deg']}deg "
+                f"q={row['target_deg']}"
+            )
+        print("\nQueued waypoint events")
+        for row in result["queued_waypoint_events"]:
+            print(
+                f"  #{row['index']} queued={row['queued_elapsed_s']:>5}s "
+                f"target={row['target_time_s']:>5}s lead={row['queue_lead_s']:>5}s "
+                f"SpeedJ={row['speed_j']} CP={row['cp']}"
+            )
 
 
 if __name__ == "__main__":

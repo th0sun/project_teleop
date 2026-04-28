@@ -41,6 +41,32 @@ Representative commits from this phase:
 - `865e7b5` `refactor(playback): make trajectory recorder testable`
 - `55fb434` `docs(objective): center project on multi-robot teaching`
 
+## What Was Added Post-Refactor
+
+- **Experimental mixed-primitives geometric pipeline**: added a
+  `SegmentClassifier` that can translate recorded VR frames into sparse
+  `MovL` / `Arc` / fallback `JointMovJ` commands.
+
+  Current validation status:
+  - upstream `MG400_Mock` remains clean as a submodule baseline;
+  - `tools/mg400_mock_extended/` provides a separate Arc-capable test backend;
+  - realistic Unity trajectories now complete on the extended mock and reach
+    the final pose, but timing remains slower than the taught timestamps;
+  - `Pick_place_1.json` and `Pick_place_2.json` are good geometry proofs;
+    `money.json` still shows larger path deviation where fallback `JointMovJ`
+    segments are needed.
+
+  Treat this as a useful compiler/export direction, not a finished execution
+  strategy.  The evidence is tracked in
+  `docs/report_materials/mixed_primitive_benchmark_report.md`.
+
+- **Fastest-path repeat profile**: teach-and-repeat now distinguishes between
+  `preserve_timing` and `fastest_path_repeat`.  The fast profile keeps the
+  taught geometry but no longer treats slow VR hand timestamps as low robot
+  speed commands.  It improves live Mock replay time on the three Unity
+  trajectories while preserving final pose accuracy, but it still does not make
+  host-streamed TCP timestamp-perfect.
+
 ## What This Phase Did Not Solve
 
 This phase did **not** finish the next architecture step.

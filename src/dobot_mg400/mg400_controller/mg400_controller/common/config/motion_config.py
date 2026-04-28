@@ -121,14 +121,21 @@ PATH_SIMPLIFY_TOLERANCE_DEG = 1.0   # was 0.5 — doubled: smoother curves drop 
 # This dramatically reduces queue depth for trajectories with long straight
 # runs (pick-place) or smooth curves (freehand demonstrations).
 #
-# Set USE_MIXED_PRIMITIVES = False to disable and revert to the original
-# JointMovJ-only pipeline for diagnosis or safety.
-USE_MIXED_PRIMITIVES = True
-SEGMENT_ENABLE_ARC = True           # Arc(through, end) command — 1 cmd per smooth curve vs N JointMovJ
-SEGMENT_LINE_TOLERANCE_MM = 2.0    # max Cartesian deviation (mm) for MovL  (was 1.0 — too tight for FK noise)
-SEGMENT_ARC_TOLERANCE_MM = 3.0     # max circle-fit error (mm) for Arc       (was 2.0)
-SEGMENT_R_TOLERANCE_DEG = 2.0      # max wrist/yaw deviation allowed for primitive compression
+# Demo default: keep the real-robot path on JointMovJ-only unless an operator
+# explicitly enables mixed primitives for offline analysis.  The classifier is
+# still available and tested, but recent hardware trials showed Arc/MovL can
+# trigger controller alarms when the fitted path is close to fixture limits.
+USE_MIXED_PRIMITIVES = False
+SEGMENT_ENABLE_ARC = True           # Arc(through, end) — 1 cmd per smooth curve vs N JointMovJ
+SEGMENT_LINE_TOLERANCE_MM = 2.0    # max XYZ deviation (mm) from chord for MovL classification
+SEGMENT_ARC_TOLERANCE_MM = 3.0     # max 3D deviation (mm) from least-squares fitted circle for Arc
+SEGMENT_RAW_FIT_TOLERANCE_MM = 5.0 # max allowed distance from original raw Unity path after RDP
+SEGMENT_MAX_ARC_RADIUS_MM = 10000.0 # arc with radius > this is reclassified as LINE (effectively straight)
+SEGMENT_R_TOLERANCE_DEG = 10.0      # max R/yaw deviation from endpoint interpolation for MovL/Arc
 SEGMENT_MIN_POINTS_FOR_ARC = 3     # minimum waypoints to attempt arc fit
+# MG400 interpolates R linearly between endpoint poses on MovL/Arc.  Small VR
+# wrist wobble is acceptable, but meaningful non-linear wrist motion should
+# remain GENERAL so intermediate JointMovJ waypoints preserve it.
 
 # Dynamic Cartesian Speed Configuration
 # The system calculates the physical Cartesian distance of the segment and the
@@ -138,3 +145,24 @@ CARTESIAN_SPEED_AT_100_PERCENT_MM_S = 1000.0  # Reference 100% Cartesian speed (
 SEGMENT_MIN_SPEED_L = 5                       # Minimum SpeedL percentage
 SEGMENT_MAX_SPEED_L = 100                     # Maximum SpeedL percentage
 SEGMENT_ACC_L = 80                            # Default AccL % for Cartesian commands
+
+# Teach-and-repeat execution profile
+# preserve_timing:
+#   Replay the taught timestamps as closely as possible.  This is useful for
+#   studies that care about human demonstration timing, but it can command low
+#   SpeedL/SpeedJ values when the hand moved slowly.
+# fastest_path_repeat:
+#   Preserve the taught path geometry, but do not preserve the hand timestamps.
+#   The compiled program uses the configured fast speed/acc/CP limits and queues
+#   ahead aggressively so the MG400 can execute as fast as its controller and
+#   mechanical constraints allow.
+PLAYBACK_EXECUTION_PROFILE = "preserve_timing"  # preserve_timing | fastest_path_repeat
+FAST_REPEAT_SPEED_J = 100
+FAST_REPEAT_ACC_J = 100
+FAST_REPEAT_SPEED_L = 100
+FAST_REPEAT_ACC_L = 100
+FAST_REPEAT_CP = 100
+FAST_REPEAT_FINAL_CP = 0
+FAST_REPEAT_LOOKAHEAD_SEC = 10.0
+FAST_REPEAT_TIMEOUT_PER_COMMAND_SEC = 1.0
+FAST_REPEAT_MAX_COMMANDS_PER_CYCLE = 1

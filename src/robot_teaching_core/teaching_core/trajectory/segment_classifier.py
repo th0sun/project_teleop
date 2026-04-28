@@ -1,35 +1,35 @@
 """Segment classification for mixed-primitive motion planning.
 
-After RDP simplification reduces redundant waypoints, this module groups
-the remaining waypoints into segments that can each be served by a single
+After RDP simplification reduces the recorded waypoint count, this module
+groups the remaining waypoints into segments that each map to a single
 MG400 motion command:
 
     LINE    → ``MovL``   — consecutive points collinear in Cartesian space
     ARC     → ``Arc``    — consecutive points fitting a circular arc
-    GENERAL → ``JointMovJ`` chain (fallback)
-
-The classifier works in Cartesian space (mm) so the output maps directly
-to the MG400 TCP motion commands which all operate in Cartesian coordinates.
-A *forward-kinematics* callback converts the stored joint-space waypoints
-to (X, Y, Z, R) on the fly.
+    GENERAL → ``JointMovJ`` chain (fallback for genuinely irregular shape)
 
 Algorithm
 ---------
-Greedy front-to-back scan:
+At each anchor index ``i`` we run two independent longest-first searches:
 
-1.  Start a new segment at the current index.
-2.  Try to extend it as a LINE: check if every point from start to
-    candidate-end falls within ``line_tol_mm`` of the XYZ line through
-    start and end.
-3.  If the line breaks, try to extend as an ARC: fit a circle through
-    start, midpoint, and candidate-end and check if every intermediate
-    XYZ point falls within ``arc_tol_mm`` of the fitted circle.
-4.  If neither succeeds, fall back to a 2-point GENERAL segment and
-    advance.
-5.  Repeat from step 1 at the end of the committed segment.
+1.  longest LINE span starting at ``i`` (XYZ-collinearity within
+    ``line_tol_mm``)
+2.  longest ARC span starting at ``i`` (least-squares circle fit, every
+    intermediate point within ``arc_tol_mm`` of the fitted circle)
 
-Each segment stores indices into the original (simplified) waypoint list
-and the Cartesian coordinates needed to emit the corresponding command.
+Whichever covers more waypoints wins.  On a tie LINE wins because a
+straight line is the degenerate case of an arc with infinite radius —
+emitting MovL is simpler and more predictable on the controller.  If
+neither succeeds the segment falls back to a 2-point GENERAL chunk and
+the scan advances by one waypoint.
+
+R-axis check
+------------
+MG400 ``MovL`` and ``Arc`` interpolate R/yaw between endpoint poses, so the
+classifier may collapse small hand wobble.  It must not collapse a path where
+the demonstrated wrist/yaw motion is intentionally non-linear, because that
+would silently lose task intent.  LINE/ARC candidates therefore need both XYZ
+geometry and R/yaw to match endpoint interpolation within ``r_tol_deg``.
 """
 
 from __future__ import annotations
@@ -44,9 +44,9 @@ import numpy as np
 
 class SegmentType(Enum):
     """Motion primitive type for a path segment."""
-    LINE = "line"       # → MovL
-    ARC = "arc"         # → Arc
-    GENERAL = "general" # → JointMovJ chain
+    LINE = "line"        # → MovL
+    ARC = "arc"          # → Arc
+    GENERAL = "general"  # → JointMovJ chain
 
 
 @dataclass(frozen=True)
@@ -68,19 +68,11 @@ class CartesianPoint:
 class Segment:
     """A classified path segment mapping to a single motion primitive.
 
-    Attributes
-    ----------
-    type : SegmentType
-        LINE, ARC, or GENERAL.
-    start_idx : int
-        Index of the first waypoint in this segment (into the simplified list).
-    end_idx : int
-        Index of the last waypoint (inclusive).
-    cartesian_points : tuple of CartesianPoint
-        All Cartesian poses in [start_idx .. end_idx].
-    arc_through_idx : int or None
-        For ARC segments only — the index of the "through" point (mid-point
-        of the arc).  The Arc command needs current-pos + through + target.
+    ``cartesian_points`` holds every Cartesian pose in
+    ``[start_idx .. end_idx]`` so the renderer can emit MovL / Arc /
+    JointMovJ commands without a second FK pass.  ``arc_through_idx`` is
+    the absolute index (into the simplified waypoint list) of the arc's
+    through-point — the Arc command needs current-pos + through + target.
     """
     type: SegmentType
     start_idx: int
@@ -116,258 +108,658 @@ FKFunction = Callable[[float, float, float, float], Tuple[float, float, float, f
 
 # ── Geometry helpers ────────────────────────────────────────────────────
 
+@dataclass(frozen=True)
+class _CommandArc:
+    """Exact circular path implied by Dobot ``Arc(current, through, target)``."""
+    center: np.ndarray
+    radius: float
+    normal: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
+    total_angle: float
+    through_fraction: float
+    start_to_through_mm: float
+    through_to_end_mm: float
+    chord_mm: float
+
+    @property
+    def sweep_rad(self) -> float:
+        return abs(self.total_angle)
+
+    @property
+    def min_leg_mm(self) -> float:
+        return min(self.start_to_through_mm, self.through_to_end_mm)
+
+    @property
+    def max_leg_mm(self) -> float:
+        return max(self.start_to_through_mm, self.through_to_end_mm)
+
+    @property
+    def leg_ratio(self) -> float:
+        if self.max_leg_mm < 1e-9:
+            return 0.0
+        return self.min_leg_mm / self.max_leg_mm
+
 def _point_to_line_distance(point: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
-    """Perpendicular distance from *point* to the line through *a* → *b* (3D)."""
+    """Perpendicular distance from *point* to the line through *a* → *b* (3D).
+
+    The projection parameter is clamped to [0, 1] so points outside the
+    segment are measured to the nearest endpoint instead of an infinite
+    line — this matches the geometric intent of "is this point ON the
+    line segment between a and b".
+    """
     ab = b - a
     ab_len = np.linalg.norm(ab)
     if ab_len < 1e-9:
         return float(np.linalg.norm(point - a))
     t = np.dot(point - a, ab) / (ab_len * ab_len)
-    t = max(0.0, min(1.0, t))  # clamp to segment
+    t = max(0.0, min(1.0, t))
     projection = a + t * ab
     return float(np.linalg.norm(point - projection))
 
 
-def _fit_circle_3pts(
-    p0: np.ndarray, p1: np.ndarray, p2: np.ndarray,
-) -> Tuple[Optional[np.ndarray], Optional[float]]:
-    """Fit a circle through 3 points in 3D.
+def _fit_circle_least_squares(
+    points: Sequence[np.ndarray],
+) -> Tuple[Optional[np.ndarray], Optional[float], Optional[np.ndarray]]:
+    """Best-fit circle through ``points`` (≥3 in 3D) via Kasa method.
 
-    Returns (center, radius) or (None, None) if points are collinear.
+    The plane is found by SVD on the centered points; the in-plane
+    least-squares fit is the algebraic Kasa solution
+    ``x² + y² + ax + by + c = 0``.
+
+    Returns ``(center, radius, plane_normal)`` or ``(None, None, None)``
+    if the input has < 3 points or the linear system is rank-deficient
+    (degenerate / collinear / numerically singular).
     """
-    # Vectors from p0
-    v1 = p1 - p0
-    v2 = p2 - p0
-    cross = np.cross(v1, v2)
-    cross_norm = np.linalg.norm(cross)
-    if cross_norm < 1e-9:
-        return None, None  # collinear
+    if len(points) < 3:
+        return None, None, None
 
-    # Circle in the plane defined by the 3 points
-    # Using the circumcenter formula
-    d1 = np.dot(v1, v1)
-    d2 = np.dot(v2, v2)
-    denom = 2.0 * cross_norm * cross_norm
-    alpha = d2 * np.dot(v1, v1 - v2) / denom
-    beta = d1 * np.dot(v2, v2 - v1) / denom
-    center = p0 + alpha * v1 + beta * v2
-    radius = float(np.linalg.norm(center - p0))
-    return center, radius
+    pts = np.asarray(points, dtype=float)
+    if pts.shape[0] < 3:
+        return None, None, None
+
+    centroid = pts.mean(axis=0)
+    centered = pts - centroid
+
+    # SVD → smallest singular vector is the plane normal
+    _, _, vh = np.linalg.svd(centered)
+    normal = vh[2, :]
+    normal_norm = np.linalg.norm(normal)
+    if normal_norm < 1e-12:
+        return None, None, None
+    normal = normal / normal_norm
+
+    # Build an orthonormal basis (u, v) for the plane
+    seed = np.array([1.0, 0.0, 0.0]) if abs(normal[2]) > 0.9 else np.array([0.0, 0.0, 1.0])
+    u = seed - np.dot(seed, normal) * normal
+    u_norm = np.linalg.norm(u)
+    if u_norm < 1e-12:
+        return None, None, None
+    u = u / u_norm
+    v_vec = np.cross(normal, u)
+
+    x_2d = centered @ u
+    y_2d = centered @ v_vec
+    z = x_2d ** 2 + y_2d ** 2
+    A = np.column_stack([x_2d, y_2d, np.ones(len(x_2d))])
+
+    try:
+        coeffs, _, rank, _ = np.linalg.lstsq(A, -z, rcond=None)
+    except np.linalg.LinAlgError:
+        return None, None, None
+    if rank < 3:
+        return None, None, None
+
+    a, b, c = coeffs
+    cx_2d = -a / 2.0
+    cy_2d = -b / 2.0
+    r_squared = cx_2d ** 2 + cy_2d ** 2 - c
+    if r_squared <= 0:
+        return None, None, None
+
+    radius = math.sqrt(r_squared)
+    center = centroid + cx_2d * u + cy_2d * v_vec
+    return center, radius, normal
 
 
 def _point_to_circle_distance(
-    point: np.ndarray, center: np.ndarray, radius: float,
-    normal: np.ndarray,
+    point: np.ndarray, center: np.ndarray, radius: float, normal: np.ndarray,
 ) -> float:
-    """Distance from a point to the circle defined by center/radius/plane.
+    """3D distance from a point to the planar circle.
 
-    Two components: distance from the circle's plane + radial deviation.
+    Combines the off-plane component (point's height above the circle's
+    plane) and the in-plane radial deviation (|‖p_in_plane − center‖ − r|)
+    in quadrature.  This matches the geometric distance to the circle in
+    its embedded 3D form, not the 2D in-plane distance alone.
     """
-    # Project point onto the circle's plane
     v = point - center
     off_plane = abs(float(np.dot(v, normal)))
-    # In-plane: radial deviation
     in_plane = v - np.dot(v, normal) * normal
     radial_dev = abs(float(np.linalg.norm(in_plane)) - radius)
     return math.sqrt(off_plane ** 2 + radial_dev ** 2)
 
 
+def _positive_angle(angle: float) -> float:
+    return angle % (2.0 * math.pi)
+
+
+def _command_arc_from_points(
+    start_xyz: np.ndarray,
+    through_xyz: np.ndarray,
+    end_xyz: np.ndarray,
+) -> Optional[_CommandArc]:
+    """Return the exact arc that the MG400 command would define.
+
+    This is intentionally command-shaped, not least-squares-shaped: the real
+    robot receives only current, through, and target, so classification must
+    validate against that exact circle.
+    """
+    v1 = through_xyz - start_xyz
+    v2 = end_xyz - start_xyz
+    cross = np.cross(v1, v2)
+    cross_norm = float(np.linalg.norm(cross))
+    if cross_norm < 1e-9:
+        return None
+
+    d1 = float(np.dot(v1, v1))
+    d2 = float(np.dot(v2, v2))
+    denom = 2.0 * cross_norm * cross_norm
+    center = start_xyz + (d2 * float(np.dot(v1, v1 - v2)) / denom) * v1
+    center += (d1 * float(np.dot(v2, v2 - v1)) / denom) * v2
+    radius = float(np.linalg.norm(start_xyz - center))
+    if radius < 1e-9:
+        return None
+
+    normal = cross / cross_norm
+    u = (start_xyz - center) / radius
+    v = np.cross(normal, u)
+
+    def raw_angle(point: np.ndarray) -> float:
+        rel = point - center
+        return math.atan2(float(np.dot(rel, v)), float(np.dot(rel, u)))
+
+    raw_through = raw_angle(through_xyz)
+    raw_end = raw_angle(end_xyz)
+    ccw_through = _positive_angle(raw_through)
+    ccw_end = _positive_angle(raw_end)
+    if 0.0 <= ccw_through <= ccw_end:
+        total_angle = ccw_end
+        through_fraction = ccw_through / ccw_end if ccw_end > 1e-9 else 0.5
+    else:
+        cw_through = _positive_angle(-raw_through)
+        cw_end = _positive_angle(-raw_end)
+        if not (0.0 <= cw_through <= cw_end):
+            return None
+        total_angle = -cw_end
+        through_fraction = cw_through / cw_end if cw_end > 1e-9 else 0.5
+
+    return _CommandArc(
+        center=center,
+        radius=radius,
+        normal=normal,
+        u=u,
+        v=v,
+        total_angle=total_angle,
+        through_fraction=float(through_fraction),
+        start_to_through_mm=float(np.linalg.norm(through_xyz - start_xyz)),
+        through_to_end_mm=float(np.linalg.norm(end_xyz - through_xyz)),
+        chord_mm=float(np.linalg.norm(end_xyz - start_xyz)),
+    )
+
+
+def sample_command_arc_xyzr(
+    start_xyzr: Sequence[float],
+    through_xyzr: Sequence[float],
+    end_xyzr: Sequence[float],
+    samples: int,
+) -> List[Tuple[float, float, float, float]]:
+    """Sample the exact Dobot ``Arc`` geometry including piecewise R motion.
+
+    The returned poses are for analysis/preflight only; they are not sent to
+    the robot.  If the three points cannot form an arc, an empty list is
+    returned.
+    """
+    start = np.asarray(start_xyzr[:3], dtype=float)
+    through = np.asarray(through_xyzr[:3], dtype=float)
+    end = np.asarray(end_xyzr[:3], dtype=float)
+    arc = _command_arc_from_points(start, through, end)
+    if arc is None:
+        return []
+
+    r0 = float(start_xyzr[3])
+    r1 = float(through_xyzr[3])
+    r2 = float(end_xyzr[3])
+    out: List[Tuple[float, float, float, float]] = []
+    for fraction in np.linspace(0.0, 1.0, max(3, samples)):
+        theta = arc.total_angle * float(fraction)
+        xyz = arc.center + arc.radius * (math.cos(theta) * arc.u + math.sin(theta) * arc.v)
+        if arc.through_fraction <= 1e-9:
+            r = r2
+        elif fraction <= arc.through_fraction:
+            r = _interp_angle_deg(r0, r1, fraction / arc.through_fraction)
+        else:
+            tail = (fraction - arc.through_fraction) / max(1.0 - arc.through_fraction, 1e-9)
+            r = _interp_angle_deg(r1, r2, tail)
+        out.append((float(xyz[0]), float(xyz[1]), float(xyz[2]), float(r)))
+    return out
+
+
+def _point_to_command_arc_distance(point: np.ndarray, arc: _CommandArc) -> Tuple[float, Optional[float]]:
+    rel = point - arc.center
+    raw_angle = math.atan2(float(np.dot(rel, arc.v)), float(np.dot(rel, arc.u)))
+    if arc.total_angle >= 0.0:
+        along = _positive_angle(raw_angle)
+    else:
+        along = _positive_angle(-raw_angle)
+    total = abs(arc.total_angle)
+    fraction: Optional[float] = along / total if total > 1e-9 else None
+    if fraction is not None and fraction > 1.0 + 1e-6:
+        fraction = None
+
+    off_plane = abs(float(np.dot(rel, arc.normal)))
+    in_plane = rel - np.dot(rel, arc.normal) * arc.normal
+    radial_dev = abs(float(np.linalg.norm(in_plane)) - arc.radius)
+    return math.sqrt(off_plane ** 2 + radial_dev ** 2), fraction
+
+
 def _angle_delta_deg(a: float, b: float) -> float:
-    """Shortest absolute angular distance in degrees."""
-    return abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
+    """Shortest signed angular distance from ``b`` to ``a`` in degrees."""
+    return (a - b + 180.0) % 360.0 - 180.0
 
 
-def _r_lerp(start_r: float, end_r: float, fraction: float) -> float:
-    """Interpolate yaw/R along the shortest angular path."""
-    delta = (float(end_r) - float(start_r) + 180.0) % 360.0 - 180.0
-    return float(start_r) + delta * float(fraction)
+def _interp_angle_deg(a: float, b: float, t: float) -> float:
+    """Interpolate yaw in degrees along the shortest angular path."""
+    return a + _angle_delta_deg(b, a) * max(0.0, min(1.0, t))
 
 
-def _r_follows_linear_profile(
-    cart_points: Sequence[CartesianPoint],
+def _r_matches_endpoint_interpolation(
+    cart: Sequence[CartesianPoint],
     start: int,
     end: int,
     tolerance_deg: float,
 ) -> bool:
-    """Check whether R/yaw stays close to endpoint interpolation."""
+    """Does R/yaw follow the controller's endpoint interpolation closely?
+
+    Tiny VR wrist wobble is acceptable, but a deliberate non-linear wrist path
+    should remain GENERAL so it can be represented by intermediate JointMovJ
+    waypoints instead of being flattened into one MovL/Arc.
+    """
     if end - start < 2:
         return True
-    start_r = cart_points[start].r
-    end_r = cart_points[end].r
+    if tolerance_deg < 0:
+        return True
+
+    start_r = float(cart[start].r)
+    end_r = float(cart[end].r)
     span = end - start
     for i in range(start + 1, end):
-        expected = _r_lerp(start_r, end_r, (i - start) / span)
-        if _angle_delta_deg(cart_points[i].r, expected) > tolerance_deg:
+        t = (i - start) / span
+        expected = _interp_angle_deg(start_r, end_r, t)
+        if abs(_angle_delta_deg(float(cart[i].r), expected)) > tolerance_deg:
             return False
     return True
 
 
-# ── Line detection ──────────────────────────────────────────────────────
+def _r_matches_arc_interpolation(
+    cart: Sequence[CartesianPoint],
+    start: int,
+    through: int,
+    end: int,
+    through_fraction: float,
+    tolerance_deg: float,
+) -> bool:
+    if tolerance_deg < 0:
+        return True
+    start_r = float(cart[start].r)
+    through_r = float(cart[through].r)
+    end_r = float(cart[end].r)
+    span = end - start
+    if span < 2:
+        return True
+    for i in range(start + 1, end):
+        path_fraction = (i - start) / span
+        if through_fraction <= 1e-9:
+            expected = end_r
+        elif path_fraction <= through_fraction:
+            expected = _interp_angle_deg(start_r, through_r, path_fraction / through_fraction)
+        else:
+            tail = (path_fraction - through_fraction) / max(1.0 - through_fraction, 1e-9)
+            expected = _interp_angle_deg(through_r, end_r, tail)
+        if abs(_angle_delta_deg(float(cart[i].r), expected)) > tolerance_deg:
+            return False
+    return True
+
+
+# ── LINE / ARC primitives ───────────────────────────────────────────────
 
 def _is_line_segment(
-    cart_points: Sequence[CartesianPoint],
+    cart: Sequence[CartesianPoint],
     start: int,
     end: int,
     tolerance_mm: float,
     r_tolerance_deg: float,
 ) -> bool:
-    """Check if points[start..end] are collinear in XYZ within tolerance."""
+    """Are points[start..end] collinear in XYZ within ``tolerance_mm``?
+
+    <= 2 points are trivially collinear.  R/yaw must also match the
+    controller's endpoint interpolation within ``r_tolerance_deg``.
+    """
     if end - start < 2:
-        return True  # ≤2 points are trivially a line
-    a = cart_points[start].xyz()
-    b = cart_points[end].xyz()
+        return True
+    if not _r_matches_endpoint_interpolation(cart, start, end, r_tolerance_deg):
+        return False
+    a = cart[start].xyz()
+    b = cart[end].xyz()
     for i in range(start + 1, end):
-        d = _point_to_line_distance(cart_points[i].xyz(), a, b)
-        if d > tolerance_mm:
+        if _point_to_line_distance(cart[i].xyz(), a, b) > tolerance_mm:
             return False
-    return _r_follows_linear_profile(cart_points, start, end, r_tolerance_deg)
+    return True
 
 
-# ── Arc detection ───────────────────────────────────────────────────────
+_ARC_THROUGH_MIN_CHORD_MM = 15.0
+_ARC_MAX_LEG_IMBALANCE = 4.0
+_ARC_VERTICAL_IMBALANCE_ZSPAN_MM = 40.0
+_ARC_MIN_THROUGH_FRACTION = 0.18
+_ARC_MAX_THROUGH_FRACTION = 0.82
+_ARC_SPLIT_IMPROVEMENT_RATIO = 0.75
+_ARC_SPLIT_MIN_IMPROVEMENT_MM = 0.25
 
-def _is_arc_segment(
-    cart_points: Sequence[CartesianPoint],
+
+def _line_fit_error(
+    cart: Sequence[CartesianPoint],
+    start: int,
+    end: int,
+    r_tolerance_deg: float,
+) -> float:
+    if not _r_matches_endpoint_interpolation(cart, start, end, r_tolerance_deg):
+        return math.inf
+    a = cart[start].xyz()
+    b = cart[end].xyz()
+    return max(
+        (_point_to_line_distance(cart[i].xyz(), a, b) for i in range(start + 1, end)),
+        default=0.0,
+    )
+
+
+def _best_command_arc_fit_error(
+    cart: Sequence[CartesianPoint],
     start: int,
     end: int,
     tolerance_mm: float,
+    max_radius_mm: float,
+    r_tolerance_deg: float,
+    *,
+    min_chord_mm: float = _ARC_THROUGH_MIN_CHORD_MM,
+) -> float:
+    if end - start + 1 < 3:
+        return math.inf
+
+    start_xyz = cart[start].xyz()
+    end_xyz = cart[end].xyz()
+    z_values = [float(cart[i].z) for i in range(start, end + 1)]
+    z_span = max(z_values) - min(z_values)
+    best = math.inf
+    for through in range(start + 1, end):
+        through_xyz = cart[through].xyz()
+        if float(np.linalg.norm(through_xyz - start_xyz)) < min_chord_mm:
+            continue
+        if float(np.linalg.norm(through_xyz - end_xyz)) < min_chord_mm:
+            continue
+
+        arc = _command_arc_from_points(start_xyz, through_xyz, end_xyz)
+        if arc is None:
+            continue
+        if arc.radius > max_radius_mm:
+            continue
+        if arc.leg_ratio < (1.0 / _ARC_MAX_LEG_IMBALANCE) and z_span > _ARC_VERTICAL_IMBALANCE_ZSPAN_MM:
+            continue
+        if not (_ARC_MIN_THROUGH_FRACTION <= arc.through_fraction <= _ARC_MAX_THROUGH_FRACTION):
+            continue
+        if not _r_matches_arc_interpolation(cart, start, through, end, arc.through_fraction, r_tolerance_deg):
+            continue
+
+        max_error = 0.0
+        fractions: List[float] = []
+        valid = True
+        for point_idx in range(start + 1, end):
+            distance, fraction = _point_to_command_arc_distance(cart[point_idx].xyz(), arc)
+            if fraction is None or distance > tolerance_mm:
+                valid = False
+                break
+            max_error = max(max_error, distance)
+            fractions.append(fraction)
+        if not valid:
+            continue
+        if any(b < a - 0.05 for a, b in zip(fractions, fractions[1:])):
+            continue
+        best = min(best, max_error)
+    return best
+
+
+def _better_as_split(
+    cart: Sequence[CartesianPoint],
+    start: int,
+    end: int,
+    full_arc_error: float,
+    tolerance_mm: float,
+    max_radius_mm: float,
+    r_tolerance_deg: float,
+) -> bool:
+    """Would this span be more honest as two primitives than one Arc?
+
+    A single command-shaped arc can numerically fit a span that is visually a
+    straight run connected to a curved run.  That is legal geometry, but it is
+    not the motion intent we want to send to the MG400.  If a two-piece
+    Line/Arc or Arc/Line split reduces the worst fit error clearly, reject the
+    long Arc so the greedy scan can form the smaller primitives.
+    """
+    if end - start + 1 < 5 or not math.isfinite(full_arc_error):
+        return False
+
+    split_limit = max(
+        0.0,
+        full_arc_error * _ARC_SPLIT_IMPROVEMENT_RATIO,
+        full_arc_error - _ARC_SPLIT_MIN_IMPROVEMENT_MM,
+    )
+    for split in range(start + 2, end - 1):
+        left_line = _line_fit_error(cart, start, split, r_tolerance_deg)
+        right_line = _line_fit_error(cart, split, end, r_tolerance_deg)
+        left_arc = _best_command_arc_fit_error(
+            cart,
+            start,
+            split,
+            tolerance_mm,
+            max_radius_mm,
+            r_tolerance_deg,
+        )
+        right_arc = _best_command_arc_fit_error(
+            cart,
+            split,
+            end,
+            tolerance_mm,
+            max_radius_mm,
+            r_tolerance_deg,
+        )
+
+        split_error = min(
+            max(left_line, right_arc),
+            max(left_arc, right_line),
+            max(left_line, right_line),
+        )
+        if split_error < split_limit:
+            return True
+    return False
+
+
+def _select_arc_through(
+    cart: Sequence[CartesianPoint],
+    start: int,
+    end: int,
+    tolerance_mm: float,
+    max_radius_mm: float,
+    r_tolerance_deg: float,
+    min_chord_mm: float = _ARC_THROUGH_MIN_CHORD_MM,
+) -> Optional[int]:
+    """Pick the intermediate frame best suited as the Arc through-point.
+
+    The MG400 controller defines the arc with three Cartesian poses:
+    current (= start), ``through_xyzr``, and ``target_xyzr``.  When the
+    through-point sits very close to either endpoint, the implied circle
+    is ill-conditioned and small numerical errors produce large Z swings
+    during execution.  Picking the frame at the geometric midpoint of the
+    raw chord (rather than the midpoint of the index range) removes that
+    failure mode for unevenly-sampled trajectories.
+
+    "Best" = maximum perpendicular distance from the chord ``start → end``
+    (the bulgiest point of the arc), with a minimum chord-length
+    separation from both endpoints so the three points are non-degenerate.
+    Returns ``None`` if no candidate satisfies the separation rule —
+    callers should reject the arc and fall back to a simpler primitive.
+    """
+    start_xyz = cart[start].xyz()
+    end_xyz = cart[end].xyz()
+    z_values = [float(cart[i].z) for i in range(start, end + 1)]
+    z_span = max(z_values) - min(z_values)
+    best_idx: Optional[int] = None
+    best_score = math.inf
+    for i in range(start + 1, end):
+        through_xyz = cart[i].xyz()
+        if float(np.linalg.norm(through_xyz - start_xyz)) < min_chord_mm:
+            continue
+        if float(np.linalg.norm(through_xyz - end_xyz)) < min_chord_mm:
+            continue
+
+        arc = _command_arc_from_points(start_xyz, through_xyz, end_xyz)
+        if arc is None:
+            continue
+        if arc.radius > max_radius_mm:
+            continue
+        if arc.leg_ratio < (1.0 / _ARC_MAX_LEG_IMBALANCE) and z_span > _ARC_VERTICAL_IMBALANCE_ZSPAN_MM:
+            continue
+        if not (_ARC_MIN_THROUGH_FRACTION <= arc.through_fraction <= _ARC_MAX_THROUGH_FRACTION):
+            continue
+        if not _r_matches_arc_interpolation(cart, start, i, end, arc.through_fraction, r_tolerance_deg):
+            continue
+
+        max_error = 0.0
+        fractions: List[float] = []
+        valid = True
+        for j in range(start + 1, end):
+            distance, fraction = _point_to_command_arc_distance(cart[j].xyz(), arc)
+            if fraction is None or distance > tolerance_mm:
+                valid = False
+                break
+            max_error = max(max_error, distance)
+            fractions.append(fraction)
+        if not valid:
+            continue
+        if any(b < a - 0.05 for a, b in zip(fractions, fractions[1:])):
+            continue
+        if _better_as_split(
+            cart,
+            start,
+            end,
+            full_arc_error=max_error,
+            tolerance_mm=tolerance_mm,
+            max_radius_mm=max_radius_mm,
+            r_tolerance_deg=r_tolerance_deg,
+        ):
+            continue
+
+        balance_penalty = (1.0 - arc.leg_ratio) * 0.25
+        sweep_penalty = max(0.0, arc.sweep_rad - math.pi) * 0.1
+        score = max_error + balance_penalty + sweep_penalty
+        if score < best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
+
+
+def _is_arc_segment(
+    cart: Sequence[CartesianPoint],
+    start: int,
+    end: int,
+    tolerance_mm: float,
+    max_radius_mm: float,
     r_tolerance_deg: float,
 ) -> Optional[int]:
-    """Check if points[start..end] lie on a circular arc within tolerance.
+    """Do points[start..end] lie on a circular arc within ``tolerance_mm``?
 
-    Returns the index of the best through-point (for the Arc command),
-    or None if the segment is not a valid arc.
+    Uses a least-squares fit on every point in the span (not just three
+    samples) so a noisy or near-symmetric arc still gets a stable circle.
+
+    Returns the absolute through-point index for the Arc command, or None
+    if the span isn't a valid arc.  Reasons for rejection:
+
+    * < 3 points (need three for a circle)
+    * degenerate fit (collinear / rank-deficient)
+    * fitted radius > ``max_radius_mm`` — at that radius the arc is
+      effectively straight; LINE is the more honest classification
+    * any intermediate point deviates more than ``tolerance_mm`` from
+      the fitted circle in 3D
+    * no intermediate frame satisfies the through-point chord-separation
+      rule (would yield a degenerate 3-point arc command)
+
+    The through-point is the frame with maximum perpendicular distance
+    from the chord, not the midpoint of the index range — uneven Unity
+    sampling otherwise produces near-collinear (start, through) pairs
+    that ball-up the controller's arc planner.
     """
     n = end - start + 1
     if n < 3:
         return None
-
-    # Use the midpoint as the through-point for fitting
-    mid = (start + end) // 2
-    p0 = cart_points[start].xyz()
-    p1 = cart_points[mid].xyz()
-    p2 = cart_points[end].xyz()
-
-    center, radius = _fit_circle_3pts(p0, p1, p2)
-    if center is None or radius is None:
+    points = [cart[i].xyz() for i in range(start, end + 1)]
+    center, radius, normal = _fit_circle_least_squares(points)
+    if center is None or radius is None or normal is None:
         return None
-    if radius > 5000.0:
-        return None  # Too large → effectively a line, not a useful arc
-
-    # Normal of the circle's plane
-    v1 = p1 - p0
-    v2 = p2 - p0
-    normal = np.cross(v1, v2)
-    norm_len = np.linalg.norm(normal)
-    if norm_len < 1e-9:
+    if radius > max_radius_mm:
         return None
-    normal = normal / norm_len
 
-    # Check all intermediate points
     for i in range(start + 1, end):
-        d = _point_to_circle_distance(cart_points[i].xyz(), center, radius, normal)
-        if d > tolerance_mm:
+        if _point_to_circle_distance(cart[i].xyz(), center, radius, normal) > tolerance_mm:
             return None
-    if not _r_follows_linear_profile(cart_points, start, end, r_tolerance_deg):
-        return None
 
-    return mid
+    return _select_arc_through(
+        cart,
+        start,
+        end,
+        tolerance_mm=tolerance_mm,
+        max_radius_mm=max_radius_mm,
+        r_tolerance_deg=r_tolerance_deg,
+    )
 
 
-# ── Main classifier ─────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────
 
-def classify_segments(
-    joint_points: Sequence[Tuple[float, float, float, float]],
-    fk_fn: FKFunction,
-    line_tol_mm: float = 1.0,
-    arc_tol_mm: float = 2.0,
-    r_tol_deg: float = 2.0,
-    min_points_for_arc: int = 3,
-    enable_arc: bool = True,
-) -> List[Segment]:
-    """Classify a simplified waypoint sequence into typed motion segments.
+def _longest_line(
+    cart: Sequence[CartesianPoint],
+    start: int,
+    n: int,
+    tol_mm: float,
+    r_tol_deg: float,
+) -> int:
+    """Longest LINE span starting at ``start`` — returns end index (≥ start+1)."""
+    for cand in range(n - 1, start, -1):
+        if _is_line_segment(cart, start, cand, tol_mm, r_tol_deg):
+            return cand
+    return start + 1  # 2-point fallback (always trivially collinear)
 
-    Parameters
-    ----------
-    joint_points
-        Sequence of (j1, j2, j3, j4) in degrees — the already-simplified
-        waypoints from the RDP pass.
-    fk_fn
-        Forward kinematics: (j1,j2,j3,j4) → (x_mm, y_mm, z_mm, r_deg).
-    line_tol_mm
-        Maximum Cartesian deviation (mm) for a segment to be classified
-        as LINE.
-    arc_tol_mm
-        Maximum Cartesian deviation (mm) from the fitted circle for an
-        ARC segment.
-    r_tol_deg
-        Maximum wrist/yaw deviation (deg) from endpoint interpolation for
-        LINE/ARC compression.  If the tool orientation changes with a
-        different profile, the segment falls back to GENERAL.
-    min_points_for_arc
-        Minimum number of waypoints required to attempt arc fitting.
-    enable_arc
-        If False, skip ARC classification and use LINE or GENERAL only.  This
-        is useful for test backends such as the current MG400 Mock image, which
-        accepts ``MovL`` but does not implement ``Arc``.
 
-    Returns
-    -------
-    List of Segment, covering the entire waypoint sequence end-to-end.
-    Each segment's ``end_idx`` equals the next segment's ``start_idx``
-    (shared boundary point) to ensure continuity.
-    """
-    n = len(joint_points)
-    if n <= 1:
-        if n == 1:
-            cp = _joints_to_cart(joint_points[0], fk_fn)
-            return [Segment(SegmentType.GENERAL, 0, 0,
-                            cartesian_points=(cp,))]
-        return []
-
-    # Pre-compute all Cartesian points
-    cart = [_joints_to_cart(jp, fk_fn) for jp in joint_points]
-
-    segments: List[Segment] = []
-    i = 0
-
-    while i < n - 1:
-        best_end = i + 1
-        best_type = SegmentType.GENERAL
-        best_through: Optional[int] = None
-
-        # 1. Try to extend as LINE (longest first)
-        for candidate_end in range(n - 1, i, -1):
-            if _is_line_segment(cart, i, candidate_end, line_tol_mm, r_tol_deg):
-                best_end = candidate_end
-                best_type = SegmentType.LINE
-                break
-
-        # 2. Try ARC when enabled — greedily extend from n-1 downward.
-        #    ARC wins only when it covers MORE waypoints than the best LINE
-        #    (or when no LINE was found).  This fixes the case where LINE
-        #    collects many short segments for a smooth curve (e.g. J1 rotation)
-        #    that would be served by a single Arc command instead.
-        if enable_arc:
-            for candidate_end in range(n - 1, i + min_points_for_arc - 1, -1):
-                if candidate_end <= best_end:
-                    break  # ARC must cover strictly more waypoints than best LINE
-                through_idx = _is_arc_segment(cart, i, candidate_end, arc_tol_mm, r_tol_deg)
-                if through_idx is not None:
-                    best_end = candidate_end
-                    best_type = SegmentType.ARC
-                    best_through = through_idx
-                    break
-
-        segments.append(Segment(
-            type=best_type,
-            start_idx=i,
-            end_idx=best_end,
-            cartesian_points=tuple(cart[i:best_end + 1]),
-            arc_through_idx=best_through,
-        ))
-        i = best_end  # next segment starts at the end of this one
-
-    return segments
+def _longest_arc(
+    cart: Sequence[CartesianPoint],
+    start: int,
+    n: int,
+    tol_mm: float,
+    max_radius_mm: float,
+    r_tol_deg: float,
+    min_points: int,
+) -> Tuple[Optional[int], Optional[int]]:
+    """Longest ARC span starting at ``start`` — returns (end_idx, through_idx)."""
+    for cand in range(n - 1, start + min_points - 2, -1):
+        through = _is_arc_segment(cart, start, cand, tol_mm, max_radius_mm, r_tol_deg)
+        if through is not None:
+            return cand, through
+    return None, None
 
 
 def _joints_to_cart(
@@ -377,7 +769,110 @@ def _joints_to_cart(
     return CartesianPoint(x=x, y=y, z=z, r=r)
 
 
-# ── Summary helpers ─────────────────────────────────────────────────────
+# ── Main classifier ─────────────────────────────────────────────────────
+
+def classify_segments(
+    joint_points: Sequence[Tuple[float, float, float, float]],
+    fk_fn: FKFunction,
+    line_tol_mm: float = 2.0,
+    arc_tol_mm: float = 3.0,
+    max_arc_radius_mm: float = 10000.0,
+    r_tol_deg: float = 10.0,
+    min_points_for_arc: int = 3,
+    enable_arc: bool = True,
+) -> List[Segment]:
+    """Classify a simplified joint-space waypoint sequence into typed segments.
+
+    Parameters
+    ----------
+    joint_points
+        Sequence of (j1, j2, j3, j4) in degrees — already simplified by RDP.
+    fk_fn
+        Forward kinematics: (j1,j2,j3,j4) → (x_mm, y_mm, z_mm, r_deg).
+    line_tol_mm
+        Max XYZ deviation from the chord between segment endpoints for a
+        span to qualify as LINE.
+    arc_tol_mm
+        Max 3D deviation from the least-squares-fitted circle for a span
+        to qualify as ARC.
+    max_arc_radius_mm
+        Cap on the fitted arc radius.  Above this radius the arc is
+        effectively straight and LINE is the better fit.  Defaults to
+        10 000 mm — well outside the MG400's reach so any genuine arc on
+        the working envelope passes, but a near-straight curve doesn't
+        sneak in as a giant-radius Arc.
+    r_tol_deg
+        Max permitted R/yaw deviation from endpoint interpolation.  Small
+        hand wobble can still collapse to MovL/Arc, while meaningful non-linear
+        wrist motion falls back to GENERAL.
+    min_points_for_arc
+        Minimum waypoint count to attempt arc fitting (need ≥ 3).
+    enable_arc
+        Set False to disable Arc emission (e.g. for backends that don't
+        implement it); the classifier falls back to LINE / GENERAL only.
+
+    Returns
+    -------
+    List of Segment, end-to-end.  Adjacent segments share their boundary
+    waypoint (segment N's ``end_idx`` == segment N+1's ``start_idx``) so
+    the renderer can stream them without re-anchoring.
+
+    Tie-break
+    ---------
+    When LINE and ARC cover the same number of waypoints LINE wins — a
+    straight line is the limit of an arc with infinite radius, so when
+    both fit equally well the simpler primitive is the honest choice.
+    """
+    n = len(joint_points)
+    if n == 0:
+        return []
+    if n == 1:
+        cp = _joints_to_cart(joint_points[0], fk_fn)
+        return [Segment(SegmentType.GENERAL, 0, 0, cartesian_points=(cp,))]
+
+    cart = [_joints_to_cart(jp, fk_fn) for jp in joint_points]
+    segments: List[Segment] = []
+    i = 0
+
+    while i < n - 1:
+        line_end = _longest_line(cart, i, n, line_tol_mm, r_tol_deg)
+
+        arc_end: Optional[int] = None
+        arc_through: Optional[int] = None
+        if enable_arc and (n - i) >= min_points_for_arc:
+            arc_end, arc_through = _longest_arc(
+                cart, i, n, arc_tol_mm, max_arc_radius_mm, r_tol_deg, min_points_for_arc,
+            )
+
+        # Pick the longer span; ties go to LINE (simpler primitive).
+        if arc_end is not None and arc_end > line_end:
+            seg_type = SegmentType.ARC
+            best_end = arc_end
+            best_through = arc_through
+        else:
+            seg_type = SegmentType.LINE
+            best_end = line_end
+            best_through = None
+
+        # 2-point LINE on truly irregular data is GENERAL — we couldn't
+        # extend either primitive past one waypoint, so emit a JointMovJ
+        # chunk to preserve fidelity instead of a degenerate MovL.
+        if seg_type == SegmentType.LINE and best_end == i + 1:
+            seg_type = SegmentType.GENERAL
+
+        segments.append(Segment(
+            type=seg_type,
+            start_idx=i,
+            end_idx=best_end,
+            cartesian_points=tuple(cart[i:best_end + 1]),
+            arc_through_idx=best_through,
+        ))
+        i = best_end
+
+    return segments
+
+
+# ── Summary ─────────────────────────────────────────────────────────────
 
 def segment_summary(segments: List[Segment]) -> str:
     """Human-readable summary of classified segments."""
@@ -388,8 +883,7 @@ def segment_summary(segments: List[Segment]) -> str:
         total_points = max(total_points, s.end_idx + 1)
 
     total_commands = sum(
-        1 if s.type in (SegmentType.LINE, SegmentType.ARC)
-        else s.point_count - 1
+        1 if s.type in (SegmentType.LINE, SegmentType.ARC) else s.point_count - 1
         for s in segments
     )
     parts = []
@@ -400,5 +894,4 @@ def segment_summary(segments: List[Segment]) -> str:
     if counts[SegmentType.GENERAL]:
         n_gen_cmds = sum(s.point_count - 1 for s in segments if s.type == SegmentType.GENERAL)
         parts.append(f"{n_gen_cmds} JointMovJ")
-
     return f"{total_points} pts → {total_commands} cmds ({', '.join(parts)})"

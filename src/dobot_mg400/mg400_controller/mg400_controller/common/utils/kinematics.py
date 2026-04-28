@@ -11,6 +11,7 @@
 """
 
 import numpy as np
+from numpy import linalg as LA
 
 class KinematicsCalculator:
     def __init__(self):
@@ -126,3 +127,61 @@ class KinematicsCalculator:
         rx = j1 + j4   # yaw of end-effector
 
         return np.array([px, py, pz, rx, 0.0, 0.0])
+
+    def in_working_space(self, joints_deg):
+        """Return True if MG400 active joints are within the 4-axis limits."""
+        j1, j2, j3, j4 = [float(v) for v in joints_deg[:4]]
+        return (
+            -160.0 <= j1 <= 160.0
+            and -25.0 <= j2 <= 85.0
+            and -25.0 <= j3 <= 105.0
+            and -60.0 <= (j3 - j2) <= 60.0
+            and -180.0 <= j4 <= 180.0
+        )
+
+    def inverse_kinematics(self, tool_xyzr):
+        """Compute MG400 4-axis IK for a tool pose [x, y, z, r].
+
+        This mirrors the HarvestX MG400_Mock kinematics.  It is used as a
+        conservative feasibility check before compressing dense taught points
+        into Cartesian primitives such as MovL or Arc.
+        """
+        p_x, p_y, p_z, rx = [float(v) for v in tool_xyzr[:4]]
+        link1 = np.array([43.0, 0.0, 0.0])
+        link2 = np.array([0.0, 0.0, 175.0])
+        link3 = np.array([175.0, 0.0, 0.0])
+        link4 = np.array([66.0, 0.0, -57.0])
+
+        pp_x = LA.norm([p_x, p_y]) - link4[0] - link1[0]
+        pp_z = p_z - link4[2] - link1[2]
+        length2 = LA.norm(link2)
+        length3 = LA.norm(link3)
+
+        j1 = np.arctan2(p_y, p_x)
+        val1 = (pp_x**2 + pp_z**2 - length2**2 - length3**2) / (2 * length2 * length3)
+        if val1 < -1.0 or val1 > 1.0:
+            raise ValueError("outside of workspace.")
+
+        j3_1 = np.arcsin(val1)
+        j2 = np.arctan2(pp_z, pp_x) - np.arctan2(
+            length2 + length3 * np.sin(j3_1),
+            length3 * np.cos(j3_1),
+        )
+
+        j1 = np.rad2deg(j1)
+        j2 = -np.rad2deg(j2)
+        j3_1 = -np.rad2deg(j3_1)
+        j3 = j2 + j3_1
+        j4 = rx - j1
+        joints = np.round([j1, j2, j3, j4], decimals=6)
+        if not self.in_working_space(joints):
+            raise ValueError("outside of workspace.")
+        return joints
+
+    def is_tool_pose_reachable(self, tool_xyzr):
+        """Return True if the tool pose can be reached by MG400 IK."""
+        try:
+            self.inverse_kinematics(tool_xyzr)
+            return True
+        except ValueError:
+            return False

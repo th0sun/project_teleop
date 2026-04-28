@@ -113,20 +113,25 @@ So:
 - **robot-specific execution strategy** is the correct abstraction;
 - **near-real-time behavior** is optional and depends on the target robot.
 
-## MG400-Specific Interpretation
+## The MG400 as the Validation Target
 
-For MG400, the important lesson is not "make it as real-time as possible."
+The MG400 is not the end goal; it is the first real-world validation of the
+middle layer.
 
-The important lesson is:
+Building for the MG400 first provides concrete constraints and prevents the
+middle layer from being overly abstract. The system must successfully translate
+VR input into a form that the MG400 can execute well, without hard-coupling
+the entire project to the MG400.
 
-```text
-understand the robot's queue semantics well enough to convert teaching input
-into commands the robot can execute reliably.
-```
-
-That is why queue-aware pacing, playback, and monitor tooling still matter.
-They are useful, but they should support the teaching goal rather than replace
-it.
+**Recent Milestone:** The system now has an experimental `SegmentClassifier`
+that can translate recorded VR frames into sparse high-level geometric
+primitives (`MovL`, `Arc`, fallback `JointMovJ`).  This is an important step
+toward interpreting a teach session as a reusable program, but it is not yet
+proof of high-fidelity repeat on dense tasks.  Local Mock testing shows a small
+trajectory can pass geometrically, while a longer Unity capture still times out
+when executed as host-streamed TCP commands.  The project direction therefore
+remains offline/controller-side program execution where possible, with
+host-streaming used only as a guarded fallback.
 
 ## Architectural Direction
 
