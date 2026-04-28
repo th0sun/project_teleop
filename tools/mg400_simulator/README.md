@@ -74,16 +74,19 @@ Since `rclpy` cannot be easily installed on macOS or Windows, the simulator feat
 **1. On the Ubuntu Machine (Robot Controller):**
 Start the complete teleop stack specifying the Unity Frontend:
 ```bash
+cd ~/project_teleop_ws/project_teleop
 ./start_teleop.sh
-# Select: 1 or 2 (Robot) -> 2 (Unity App)
+# Select:
+#   4 = Mock + Unity / ROS-TCP endpoint
+#   3 = Real robot + Unity / ROS-TCP endpoint
 ```
 *(Note down the IP address of this Ubuntu machine, e.g., `192.168.1.6`)*
 
 **2. On your Mac/Windows Machine (Simulator):**
-Run the launcher script at the root of the workspace:
+Run the simulator launcher:
 ```bash
-./start_teleop.sh
-# The script will auto-detect macOS and launch the simulator!
+cd /Users/thesun/the_core/Robotics_and_PLC/project_teleop_ws/project_teleop
+./tools/mg400_simulator/run.sh
 ```
 In the right control panel under **"ROS 2 Bridge / Unity Mock"**: 
 - Enter your Ubuntu machine's IP in the **Host** field.
@@ -91,6 +94,41 @@ In the right control panel under **"ROS 2 Bridge / Unity Mock"**:
 - Check **"Connect"**.
 
 You can now control the robot remotely exactly as the Unity VR headset does!
+
+### Sending Teach-And-Repeat Jobs Without Unity
+
+The simulator's **Teach & Repeat** tab can also send the newer teach-job JSON
+contract used by the real Unity `TeachJobPublisher`.
+
+1. Connect the simulator to the Ubuntu ROS-TCP endpoint as described above.
+2. In the **Teach & Repeat** tab, drag the robot or adjust joints.
+3. Press **+ Add Point** for each waypoint.
+4. Use **ROS Teach Job**:
+   - **Compile** publishes `action=compile` to `/teach/job_request`.
+   - **Preview Sim** publishes `action=preview_sim`; ROS compiles only and
+     must not move the robot.
+   - **Execute** publishes `action=execute`; use this only against Mock or when
+     the real-robot safety gate is intentionally enabled.
+
+The emitted payload is a `std_msgs/String` on:
+
+```text
+/teach/job_request
+```
+
+Its trajectory body matches the Unity job shape:
+
+```json
+{
+  "filename": "mg400_simulator_waypoints.json",
+  "teach_mode": "waypoint",
+  "source": "mg400_simulator",
+  "frames": [
+    {"timeStamp": 0.0, "j1": 0.0, "j2": 0.0, "j3": -45.0, "j4": 0.0}
+  ],
+  "events": []
+}
+```
 
 ## Architecture
 
@@ -107,8 +145,10 @@ main.py
         │     • speed / mode / I/O controls
         ├── TeachPanel (ui/teach_panel.py)          ← right sidebar (tab)
         │     • waypoint recording and playback logic
+        │     • pub /teach/job_request via ROSBridge / UnityTcpBridge
         └── ROSBridge (core/ros_bridge.py)          ← optional rclpy node
               • pub /unity/joint_cmd
+              • pub /teach/job_request
               • sub /joint_states_deg
               • pub dashboard commands
 ```

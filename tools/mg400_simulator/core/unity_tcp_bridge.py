@@ -104,6 +104,7 @@ class UnityTcpBridge:
                 ("/unity/joint_cmd", "sensor_msgs/JointState"),
                 ("/vr/suction_cmd", "std_msgs/Bool"),
                 ("/mg400/light_cmd", "std_msgs/Int32MultiArray"),
+                ("/teach/job_request", "std_msgs/String"),
                 ("/unity/enable_robot", "std_msgs/Bool"),
                 ("/unity/clear_error", "std_msgs/Empty"),
                 ("/unity/emergency_stop", "std_msgs/Bool"),
@@ -174,6 +175,10 @@ class UnityTcpBridge:
     def publish_suction(self, enable: bool):
         if not self.connected: return
         self._send_msg('/vr/suction_cmd', cdr_bool(enable))
+
+    def publish_teach_job_request(self, payload_json: str):
+        if not self.connected: return
+        self._send_msg('/teach/job_request', cdr_string(payload_json))
 
     def _send_msg(self, dest: str, data_bytes: bytes):
         packet = pack_string(dest) + struct.pack('<I', len(data_bytes)) + data_bytes

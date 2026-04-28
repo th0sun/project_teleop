@@ -139,3 +139,31 @@ class TeachManager:
             'joint_names': ['joint1', 'joint2', 'joint3', 'joint4'],
             'points':       points,
         }
+
+    def to_unity_trajectory_dict(self, filename: str = 'mg400_simulator_waypoints.json') -> dict:
+        """
+        Return the Unity teach-job trajectory shape used by TeachJobPublisher.
+
+        This simulator records sparse waypoints.  Timestamps are synthesized
+        from the waypoint durations so existing ROS-side validators can consume
+        the payload, while the compiler can still retime motion later.
+        """
+        frames = []
+        t = 0.0
+        for i, wp in enumerate(self._waypoints):
+            if i > 0:
+                t += float(wp.duration)
+            frames.append({
+                'timeStamp': float(t),
+                'j1': float(wp.joints[0]),
+                'j2': float(wp.joints[1]),
+                'j3': float(wp.joints[2]),
+                'j4': float(wp.joints[3]),
+            })
+        return {
+            'filename': filename,
+            'teach_mode': 'waypoint',
+            'source': 'mg400_simulator',
+            'frames': frames,
+            'events': [],
+        }

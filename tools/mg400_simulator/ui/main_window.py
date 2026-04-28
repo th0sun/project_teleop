@@ -172,6 +172,7 @@ class MainWindow(QMainWindow):
         # Teach panel signals
         self._teach.goto_waypoint.connect(self._on_teach_goto)
         self._teach.play_frame.connect(self._on_teach_frame)
+        self._teach.teach_job_requested.connect(self._on_teach_job_requested)
         self._teach.play_started.connect(lambda: self._sb_ros.setText('▶ Playing...'))
         self._teach.play_stopped.connect(lambda: self._sb_ros.setText('ROS: offline'))
 
@@ -221,6 +222,23 @@ class MainWindow(QMainWindow):
         self._viewport.set_joints(joints)
         self._panel.set_joints(joints)
         self._teach.set_current_joints(joints)
+
+    @pyqtSlot(str, dict)
+    def _on_teach_job_requested(self, action: str, trajectory: dict):
+        """Teach panel: send a Unity-format /teach/job_request payload."""
+        if not self._ros.connected:
+            self.statusBar().showMessage('ROS-TCP not connected — cannot send teach job.', 4000)
+            QMessageBox.warning(self, 'ROS Teach Job',
+                                'Connect the ROS-TCP bridge first, then send the teach job.')
+            return
+        job_id = self._ros.publish_teach_job_request(action, trajectory)
+        if job_id:
+            frame_count = len(trajectory.get('frames', []))
+            self.statusBar().showMessage(
+                f'Teach job sent: {action} ({frame_count} frames, job_id={job_id[:8]})',
+                5000)
+        else:
+            self.statusBar().showMessage('Teach job send failed: ROS bridge offline.', 4000)
 
     @pyqtSlot()
     def _send_joints_to_ros(self):

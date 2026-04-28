@@ -8,6 +8,8 @@ Gracefully degrades to a no-op when rclpy is not found.
 import json
 import threading
 import math
+import time
+import uuid
 from typing import Optional, Callable, List
 
 from core.unity_tcp_bridge import UnityTcpBridge
@@ -168,6 +170,31 @@ class ROSBridge:
         msg.data = json.dumps({'suction': int(enable)})
         self._node.pub_suction.publish(msg)
 
+    def publish_teach_job_request(self, action: str, trajectory: dict,
+                                  target: str = 'mg400', options: dict = None) -> str:
+        """Publish a TeachJobPublisher-compatible request to /teach/job_request."""
+        job_id = str(uuid.uuid4())
+        payload = {
+            'job_id': job_id,
+            'action': action,
+            'target': target,
+            'submitted_at_unity_sec': float(time.time()),
+            'options': dict(options or {}),
+            'trajectory': trajectory,
+        }
+        payload_json = json.dumps(payload, sort_keys=True)
+
+        if self._tcp_bridge:
+            self._tcp_bridge.publish_teach_job_request(payload_json)
+            return job_id
+
+        if not self.connected or self._node is None:
+            return ''
+        msg = String()
+        msg.data = payload_json
+        self._node.pub_teach_job_request.publish(msg)
+        return job_id
+
     # ── Private ──────────────────────────────────────────────────────────────
 
     def _spin(self):
@@ -201,6 +228,8 @@ if _ROS_AVAILABLE:
                                         '/unity/speed', 10)
             self.pub_suction      = self.create_publisher(String,
                                         '/unity/suction', 10)
+            self.pub_teach_job_request = self.create_publisher(String,
+                                        '/teach/job_request', 10)
 
             # Subscribers
             self.create_subscription(Float64MultiArray, '/joint_states_deg',

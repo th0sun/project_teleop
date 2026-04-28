@@ -30,12 +30,14 @@ class TeachPanel(QWidget):
     Signals:
         goto_waypoint(list)    – user selects / wants to preview a waypoint
         play_frame(list)       – replay timer emits each joint frame
+        teach_job_requested(str, dict) – action + Unity-format trajectory
         play_started()
         play_stopped()
     """
 
     goto_waypoint = pyqtSignal(list)
     play_frame    = pyqtSignal(list)
+    teach_job_requested = pyqtSignal(str, dict)
     play_started  = pyqtSignal()
     play_stopped  = pyqtSignal()
 
@@ -171,6 +173,30 @@ class TeachPanel(QWidget):
         io_h.addWidget(btn_save)
         io_h.addWidget(btn_load)
         layout.addWidget(io_box)
+
+        # ── ROS teach job bridge ───────────────────────────────────────────
+        job_box = QGroupBox('ROS Teach Job')
+        job_g = QGridLayout(job_box)
+        job_g.setSpacing(4)
+
+        btn_compile = _btn('Compile', '#1f4f64',
+                           'Send compile job to /teach/job_request')
+        btn_preview = _btn('Preview Sim', '#1f4f64',
+                           'Compile-only preview; does not move the robot')
+        btn_execute = _btn('Execute', '#5c301a',
+                           'Send execute job to the ROS adapter')
+        btn_compile.clicked.connect(lambda: self._request_teach_job('compile'))
+        btn_preview.clicked.connect(lambda: self._request_teach_job('preview_sim'))
+        btn_execute.clicked.connect(lambda: self._request_teach_job('execute'))
+
+        job_g.addWidget(btn_compile, 0, 0)
+        job_g.addWidget(btn_preview, 0, 1)
+        job_g.addWidget(btn_execute, 1, 0, 1, 2)
+
+        self._job_status_lbl = QLabel('Connect ROS-TCP first, then send a job.')
+        self._job_status_lbl.setStyleSheet('color:#888; font-size:8px;')
+        job_g.addWidget(self._job_status_lbl, 2, 0, 1, 2)
+        layout.addWidget(job_box)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -313,3 +339,17 @@ class TeachPanel(QWidget):
     def get_ros_trajectory(self) -> dict:
         """Return ROS-compatible JointTrajectory dict."""
         return self._manager.to_joint_trajectory_dict()
+
+    def get_unity_trajectory(self) -> dict:
+        """Return TeachJobPublisher-compatible Unity trajectory JSON."""
+        return self._manager.to_unity_trajectory_dict()
+
+    def _request_teach_job(self, action: str):
+        if self._manager.count() < 2:
+            QMessageBox.information(self, 'ROS Teach Job',
+                                    'Need at least 2 waypoints before sending a teach job.')
+            return
+        trajectory = self.get_unity_trajectory()
+        self.teach_job_requested.emit(action, trajectory)
+        self._job_status_lbl.setText(
+            f'{action} requested: {len(trajectory["frames"])} waypoint(s)')
