@@ -231,7 +231,10 @@ class TeachPanel(QWidget):
 
         if stage == 'tuned':
             self._job_timeout_timer.stop()
-            self._set_job_state('executing', message or 'Playback tuning updated')
+            if self._job_state == 'executing':
+                self._set_job_state('executing', message or 'Playback tuning updated')
+            else:
+                self._job_status_lbl.setText(message or 'Playback tuning updated')
             return
 
         if stage == 'done':
@@ -378,8 +381,10 @@ class TeachPanel(QWidget):
         if path:
             try:
                 self._manager.load(path)
-                self._invalidate_plan('Program loaded. Validate before Execute.')
+                self._reset_plan_after_program_change('Program loaded. Validate before Execute.')
                 self._refresh_list()
+                if self._manager.count():
+                    self._list.setCurrentRow(0)
             except Exception as e:
                 QMessageBox.critical(self, 'Error', str(e))
 
@@ -391,7 +396,7 @@ class TeachPanel(QWidget):
             return
         try:
             count = self._manager.load_unity_trajectory(path)
-            self._invalidate_plan('Unity trajectory imported. Validate before Execute.')
+            self._reset_plan_after_program_change('Unity trajectory imported. Validate before Execute.')
             self._refresh_list()
             if count:
                 self._list.setCurrentRow(0)
@@ -452,6 +457,12 @@ class TeachPanel(QWidget):
     def _invalidate_plan(self, message: str):
         if self._job_busy:
             return
+        self._job_validated = False
+        self._set_job_state('idle', message)
+
+    def _reset_plan_after_program_change(self, message: str):
+        self._job_timeout_timer.stop()
+        self._job_busy = False
         self._job_validated = False
         self._set_job_state('idle', message)
 
