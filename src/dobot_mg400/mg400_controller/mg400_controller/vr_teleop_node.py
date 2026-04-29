@@ -13,12 +13,13 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String, Float64MultiArray, Int64, Int32
+from std_msgs.msg import String, Float64MultiArray, Int64, Int32, Bool
 import threading
 import numpy as np
 import time
 import datetime
 import json
+import os
 
 # Import configuration
 from mg400_controller.common.config.robot_config import (
@@ -56,6 +57,7 @@ from mg400_controller.common.trajectory.trajectory_recorder import frames_from_j
 from mg400_controller.common.trajectory.teach_job_handler import TeachJobHandler
 from mg400_controller.common.utils.teleop_logger import TeleopLogger
 from mg400_controller.common.logic.safety_monitor import SafetyMonitor
+from mg400_controller.common.logic.scene_safety_guard import SceneSafetyGuard
 from mg400_controller.common.logic.teleop_controller import TeleopController
 from mg400_controller.common.utils.latency_analyzer import LatencyAnalyzer
 from mg400_controller.common.utils.clock_calibrator import ClockCalibrator
@@ -156,6 +158,7 @@ class TeleopNode(Node):
             unity_pong_callback=self._unity_pong_callback,
             suction_callback=self._suction_callback,
             light_callback=self._light_callback,
+            scene_safety_callback=self._scene_safety_callback,
             dashboard_cmd_callback=self._dashboard_cmd_callback,
             teach_status_callback=self._teach_status_callback,
             traj_data_callback=self._traj_data_callback,
@@ -215,6 +218,17 @@ class TeleopNode(Node):
             self._playback_lifecycle_callback
         )
 
+        self.scene_safety_guard = SceneSafetyGuard(
+            model_path=os.environ.get("MG400_SCENE_SAFETY_MODEL", motion_config.SCENE_SAFETY_MODEL_PATH),
+            enabled=self._env_bool(
+                "MG400_SCENE_SAFETY_ENABLED",
+                motion_config.SCENE_SAFETY_ENABLED_DEFAULT,
+            ),
+            warn_distance_mm=motion_config.SCENE_SAFETY_WARN_DISTANCE_MM,
+            logger=self.get_logger(),
+        )
+        self._last_scene_safety_block_log = 0.0
+
         # Job-request dispatcher for /teach/job_request (compile/preview_sim/
         # execute/export/stop/record_*).  Replaces the implicit "publish
         # JointTrajectory == execute now" behaviour.  Status / artifact replies
@@ -229,6 +243,7 @@ class TeleopNode(Node):
             ),
             logger=self.get_logger(),
             allow_real_execute_fn=lambda: bool(self.connection.connected),
+            scene_safety_guard=self.scene_safety_guard,
         )
 
         self.interactive = InteractiveCommandHandler(
@@ -275,6 +290,20 @@ class TeleopNode(Node):
         self.get_logger().info(f"🎯 Target Change Threshold: {motion_config.TARGET_CHANGE_THRESHOLD:.3f} rad ({np.degrees(motion_config.TARGET_CHANGE_THRESHOLD):.1f} deg)")
         self.get_logger().info(f"⏱️  Stuck Time Threshold: {motion_config.STUCK_TIME_THRESHOLD:.1f} s")
         self.get_logger().info(f"🚫 No Timeout - Pure Real-Time Control")
+
+    @staticmethod
+    def _env_bool(name, default=False):
+        raw = os.environ.get(name)
+        if raw is None:
+            return bool(default)
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+
+    def _scene_safety_callback(self, msg: Bool):
+        enabled = bool(msg.data)
+        self.scene_safety_guard.set_enabled(enabled)
+        state = "enabled" if enabled else "disabled"
+        loaded = "loaded" if self.scene_safety_guard.loaded else "no model"
+        self.get_logger().warn(f"🧱 Scene safety {state} ({loaded})")
 
     def _publish_heartbeat(self):
         """Level 3: Send Ping to Unity to measure RTT"""
@@ -824,6 +853,18 @@ class TeleopNode(Node):
             )
 
             if should_send:
+                if motion_config.SCENE_SAFETY_BLOCK_REALTIME:
+                    safety_result = self.scene_safety_guard.check_joints_rad(self.latest_target)
+                    if safety_result.blocked:
+                        if now - self._last_scene_safety_block_log > 0.5:
+                            self.get_logger().error(
+                                "🧱 Scene safety blocked realtime target: "
+                                f"{safety_result.status} {safety_result.detail} "
+                                f"tcp={np.round(safety_result.point_xyzr[:3], 1).tolist()}"
+                            )
+                            self._last_scene_safety_block_log = now
+                        return
+
                 # 1. Format Command
                 # force_send=True when stuck: bypass should_skip_motion which silently drops commands
                 is_stuck_recovery = send_reason.startswith("Stuck")

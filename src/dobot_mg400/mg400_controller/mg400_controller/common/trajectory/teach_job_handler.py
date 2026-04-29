@@ -105,6 +105,7 @@ ERR_UNKNOWN_ACTION = "UNKNOWN_ACTION"
 ERR_TARGET_MISMATCH = "TARGET_MISMATCH"
 ERR_PLAYBACK_TIMEOUT = "PLAYBACK_TIMEOUT"
 ERR_PLAYBACK_FAILED = "PLAYBACK_FAILED"
+ERR_SCENE_SAFETY = "SCENE_SAFETY_BLOCKED"
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,7 @@ class TeachJobHandler:
         *,
         allow_real_execute_fn: Optional[Callable[[], bool]] = None,
         accepted_targets: Tuple[str, ...] = ("mg400", ""),
+        scene_safety_guard=None,
         time_fn: Optional[Callable[[], float]] = None,
     ):
         self._recorder = recorder
@@ -259,6 +261,7 @@ class TeachJobHandler:
         self._log = logger
         self._allow_real_execute = allow_real_execute_fn or (lambda: True)
         self._accepted_targets = tuple(accepted_targets)
+        self._scene_safety_guard = scene_safety_guard
         self._time_fn = time_fn or time.time
         self._active_execute_request: Optional[JobRequest] = None
         add_event_cb = getattr(self._recorder, "add_playback_event_callback", None)
@@ -332,6 +335,7 @@ class TeachJobHandler:
         except Exception as exc:
             return self._fail(request, ERR_BAD_PAYLOAD, f"Compile failed: {exc}")
 
+        scene_violations = self._scene_safety_violations(plan)
         artifact = compiled_playback_plan_to_dict(plan)
         artifact_payload = {
             "job_id": request.job_id,
@@ -357,6 +361,9 @@ class TeachJobHandler:
                 "time_scale": plan.time_scale,
                 "original_timing_feasible": plan.original_timing_feasible,
                 "playback_tuning": self._current_tuning(),
+                "scene_safety_enabled": self._scene_safety_enabled(),
+                "scene_safety_blocked": bool(scene_violations),
+                "scene_safety_violations": scene_violations[:5],
             },
         )
 
@@ -378,6 +385,7 @@ class TeachJobHandler:
         except Exception as exc:
             return self._fail(request, ERR_BAD_PAYLOAD, f"Sim preview compile failed: {exc}")
 
+        scene_violations = self._scene_safety_violations(plan)
         artifact = compiled_playback_plan_to_dict(plan)
         artifact_payload = {
             "job_id": request.job_id,
@@ -408,6 +416,9 @@ class TeachJobHandler:
                 "time_scale": plan.time_scale,
                 "original_timing_feasible": plan.original_timing_feasible,
                 "playback_tuning": self._current_tuning(),
+                "scene_safety_enabled": self._scene_safety_enabled(),
+                "scene_safety_blocked": bool(scene_violations),
+                "scene_safety_violations": scene_violations[:5],
             },
         )
 
@@ -441,6 +452,26 @@ class TeachJobHandler:
                               "Real-robot execute denied (robot disconnected or gated)")
 
         try:
+            plan = self._recorder.compile_loaded_plan()
+        except Exception as exc:
+            self._active_execute_request = None
+            return self._fail(request, ERR_BAD_PAYLOAD, f"Playback compile failed: {exc}")
+
+        scene_violations = self._scene_safety_violations(plan)
+        if scene_violations:
+            first = scene_violations[0]
+            return self._fail(
+                request,
+                ERR_SCENE_SAFETY,
+                "Scene safety blocked execute: "
+                f"{first.get('status')} {first.get('detail')} at {first.get('point_xyzr')}",
+                metadata={
+                    "scene_safety_enabled": True,
+                    "scene_safety_violations": scene_violations[:5],
+                },
+            )
+
+        try:
             self._active_execute_request = request
             self._recorder.start_preview()
         except Exception as exc:
@@ -456,6 +487,7 @@ class TeachJobHandler:
                 "real_robot_moved": True,
                 "waypoint_count": len(self._recorder.loaded_frames),
                 "playback_tuning": self._current_tuning(),
+                "scene_safety_enabled": self._scene_safety_enabled(),
             },
         )
 
@@ -467,6 +499,27 @@ class TeachJobHandler:
             message="Playback tuning updated",
             metadata={"playback_tuning": tuning},
         )
+
+    def _scene_safety_enabled(self) -> bool:
+        guard = self._scene_safety_guard
+        return bool(getattr(guard, "enabled", False) and getattr(guard, "loaded", False))
+
+    def _scene_safety_violations(self, plan) -> List[Dict[str, Any]]:
+        guard = self._scene_safety_guard
+        if not self._scene_safety_enabled() or guard is None:
+            return []
+        check_plan = getattr(guard, "check_plan", None)
+        if not callable(check_plan):
+            return []
+        violations = []
+        for result in check_plan(plan):
+            violations.append({
+                "status": result.status,
+                "detail": result.detail,
+                "distance_mm": result.distance_mm,
+                "point_xyzr": list(result.point_xyzr),
+            })
+        return violations
 
     def _handle_export(self, request: JobRequest) -> JobStatus:
         self._apply_request_tuning(request)
@@ -650,13 +703,20 @@ class TeachJobHandler:
         self._log.info(f"🎓 job_request[{request.action}/{request.job_id[:8]}]: {message}")
         return self._emit(status)
 
-    def _fail(self, request: JobRequest, error_code: str, message: str) -> JobStatus:
+    def _fail(
+        self,
+        request: JobRequest,
+        error_code: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> JobStatus:
         status = self._build_status(
             job_id=request.job_id,
             stage=STAGE_FAILED,
             message=message,
             error_code=error_code,
             action=request.action,
+            metadata=metadata,
         )
         self._log.error(f"❌ job_request[{request.action}/{request.job_id[:8]}]: {message}")
         return self._emit(status)

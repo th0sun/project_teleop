@@ -23,6 +23,7 @@ class TeleopTopicConfig:
     joint_states: str = motion_config.RVIZ_TOPIC
     debug: str = motion_config.DEBUG_TOPIC
     safety: str = motion_config.SAFETY_TOPIC
+    scene_safety_enabled: str = motion_config.SCENE_SAFETY_ENABLE_TOPIC
     do_status: str = motion_config.DO_STATUS_TOPIC
     robot_mode: str = motion_config.ROBOT_MODE_TOPIC
     error_status: str = motion_config.ERROR_STATUS_TOPIC

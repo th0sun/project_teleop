@@ -48,6 +48,7 @@ class TeleopSubscriptions:
     pong: object
     suction: object
     lights: object
+    scene_safety_enabled: object
     dashboard_cmd: object
     teach_status: object
     traj_data: object
@@ -87,6 +88,7 @@ def create_subscriptions(
     unity_pong_callback,
     suction_callback,
     light_callback,
+    scene_safety_callback,
     dashboard_cmd_callback,
     teach_status_callback,
     traj_data_callback,
@@ -99,6 +101,12 @@ def create_subscriptions(
         pong=node.create_subscription(String, topics.unity_pong, unity_pong_callback, 10),
         suction=node.create_subscription(Bool, topics.suction, suction_callback, 10),
         lights=node.create_subscription(Int32MultiArray, topics.light, light_callback, 10),
+        scene_safety_enabled=node.create_subscription(
+            Bool,
+            topics.scene_safety_enabled,
+            scene_safety_callback,
+            10,
+        ),
         dashboard_cmd=node.create_subscription(
             String,
             topics.dashboard_cmd,

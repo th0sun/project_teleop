@@ -19,6 +19,7 @@ from mg400_controller.common.trajectory.teach_job_handler import (  # noqa: E402
     ERR_EXECUTE_FORBIDDEN,
     ERR_PLAYBACK_FAILED,
     ERR_PLAYBACK_TIMEOUT,
+    ERR_SCENE_SAFETY,
     ERR_TARGET_MISMATCH,
     ERR_UNKNOWN_ACTION,
     JobRequest,
@@ -158,6 +159,26 @@ class FakeCompiledPlan:
         self.time_scale = 1.0
         self.original_timing_feasible = True
         self.lookahead_s = 0.1
+
+
+class FakeSceneResult:
+    def __init__(self):
+        self.status = "INSIDE"
+        self.detail = "camera_post"
+        self.distance_mm = 0.0
+        self.point_xyzr = (5.0, 5.0, 5.0, 0.0)
+        self.blocked = True
+
+
+class FakeSceneSafetyGuard:
+    enabled = True
+    loaded = True
+
+    def __init__(self, violations=True):
+        self.violations = violations
+
+    def check_plan(self, plan):
+        return [FakeSceneResult()] if self.violations else []
 
 
 def _frames_payload():
@@ -449,6 +470,53 @@ class TeachJobHandlerTest(unittest.TestCase):
         terminal = self._decoded_status()[-1]
         self.assertEqual(terminal["stage"], STAGE_FAILED)
         self.assertEqual(terminal["error_code"], ERR_EXECUTE_FORBIDDEN)
+
+    def test_execute_blocked_when_scene_safety_finds_violation(self):
+        self.handler = TeachJobHandler(
+            recorder=self.recorder,
+            publish_status_fn=self.status_msgs.append,
+            publish_artifact_fn=self.artifact_msgs.append,
+            logger=self.logger,
+            allow_real_execute_fn=lambda: True,
+            scene_safety_guard=FakeSceneSafetyGuard(violations=True),
+        )
+        payload = json.dumps({
+            "job_id": "j-scene-blocked",
+            "action": ACTION_EXECUTE,
+            "trajectory": _frames_payload(),
+        })
+        self.handler.handle(payload)
+
+        self.assertEqual(self.recorder.start_preview_called, 0)
+        terminal = self._decoded_status()[-1]
+        self.assertEqual(terminal["stage"], STAGE_FAILED)
+        self.assertEqual(terminal["error_code"], ERR_SCENE_SAFETY)
+        self.assertTrue(terminal["metadata"]["scene_safety_enabled"])
+        self.assertEqual(
+            terminal["metadata"]["scene_safety_violations"][0]["detail"],
+            "camera_post",
+        )
+
+    def test_compile_reports_scene_safety_violations_without_moving(self):
+        self.handler = TeachJobHandler(
+            recorder=self.recorder,
+            publish_status_fn=self.status_msgs.append,
+            publish_artifact_fn=self.artifact_msgs.append,
+            logger=self.logger,
+            scene_safety_guard=FakeSceneSafetyGuard(violations=True),
+        )
+        payload = json.dumps({
+            "job_id": "j-scene-compile",
+            "action": ACTION_COMPILE,
+            "trajectory": _frames_payload(),
+        })
+        self.handler.handle(payload)
+
+        self.assertEqual(self.recorder.start_preview_called, 0)
+        terminal = self._decoded_status()[-1]
+        self.assertEqual(terminal["stage"], STAGE_COMPILED)
+        self.assertTrue(terminal["metadata"]["scene_safety_enabled"])
+        self.assertTrue(terminal["metadata"]["scene_safety_blocked"])
 
     def test_export_writes_file_and_reports_path(self):
         export_path = str(Path(self.tmp.name) / "out" / "plan.json")

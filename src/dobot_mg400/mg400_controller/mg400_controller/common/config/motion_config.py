@@ -54,6 +54,7 @@ UNITY_SPEED_FACTOR_TOPIC = "/unity/speed_factor"
 RVIZ_TOPIC  = "/joint_states"     # ส่งสถานะไปแสดงใน RViz
 DEBUG_TOPIC = "/teleop/debug"     # Debug messages
 SAFETY_TOPIC = "/mg400/safety_status" # Safety status reporting
+SCENE_SAFETY_ENABLE_TOPIC = "/mg400/scene_safety_enabled"
 HAPTIC_TOPIC = "/mg400/haptic_feedback" # Collision-based haptic feedback for VR
 ROS_PING_TOPIC = "/teleop/ros_ping"
 UNITY_PONG_TOPIC = "/teleop/unity_pong"
@@ -83,6 +84,15 @@ LIGHT_TOPIC = "/mg400/light_cmd"     # สั่งเปิด/ปิดไฟ�
 DO_STATUS_TOPIC = "/mg400/do_status" # รับสถานะของ Digital Output (std_msgs/Int64)
 ROBOT_MODE_TOPIC = "/mg400/robot_mode" # สถานะ Mode ของหุ่นยนต์ (std_msgs/Int32)
 ERROR_STATUS_TOPIC = "/mg400/error_status" # สถานะ Error ของหุ่นยนต์ (std_msgs/Int32)
+
+# Measured scene safety boxes (operator-authored fixture model)
+# Disabled by default so existing demos keep their current behavior.  Enable
+# with ROS/Unity toggle after loading a verified model.
+SCENE_SAFETY_ENABLED_DEFAULT = False
+SCENE_SAFETY_MODEL_PATH = ""
+SCENE_SAFETY_WARN_DISTANCE_MM = 20.0
+SCENE_SAFETY_BLOCK_REALTIME = True
+SCENE_SAFETY_BLOCK_TEACH_REPEAT = True
 
 # 🛠️ Hardware Configuration
 VACUUM_DO_PORT = 16  # หมายเลขพอร์ต Digital Output สำหรับดูด (Vacuum/Suction)

@@ -38,6 +38,7 @@ from mg400_controller.common.config.motion_config import (  # noqa: E402
     DASHBOARD_CMD_TOPIC,
     ROS_PING_TOPIC,
     SAFETY_TOPIC,
+    SCENE_SAFETY_ENABLE_TOPIC,
     TEACH_JOB_ARTIFACT_TOPIC,
     TEACH_JOB_REQUEST_TOPIC,
     TEACH_JOB_STATUS_TOPIC,
@@ -105,6 +106,7 @@ class TeleopRosWiringTest(unittest.TestCase):
             "unity_pong_callback": lambda msg: None,
             "suction_callback": lambda msg: None,
             "light_callback": lambda msg: None,
+            "scene_safety_callback": lambda msg: None,
             "dashboard_cmd_callback": lambda msg: None,
             "teach_status_callback": lambda msg: None,
             "traj_data_callback": lambda msg: None,
@@ -121,7 +123,8 @@ class TeleopRosWiringTest(unittest.TestCase):
         self.assertEqual(subscriptions.unity_trajectory.topic, UNITY_TRAJECTORY_TOPIC)
         self.assertEqual(subscriptions.speed_factor.topic, UNITY_SPEED_FACTOR_TOPIC)
         self.assertEqual(subscriptions.teach_job_request.topic, TEACH_JOB_REQUEST_TOPIC)
-        self.assertEqual(len(node.subscription_calls), 9)
+        self.assertEqual(subscriptions.scene_safety_enabled.topic, SCENE_SAFETY_ENABLE_TOPIC)
+        self.assertEqual(len(node.subscription_calls), 10)
 
     def test_attach_unity_subscription_uses_unity_topic(self):
         node = FakeNode()
@@ -150,6 +153,7 @@ class TeleopRosWiringTest(unittest.TestCase):
             "unity_pong_callback": lambda msg: None,
             "suction_callback": lambda msg: None,
             "light_callback": lambda msg: None,
+            "scene_safety_callback": lambda msg: None,
             "dashboard_cmd_callback": lambda msg: None,
             "teach_status_callback": lambda msg: None,
             "traj_data_callback": lambda msg: None,
