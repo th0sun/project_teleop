@@ -13,7 +13,7 @@ Unity-like 3-D robot simulator for the MG400 arm, built in Python with PyQt5 + O
 | Teach & Repeat | Record waypoints, preview poses, and play them back sequentially |
 | Robot commands | Enable / Disable / Clear Error / E-Stop |
 | I/O | Suction & light toggle |
-| ROS 2 bridge | Optional – publishes to `/unity/joint_cmd`, subscribes to `/joint_states_deg` |
+| ROS 2 bridge | Optional – publishes to `/unity/joint_cmd`, subscribes to `/joint_states` feedback |
 | Ghost pose | Last-sent pose shown dimmed in viewport |
 
 ## Viewport controls
@@ -104,11 +104,16 @@ contract used by the real Unity `TeachJobPublisher`.
 2. In the **Teach & Repeat** tab, drag the robot or adjust joints.
 3. Press **+ Add Point** for each waypoint.
 4. Use **ROS Teach Job**:
-   - **Compile** publishes `action=compile` to `/teach/job_request`.
-   - **Preview Sim** publishes `action=preview_sim`; ROS compiles only and
-     must not move the robot.
-   - **Execute** publishes `action=execute`; use this only against Mock or when
-     the real-robot safety gate is intentionally enabled.
+   - **Validate Plan** publishes `action=compile` to `/teach/job_request`; ROS
+     compiles/checks the plan only and must not move the robot.
+   - **Execute** publishes `action=execute`; Mock/robot motion is owned by ROS,
+     and the simulator viewport follows `/joint_states` feedback during that job.
+     The button is enabled only after validation succeeds.
+
+During realtime control, the simulator treats the GUI as the target source and
+does not continuously overwrite the sliders/viewport with robot feedback.  It
+uses feedback for the initial connection sync and for ROS-owned teach/repeat
+execution.
 
 The emitted payload is a `std_msgs/String` on:
 
@@ -149,7 +154,7 @@ main.py
         └── ROSBridge (core/ros_bridge.py)          ← optional rclpy node
               • pub /unity/joint_cmd
               • pub /teach/job_request
-              • sub /joint_states_deg
+              • sub /joint_states
               • pub dashboard commands
 ```
 

@@ -4,7 +4,7 @@ import json
 import threading
 import time
 import math
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Tuple
 
 def pack_string(s: str) -> bytes:
     b = s.encode('utf-8')
@@ -73,6 +73,67 @@ def cdr_joint_state(names: List[str], positions: List[float]) -> bytes:
     
     return bytes(cdr)
 
+
+def _align(offset: int, base: int, boundary: int) -> int:
+    while (offset - base) % boundary != 0:
+        offset += 1
+    return offset
+
+
+def _read_u32(data: bytes, offset: int) -> Tuple[int, int]:
+    return struct.unpack_from('<I', data, offset)[0], offset + 4
+
+
+def _read_i32(data: bytes, offset: int) -> Tuple[int, int]:
+    return struct.unpack_from('<i', data, offset)[0], offset + 4
+
+
+def _read_cdr_string(data: bytes, offset: int) -> Tuple[str, int]:
+    length, offset = _read_u32(data, offset)
+    raw = data[offset:offset + max(0, length - 1)]
+    offset += length
+    return raw.decode('utf-8', errors='replace'), offset
+
+
+def parse_cdr_string(data: bytes) -> str:
+    if len(data) < 8:
+        return ''
+    offset = _align(4, 4, 4)
+    text, _ = _read_cdr_string(data, offset)
+    return text
+
+
+def parse_cdr_joint_state_deg(data: bytes) -> List[float]:
+    """Parse ROS-TCP serialized sensor_msgs/JointState into first 4 joints in deg."""
+    if len(data) < 24:
+        return []
+
+    offset = 4  # CDR encapsulation header
+    offset = _align(offset, 4, 4)
+    _, offset = _read_i32(data, offset)  # stamp.sec
+    _, offset = _read_u32(data, offset)  # stamp.nanosec
+
+    offset = _align(offset, 4, 4)
+    _, offset = _read_cdr_string(data, offset)  # header.frame_id
+
+    offset = _align(offset, 4, 4)
+    name_count, offset = _read_u32(data, offset)
+    for _ in range(name_count):
+        offset = _align(offset, 4, 4)
+        _, offset = _read_cdr_string(data, offset)
+
+    offset = _align(offset, 4, 4)
+    position_count, offset = _read_u32(data, offset)
+    if position_count <= 0:
+        return []
+
+    offset = _align(offset, 4, 8)
+    positions = []
+    for _ in range(min(position_count, 4)):
+        positions.append(struct.unpack_from('<d', data, offset)[0])
+        offset += 8
+    return [math.degrees(v) for v in positions]
+
 class UnityTcpBridge:
     def __init__(self,
                  on_joint_update: Optional[Callable[[List[float]], None]] = None,
@@ -116,6 +177,14 @@ class UnityTcpBridge:
                 req = json.dumps({"topic": topic, "message_name": msg_type}).encode('utf-8') + b'\x00'
                 self._send_msg('__publish', req)
 
+            subs = [
+                ("/joint_states", "sensor_msgs/JointState"),
+                ("/teach/job_status", "std_msgs/String"),
+            ]
+            for topic, msg_type in subs:
+                req = json.dumps({"topic": topic, "message_name": msg_type}).encode('utf-8') + b'\x00'
+                self._send_msg('__subscribe', req)
+
             self.connected = True
             if self.on_connection_change:
                 self.on_connection_change(True)
@@ -130,16 +199,48 @@ class UnityTcpBridge:
             return False
 
     def _recv_loop(self):
+        buf = bytearray()
         try:
             while not self._stop_event.is_set() and self.sock:
                 chunk = self.sock.recv(4096)
                 if not chunk:
                     break
+                buf.extend(chunk)
+                while True:
+                    if len(buf) < 4:
+                        break
+                    dest_len = struct.unpack_from('<I', buf, 0)[0]
+                    header_len = 4 + dest_len + 4
+                    if len(buf) < header_len:
+                        break
+                    dest = bytes(buf[4:4 + dest_len]).decode('utf-8', errors='replace').rstrip('\x00')
+                    data_len = struct.unpack_from('<I', buf, 4 + dest_len)[0]
+                    packet_len = header_len + data_len
+                    if len(buf) < packet_len:
+                        break
+                    data = bytes(buf[header_len:packet_len])
+                    del buf[:packet_len]
+                    self._handle_packet(dest, data)
         except Exception:
             pass
         self.connected = False
         if self.on_connection_change:
             self.on_connection_change(False)
+
+    def _handle_packet(self, destination: str, data: bytes):
+        if destination == "/joint_states":
+            joints = parse_cdr_joint_state_deg(data)
+            if joints and self.on_joint_update:
+                self.on_joint_update(joints)
+        elif destination == "/teach/job_status":
+            if self.on_status_update:
+                try:
+                    text = parse_cdr_string(data)
+                    payload = json.loads(text) if text else {}
+                    payload.setdefault("_topic", destination)
+                    self.on_status_update(payload)
+                except Exception:
+                    pass
 
     def publish_joint_cmd(self, joints_deg: List[float]):
         if not self.connected: return

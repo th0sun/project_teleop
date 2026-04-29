@@ -46,6 +46,16 @@ class TargetLatencyCompensator:
         """Max absolute filtered target velocity in rad/s."""
         return float(np.max(np.abs(self._ema_target_vel)))
 
+    def reset(self, q_target=None, target_time: float | None = None) -> None:
+        """Clear target-velocity history, optionally anchoring at ``q_target``."""
+        self._ema_target_vel = np.zeros(self.joint_count)
+        if q_target is None:
+            self._prev_target_q = None
+            self._prev_target_t = None
+            return
+        self._prev_target_q = np.asarray(q_target).copy()
+        self._prev_target_t = target_time
+
     def compensate(
         self,
         q_safe,

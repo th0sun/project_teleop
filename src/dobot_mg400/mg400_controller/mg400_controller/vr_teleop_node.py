@@ -210,6 +210,9 @@ class TeleopNode(Node):
             waypoint_callback=self._playback_waypoint_callback,
             target_callback=self._playback_target_callback,
         )
+        self.trajectory_recorder.add_playback_event_callback(
+            self._playback_lifecycle_callback
+        )
 
         # Job-request dispatcher for /teach/job_request (compile/preview_sim/
         # execute/export/stop/record_*).  Replaces the implicit "publish
@@ -537,6 +540,46 @@ class TeleopNode(Node):
             self.get_logger().error("teach_job_request: cannot read .data field")
             return
         self.teach_job_handler.handle(payload)
+
+    def _reset_live_teleop_reference(self, reason: str):
+        """Anchor live teleop at the robot's current pose after playback."""
+        try:
+            q_current = self.feedback.get_current_position()
+        except Exception:
+            q_current = None
+
+        now_mono = time.perf_counter()
+        now_wall = time.time()
+        if q_current is None:
+            self.latest_target = None
+            self.controller.reset_reference(None, now=now_mono)
+            try:
+                self.target_compensator.reset()
+            except AttributeError:
+                pass
+            self.get_logger().warn(
+                f"⚠️  Live teleop reference cleared after {reason}; "
+                "waiting for next Unity target"
+            )
+            return
+
+        q_current = np.asarray(q_current[:4], dtype=float)
+        self.latest_target = q_current.copy()
+        self.controller.reset_reference(q_current, now=now_mono)
+        try:
+            self.target_compensator.reset(q_current, target_time=now_wall)
+        except AttributeError:
+            pass
+        self.target_recv_time = now_wall
+        self.unity_send_time = now_wall
+        self.get_logger().info(
+            f"🔁 Live teleop reference reset after {reason}: "
+            f"{np.degrees(q_current).round(2).tolist()} deg"
+        )
+
+    def _playback_lifecycle_callback(self, event_name, payload):
+        if event_name in {"playback_start", "playback_complete"}:
+            self._reset_live_teleop_reference(event_name)
 
     def _playback_waypoint_callback(self, q_rad):
         """Called by TrajectoryRecorder when a waypoint is queued (sent to robot).

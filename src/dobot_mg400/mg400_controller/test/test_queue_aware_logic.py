@@ -91,6 +91,29 @@ class QueueAwareLogicTest(unittest.TestCase):
         self.assertTrue(np.allclose(controller.last_sent_target, latest_target))
         self.assertEqual(controller.last_sent_time, 10.0)
 
+    def test_reset_reference_anchors_controller_after_external_motion(self):
+        controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
+        controller.mark_command_sent(np.array([1.0, 0.0, 0.0, 0.0]), 5.0)
+        controller.robot_velocity = np.ones(4)
+        controller.stuck_start_time = 4.0
+
+        q_current = np.array([0.2, 0.1, 0.0, 0.0])
+        controller.reset_reference(q_current, now=10.0)
+
+        self.assertTrue(np.allclose(controller.last_sent_target, q_current))
+        self.assertTrue(np.allclose(controller.last_robot_q, q_current))
+        self.assertTrue(np.allclose(controller.robot_velocity, np.zeros(4)))
+        self.assertEqual(controller.last_sent_time, 10.0)
+        self.assertEqual(controller.stuck_start_time, 0.0)
+
+        should_send, reason = controller.should_send_command(
+            np.array([0.25, 0.1, 0.0, 0.0]),
+            q_current,
+            now=10.1,
+        )
+        self.assertTrue(should_send)
+        self.assertTrue(reason.startswith("DynProx_"))
+
     def test_dynamic_proximity_sends_latest_target_when_robot_reaches_last_target(self):
         controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
         controller.last_sent_target = np.zeros(4)

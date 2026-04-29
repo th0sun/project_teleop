@@ -50,6 +50,28 @@ class TeleopController:
         self.stuck_start_time = 0.0
         self.is_stuck = False
         self.last_stuck_check_time = 0.0
+
+    def reset_reference(self, q_current=None, now=0.0):
+        """Reset live-teleop pacing after an external owner moved the robot.
+
+        Teach-and-repeat playback owns the MG400 command stream while it is
+        running.  When live teleop resumes, the controller must not compare the
+        new hand target against the pre-playback command, otherwise it may chase
+        stale queue state or wait for a target the robot no longer owns.
+        """
+        if q_current is None:
+            self.last_sent_target = None
+            self.last_robot_q = np.zeros(4)
+        else:
+            q_current = np.asarray(q_current[:4], dtype=float)
+            self.last_sent_target = q_current.copy()
+            self.last_robot_q = q_current.copy()
+        self.last_sent_time = float(now)
+        self.last_robot_time = float(now)
+        self.robot_velocity = np.zeros(4)
+        self.stuck_start_time = 0.0
+        self.is_stuck = False
+        self.last_stuck_check_time = 0.0
         
     def update_robot_state(self, q_current, now):
         """

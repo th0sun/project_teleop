@@ -54,6 +54,23 @@ class TargetLatencyCompensatorTest(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertEqual(len(validator.calls), 1)
 
+    def test_reset_clears_velocity_history_and_anchors_next_sample(self):
+        compensator = TargetLatencyCompensator(DummyValidator())
+        q0 = np.array([0.0, 0.0, 0.0, 0.0])
+        q1 = np.array([0.1, 0.0, 0.0, 0.0])
+        anchor = np.array([0.5, 0.0, 0.0, 0.0])
+
+        compensator.compensate(q0, corrected_target_time=1.0, receive_time=1.0)
+        compensator.compensate(q1, corrected_target_time=1.1, receive_time=1.18)
+        self.assertGreater(compensator.target_speed, 0.0)
+
+        compensator.reset(anchor, target_time=2.0)
+        self.assertEqual(compensator.target_speed, 0.0)
+
+        out = compensator.compensate(anchor, corrected_target_time=2.1, receive_time=2.18)
+        self.assertTrue(np.allclose(out, anchor))
+        self.assertEqual(compensator.target_speed, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

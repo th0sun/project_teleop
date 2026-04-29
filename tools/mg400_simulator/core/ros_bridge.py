@@ -232,16 +232,16 @@ if _ROS_AVAILABLE:
                                         '/teach/job_request', 10)
 
             # Subscribers
-            self.create_subscription(Float64MultiArray, '/joint_states_deg',
+            self.create_subscription(JointState, '/joint_states',
                                      self._cb_joints, 10)
             self.create_subscription(String, '/teleop/status',
                                      self._cb_status, 10)
             self.create_subscription(Float64MultiArray, '/teleop/ee_pose',
                                      self._cb_ee, 10)
 
-        def _cb_joints(self, msg: Float64MultiArray):
-            if self.on_joint_update and len(msg.data) >= 4:
-                self.on_joint_update(list(msg.data[:4]))
+        def _cb_joints(self, msg: JointState):
+            if self.on_joint_update and len(msg.position) >= 4:
+                self.on_joint_update([math.degrees(v) for v in msg.position[:4]])
 
         def _cb_status(self, msg: String):
             if self.on_status_update:

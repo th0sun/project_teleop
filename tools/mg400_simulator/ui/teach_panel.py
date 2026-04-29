@@ -29,6 +29,7 @@ class TeachPanel(QWidget):
     """
     Signals:
         goto_waypoint(list)    – user selects / wants to preview a waypoint
+        send_waypoint(list)    – user wants to send one waypoint to ROS
         play_frame(list)       – replay timer emits each joint frame
         teach_job_requested(str, dict) – action + Unity-format trajectory
         play_started()
@@ -36,6 +37,7 @@ class TeachPanel(QWidget):
     """
 
     goto_waypoint = pyqtSignal(list)
+    send_waypoint = pyqtSignal(list)
     play_frame    = pyqtSignal(list)
     teach_job_requested = pyqtSignal(str, dict)
     play_started  = pyqtSignal()
@@ -51,6 +53,11 @@ class TeachPanel(QWidget):
         self._play_timer   = QTimer(self)
         self._play_timer.setInterval(20)   # 50 fps
         self._play_timer.timeout.connect(self._on_play_tick)
+        self._job_timeout_timer = QTimer(self)
+        self._job_timeout_timer.setSingleShot(True)
+        self._job_timeout_timer.timeout.connect(self._on_job_timeout)
+        self._job_validated = False
+        self._job_busy = False
 
         self._build_ui()
 
@@ -100,17 +107,19 @@ class TeachPanel(QWidget):
         self._list.itemClicked.connect(self._on_item_click)
         list_v.addWidget(self._list)
 
-        # Row buttons: Preview | Update | Del | ↑ | ↓
+        # Row buttons: Preview | Send | Update | Del | ↑ | ↓
         btn_row = QHBoxLayout()
-        self._btn_preview = _btn('Preview', '#1a3a5c', 'Jump to this waypoint')
+        self._btn_preview = _btn('Preview', '#1a3a5c', 'Show this waypoint in the 3-D view only')
+        self._btn_send    = _btn('Send', '#1a5c2a', 'Send this waypoint as a live /unity/joint_cmd')
         self._btn_update  = _btn('Update',  '#3a4a00', 'Overwrite with current joints')
         self._btn_del     = _btn('Delete',  '#5c1a1a')
         self._btn_up      = _btn('↑', '#333')
         self._btn_down    = _btn('↓', '#333')
-        for b in [self._btn_preview, self._btn_update, self._btn_del,
+        for b in [self._btn_preview, self._btn_send, self._btn_update, self._btn_del,
                   self._btn_up, self._btn_down]:
             btn_row.addWidget(b)
         self._btn_preview.clicked.connect(self._preview_selected)
+        self._btn_send.clicked.connect(self._send_selected)
         self._btn_update.clicked.connect(self._update_selected)
         self._btn_del.clicked.connect(self._delete_selected)
         self._btn_up.clicked.connect(self._move_up)
@@ -124,7 +133,7 @@ class TeachPanel(QWidget):
         layout.addWidget(list_box)
 
         # ── Playback ─────────────────────────────────────────────────────────
-        play_box = QGroupBox('Playback')
+        play_box = QGroupBox('Live Preview Playback')
         play_g   = QGridLayout(play_box)
         play_g.setSpacing(4)
 
@@ -144,7 +153,8 @@ class TeachPanel(QWidget):
         self._speed_sl.valueChanged.connect(
             lambda v: self._speed_lbl.setText(f'{v/100:.1f}×'))
 
-        btn_play = _btn('▶  Play', '#1a4c6a')
+        btn_play = _btn('▶  Play Live', '#1a4c6a',
+                        'Animate the 3-D view and stream /unity/joint_cmd if connected')
         btn_play.setFixedHeight(26)
         btn_play.clicked.connect(self._start_play)
 
@@ -170,8 +180,12 @@ class TeachPanel(QWidget):
         btn_save.clicked.connect(self._save)
         btn_load = _btn('📂 Load', '#2a3a4a')
         btn_load.clicked.connect(self._load)
+        btn_import = _btn('Import Unity JSON', '#2a4a3a',
+                          'Load frames from Unity trajectory JSON')
+        btn_import.clicked.connect(self._import_unity_json)
         io_h.addWidget(btn_save)
         io_h.addWidget(btn_load)
+        io_h.addWidget(btn_import)
         layout.addWidget(io_box)
 
         # ── ROS teach job bridge ───────────────────────────────────────────
@@ -179,24 +193,22 @@ class TeachPanel(QWidget):
         job_g = QGridLayout(job_box)
         job_g.setSpacing(4)
 
-        btn_compile = _btn('Compile', '#1f4f64',
-                           'Send compile job to /teach/job_request')
-        btn_preview = _btn('Preview Sim', '#1f4f64',
-                           'Compile-only preview; does not move the robot')
-        btn_execute = _btn('Execute', '#5c301a',
-                           'Send execute job to the ROS adapter')
-        btn_compile.clicked.connect(lambda: self._request_teach_job('compile'))
-        btn_preview.clicked.connect(lambda: self._request_teach_job('preview_sim'))
-        btn_execute.clicked.connect(lambda: self._request_teach_job('execute'))
+        self._btn_validate = _btn('Validate Plan', '#1f4f64',
+                                  'Compile/check the teach job; does not move the robot')
+        self._btn_execute = _btn('Execute', '#5c301a',
+                                 'Send execute job to ROS; viewport follows robot feedback when connected')
+        self._btn_validate.clicked.connect(lambda: self._request_teach_job('compile'))
+        self._btn_execute.clicked.connect(lambda: self._request_teach_job('execute'))
 
-        job_g.addWidget(btn_compile, 0, 0)
-        job_g.addWidget(btn_preview, 0, 1)
-        job_g.addWidget(btn_execute, 1, 0, 1, 2)
+        job_g.addWidget(self._btn_validate, 0, 0, 1, 2)
+        job_g.addWidget(self._btn_execute, 1, 0, 1, 2)
 
-        self._job_status_lbl = QLabel('Connect ROS-TCP first, then send a job.')
+        self._job_status_lbl = QLabel(
+            'Validate first. Execute is enabled after the plan passes.')
         self._job_status_lbl.setStyleSheet('color:#888; font-size:8px;')
         job_g.addWidget(self._job_status_lbl, 2, 0, 1, 2)
         layout.addWidget(job_box)
+        self._set_job_state('idle')
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -204,12 +216,60 @@ class TeachPanel(QWidget):
         """Called by main window whenever robot joints change."""
         self._current_joints = list(joints[:4])
 
+    def set_job_status(self, text: str):
+        self._job_status_lbl.setText(text)
+
+    def apply_job_status(self, data: dict):
+        stage = str(data.get('stage', '') or '').lower()
+        action = str(data.get('action', '') or '').lower()
+        message = str(data.get('message', '') or '')
+        error_code = data.get('error_code')
+        metadata = data.get('metadata') if isinstance(data.get('metadata'), dict) else {}
+
+        if stage == 'received':
+            self._set_job_state('busy', f"Received {action or 'job'}...")
+            return
+
+        if stage in {'compiled', 'preview_ready'}:
+            self._job_timeout_timer.stop()
+            count = metadata.get('queued_command_count')
+            duration = metadata.get('total_duration_s')
+            detail = message or 'Plan validated'
+            if count is not None and duration is not None:
+                detail = f'Plan ready: {count} command(s), {float(duration):.2f}s'
+            self._set_job_state('ready', detail)
+            return
+
+        if stage == 'executing':
+            self._set_job_state('executing', message or 'Executing teach job...')
+            return
+
+        if stage == 'done':
+            self._job_timeout_timer.stop()
+            self._set_job_state('done', message or 'Teach job complete')
+            return
+
+        if stage == 'stopped':
+            self._job_timeout_timer.stop()
+            self._set_job_state('stopped', message or 'Teach job stopped')
+            return
+
+        if stage == 'failed':
+            self._job_timeout_timer.stop()
+            suffix = f' [{error_code}]' if error_code else ''
+            self._set_job_state('failed', (message or 'Teach job failed') + suffix)
+            return
+
+        if message:
+            self._job_status_lbl.setText(message)
+
     # ── Waypoint operations ───────────────────────────────────────────────────
 
     def _add_point(self):
         name = self._name_edit.text().strip()
         dur  = self._dur_spin.value()
         idx  = self._manager.add_waypoint(self._current_joints, name=name, duration=dur)
+        self._invalidate_plan('Waypoint changed. Validate again before Execute.')
         self._name_edit.clear()
         self._refresh_list()
         self._list.setCurrentRow(idx)
@@ -221,11 +281,19 @@ class TeachPanel(QWidget):
         wp = self._manager.get(idx)
         self.goto_waypoint.emit(wp.joints)
 
+    def _send_selected(self):
+        idx = self._list.currentRow()
+        if idx < 0:
+            return
+        wp = self._manager.get(idx)
+        self.send_waypoint.emit(wp.joints)
+
     def _update_selected(self):
         idx = self._list.currentRow()
         if idx < 0:
             return
         self._manager.update_waypoint(idx, joints=self._current_joints)
+        self._invalidate_plan('Waypoint updated. Validate again before Execute.')
         self._refresh_list()
         self._list.setCurrentRow(idx)
 
@@ -234,6 +302,7 @@ class TeachPanel(QWidget):
         if idx < 0:
             return
         self._manager.delete_waypoint(idx)
+        self._invalidate_plan('Waypoint deleted. Validate again before Execute.')
         self._refresh_list()
 
     def _move_up(self):
@@ -241,6 +310,7 @@ class TeachPanel(QWidget):
         if idx < 1:
             return
         self._manager.move_up(idx)
+        self._invalidate_plan('Waypoint order changed. Validate again before Execute.')
         self._refresh_list()
         self._list.setCurrentRow(idx - 1)
 
@@ -249,6 +319,7 @@ class TeachPanel(QWidget):
         if idx < 0 or idx >= self._manager.count() - 1:
             return
         self._manager.move_down(idx)
+        self._invalidate_plan('Waypoint order changed. Validate again before Execute.')
         self._refresh_list()
         self._list.setCurrentRow(idx + 1)
 
@@ -258,6 +329,7 @@ class TeachPanel(QWidget):
         r = QMessageBox.question(self, 'Clear', 'Delete all waypoints?')
         if r == QMessageBox.Yes:
             self._manager.clear()
+            self._invalidate_plan('No validated plan.')
             self._refresh_list()
 
     def _on_item_click(self, item):
@@ -332,9 +404,30 @@ class TeachPanel(QWidget):
         if path:
             try:
                 self._manager.load(path)
+                self._invalidate_plan('Program loaded. Validate before Execute.')
                 self._refresh_list()
             except Exception as e:
                 QMessageBox.critical(self, 'Error', str(e))
+
+    def _import_unity_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Import Unity Trajectory JSON', os.path.expanduser('~'),
+            'Unity Trajectory JSON (*.json);;All Files (*)')
+        if not path:
+            return
+        try:
+            count = self._manager.load_unity_trajectory(path)
+            self._invalidate_plan('Unity trajectory imported. Validate before Execute.')
+            self._refresh_list()
+            if count:
+                self._list.setCurrentRow(0)
+            QMessageBox.information(
+                self,
+                'Imported',
+                f'Imported {count} Unity waypoint(s) from:\n{path}',
+            )
+        except Exception as e:
+            QMessageBox.critical(self, 'Import Error', str(e))
 
     def get_ros_trajectory(self) -> dict:
         """Return ROS-compatible JointTrajectory dict."""
@@ -349,7 +442,61 @@ class TeachPanel(QWidget):
             QMessageBox.information(self, 'ROS Teach Job',
                                     'Need at least 2 waypoints before sending a teach job.')
             return
+        if action == 'execute' and not self._job_validated:
+            QMessageBox.information(self, 'ROS Teach Job',
+                                    'Validate the plan first. Execute is enabled only after validation passes.')
+            return
         trajectory = self.get_unity_trajectory()
+        if action == 'compile':
+            self._set_job_state('busy', f'Validating {len(trajectory["frames"])} waypoint(s)...')
+            self._job_timeout_timer.start(12000)
+        elif action == 'execute':
+            self._set_job_state('executing', f'Execute requested: {len(trajectory["frames"])} waypoint(s)')
+            self._job_timeout_timer.start(45000)
         self.teach_job_requested.emit(action, trajectory)
-        self._job_status_lbl.setText(
-            f'{action} requested: {len(trajectory["frames"])} waypoint(s)')
+
+    def _invalidate_plan(self, message: str):
+        if self._job_busy:
+            return
+        self._job_validated = False
+        self._set_job_state('idle', message)
+
+    def _set_job_state(self, state: str, message: str = ''):
+        state = state.lower()
+        self._job_busy = state in {'busy', 'executing'}
+        if state == 'ready':
+            self._job_validated = True
+        elif state in {'idle', 'failed'}:
+            self._job_validated = False
+
+        self._btn_validate.setEnabled(not self._job_busy)
+        self._btn_execute.setEnabled(self._job_validated and not self._job_busy)
+
+        colors = {
+            'idle': '#888',
+            'busy': '#e0b84f',
+            'ready': '#76d48a',
+            'executing': '#8fc7ff',
+            'done': '#76d48a',
+            'stopped': '#e0b84f',
+            'failed': '#ff8a8a',
+        }
+        labels = {
+            'idle': 'Not validated',
+            'busy': 'Validating',
+            'ready': 'Ready to execute',
+            'executing': 'Executing',
+            'done': 'Done',
+            'stopped': 'Stopped',
+            'failed': 'Failed',
+        }
+        text = message or labels.get(state, state)
+        self._job_status_lbl.setText(f'{labels.get(state, state)}: {text}')
+        self._job_status_lbl.setStyleSheet(
+            f'color:{colors.get(state, "#888")}; font-size:8px;')
+
+    def _on_job_timeout(self):
+        self._set_job_state(
+            'failed',
+            'No status returned from ROS. Check ROS-TCP endpoint / teleop logs.',
+        )

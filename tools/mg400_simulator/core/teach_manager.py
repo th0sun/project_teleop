@@ -6,6 +6,7 @@ Future: export as trajectory_msgs/JointTrajectory for ROS 2.
 """
 
 import json
+import os
 import numpy as np
 from dataclasses import dataclass, asdict
 from typing import List, Optional
@@ -118,6 +119,76 @@ class TeachManager:
         with open(filepath, 'r') as f:
             data = json.load(f)
         self._waypoints = [Waypoint(**wp) for wp in data.get('waypoints', [])]
+
+    def load_unity_trajectory(self, filepath: str) -> int:
+        """Import a Unity TeachJobPublisher-style trajectory JSON file.
+
+        Supported shapes:
+        - {"frames": [{"timeStamp": ..., "j1": ..., "j2": ..., "j3": ..., "j4": ...}]}
+        - {"trajectory": {"frames": [...]}}
+        - raw frame list: [{"timeStamp": ..., ...}]
+
+        Unity timestamps are often absolute app times, so they are converted to
+        per-waypoint durations before storing in the simulator's program format.
+        """
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+        frames = self._extract_unity_frames(data)
+        if len(frames) < 1:
+            raise ValueError("Unity trajectory JSON has no frames")
+
+        source = os.path.basename(filepath)
+        waypoints: List[Waypoint] = []
+        prev_time = self._frame_time(frames[0], default=0.0)
+        for i, frame in enumerate(frames):
+            joints = self._frame_joints_deg(frame)
+            if i == 0:
+                duration = 0.0
+            else:
+                t = self._frame_time(frame, default=prev_time + 1.0)
+                duration = max(0.05, float(t - prev_time))
+                prev_time = t
+            waypoints.append(Waypoint(
+                name=f"{source}:{i + 1:03d}",
+                joints=joints,
+                duration=duration,
+            ))
+
+        self._waypoints = waypoints
+        return len(self._waypoints)
+
+    @staticmethod
+    def _extract_unity_frames(data):
+        if isinstance(data, list):
+            return data
+        if not isinstance(data, dict):
+            raise ValueError("Unsupported Unity trajectory JSON root")
+        if isinstance(data.get('frames'), list):
+            return data['frames']
+        trajectory = data.get('trajectory')
+        if isinstance(trajectory, dict) and isinstance(trajectory.get('frames'), list):
+            return trajectory['frames']
+        raise ValueError("Could not find a frames list in Unity trajectory JSON")
+
+    @staticmethod
+    def _frame_time(frame, default=0.0) -> float:
+        for key in ('timeStamp', 'timestamp', 'time', 't'):
+            if key in frame:
+                return float(frame[key])
+        return float(default)
+
+    @staticmethod
+    def _frame_joints_deg(frame) -> List[float]:
+        if all(k in frame for k in ('j1', 'j2', 'j3', 'j4')):
+            return [float(frame[k]) for k in ('j1', 'j2', 'j3', 'j4')]
+
+        positions = frame.get('positions')
+        if isinstance(positions, list) and len(positions) >= 4:
+            # JointTrajectory-style points are in radians.
+            return [float(np.rad2deg(v)) for v in positions[:4]]
+
+        raise ValueError(f"Frame is missing j1/j2/j3/j4: {frame}")
 
     # ── ROS 2 export ──────────────────────────────────────────────────────────
 
