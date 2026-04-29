@@ -18,7 +18,7 @@ try:
     import rclpy
     from rclpy.node import Node
     from sensor_msgs.msg import JointState
-    from std_msgs.msg import Float64MultiArray, String
+    from std_msgs.msg import Float64MultiArray, Int32, String
     _ROS_AVAILABLE = True
 except ImportError:
     _ROS_AVAILABLE = False
@@ -154,8 +154,8 @@ class ROSBridge:
             
         if not self.connected or self._node is None:
             return
-        msg = String()
-        msg.data = json.dumps({'speed': int(speed_pct)})
+        msg = Int32()
+        msg.data = int(speed_pct)
         self._node.pub_speed.publish(msg)
 
     def publish_suction(self, enable: bool):
@@ -224,8 +224,8 @@ if _ROS_AVAILABLE:
                                         '/teleop/dashboard_cmd', 10)
             self.pub_control_mode = self.create_publisher(String,
                                         '/unity/control_mode', 10)
-            self.pub_speed        = self.create_publisher(String,
-                                        '/unity/speed', 10)
+            self.pub_speed        = self.create_publisher(Int32,
+                                        '/unity/speed_factor', 10)
             self.pub_suction      = self.create_publisher(String,
                                         '/unity/suction', 10)
             self.pub_teach_job_request = self.create_publisher(String,

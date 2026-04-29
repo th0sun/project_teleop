@@ -50,6 +50,7 @@ VALID_PER_JOINT_LIMIT = 0.01     # rad (~0.6°) - All joints must be within this
 
 # 📡 ROS Topics
 UNITY_TOPIC = "/unity/joint_cmd"  # รับคำสั่งจาก Unity/VR
+UNITY_SPEED_FACTOR_TOPIC = "/unity/speed_factor"
 RVIZ_TOPIC  = "/joint_states"     # ส่งสถานะไปแสดงใน RViz
 DEBUG_TOPIC = "/teleop/debug"     # Debug messages
 SAFETY_TOPIC = "/mg400/safety_status" # Safety status reporting

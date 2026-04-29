@@ -45,6 +45,7 @@ from mg400_controller.common.config.motion_config import (  # noqa: E402
     TRAJECTORY_DATA_TOPIC,
     UNITY_TRAJECTORY_TOPIC,
     UNITY_PONG_TOPIC,
+    UNITY_SPEED_FACTOR_TOPIC,
     UNITY_TOPIC,
 )
 from mg400_controller.common.ros.teleop_interfaces import (  # noqa: E402
@@ -108,6 +109,7 @@ class TeleopRosWiringTest(unittest.TestCase):
             "teach_status_callback": lambda msg: None,
             "traj_data_callback": lambda msg: None,
             "joint_trajectory_callback": lambda msg: None,
+            "speed_factor_callback": lambda msg: None,
             "teach_job_request_callback": lambda msg: None,
         }
 
@@ -117,8 +119,9 @@ class TeleopRosWiringTest(unittest.TestCase):
         self.assertEqual(subscriptions.dashboard_cmd.topic, DASHBOARD_CMD_TOPIC)
         self.assertEqual(subscriptions.traj_data.topic, TRAJECTORY_DATA_TOPIC)
         self.assertEqual(subscriptions.unity_trajectory.topic, UNITY_TRAJECTORY_TOPIC)
+        self.assertEqual(subscriptions.speed_factor.topic, UNITY_SPEED_FACTOR_TOPIC)
         self.assertEqual(subscriptions.teach_job_request.topic, TEACH_JOB_REQUEST_TOPIC)
-        self.assertEqual(len(node.subscription_calls), 8)
+        self.assertEqual(len(node.subscription_calls), 9)
 
     def test_attach_unity_subscription_uses_unity_topic(self):
         node = FakeNode()
@@ -151,11 +154,13 @@ class TeleopRosWiringTest(unittest.TestCase):
             "teach_status_callback": lambda msg: None,
             "traj_data_callback": lambda msg: None,
             "joint_trajectory_callback": lambda msg: None,
+            "speed_factor_callback": lambda msg: None,
             "teach_job_request_callback": lambda msg: None,
         }
         topics = TeleopTopicConfig(
             unity_joint_cmd="/robot_a/unity/joint_cmd",
             unity_trajectory="/robot_a/program",
+            unity_speed_factor="/robot_a/speed_factor",
             suction="/robot_a/tool/suction",
         )
 
@@ -164,6 +169,7 @@ class TeleopRosWiringTest(unittest.TestCase):
 
         self.assertEqual(subscriptions.suction.topic, "/robot_a/tool/suction")
         self.assertEqual(subscriptions.unity_trajectory.topic, "/robot_a/program")
+        self.assertEqual(subscriptions.speed_factor.topic, "/robot_a/speed_factor")
         self.assertEqual(unity_subscription.topic, "/robot_a/unity/joint_cmd")
 
 

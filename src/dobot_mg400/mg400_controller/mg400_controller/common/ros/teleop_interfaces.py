@@ -52,6 +52,7 @@ class TeleopSubscriptions:
     teach_status: object
     traj_data: object
     unity_trajectory: object
+    speed_factor: object
     teach_job_request: object
     unity: object = None
 
@@ -90,6 +91,7 @@ def create_subscriptions(
     teach_status_callback,
     traj_data_callback,
     joint_trajectory_callback,
+    speed_factor_callback,
     teach_job_request_callback,
     topics: TeleopTopicConfig = DEFAULT_TELEOP_TOPICS,
 ):
@@ -119,6 +121,12 @@ def create_subscriptions(
             JointTrajectory,
             topics.unity_trajectory,
             joint_trajectory_callback,
+            10,
+        ),
+        speed_factor=node.create_subscription(
+            Int32,
+            topics.unity_speed_factor,
+            speed_factor_callback,
             10,
         ),
         teach_job_request=node.create_subscription(

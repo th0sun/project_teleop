@@ -9,9 +9,9 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QPushButton, QListWidget, QListWidgetItem,
     QLineEdit, QFileDialog, QMessageBox,
-    QGridLayout, QAbstractItemView, QSpinBox
+    QGridLayout, QAbstractItemView, QSlider
 )
-from PyQt5.QtCore import pyqtSignal, QTimer
+from PyQt5.QtCore import pyqtSignal, QTimer, Qt
 
 from core.teach_manager import TeachManager
 
@@ -116,15 +116,17 @@ class TeachPanel(QWidget):
         layout.addWidget(list_box)
 
         # ── Save / Load ───────────────────────────────────────────────────────
-        io_box = QGroupBox('Save / Load Program')
+        io_box = QGroupBox('Program Files')
         io_h   = QHBoxLayout(io_box)
 
-        btn_save = _btn('💾 Save', '#2a3a4a')
+        btn_save = _btn('Save Program', '#2a3a4a',
+                        'Save this GUI waypoint program as .mg400json')
         btn_save.clicked.connect(self._save)
-        btn_load = _btn('📂 Load', '#2a3a4a')
+        btn_load = _btn('Load Program', '#2a3a4a',
+                        'Load a .mg400json program saved by this simulator')
         btn_load.clicked.connect(self._load)
-        btn_import = _btn('Import Unity JSON', '#2a4a3a',
-                          'Load frames from Unity trajectory JSON')
+        btn_import = _btn('Load Unity JSON', '#2a4a3a',
+                          'Import raw Unity trajectory JSON frames')
         btn_import.clicked.connect(self._import_unity_json)
         io_h.addWidget(btn_save)
         io_h.addWidget(btn_load)
@@ -136,19 +138,25 @@ class TeachPanel(QWidget):
         job_g = QGridLayout(job_box)
         job_g.setSpacing(4)
 
-        self._speed_j_spin = self._make_tuning_spin(1, 100, 40, 'Joint speed for future commands')
-        self._acc_j_spin = self._make_tuning_spin(1, 100, 80, 'Joint acceleration for future commands')
-        self._speed_l_spin = self._make_tuning_spin(1, 100, 40, 'Cartesian speed for future MovL/Arc commands')
-        self._acc_l_spin = self._make_tuning_spin(1, 100, 80, 'Cartesian acceleration for future MovL/Arc commands')
-        self._cp_spin = self._make_tuning_spin(0, 100, 30, 'Blend CP for future commands')
-        job_g.addWidget(QLabel('SpeedJ / AccJ:'), 0, 0)
-        job_g.addWidget(self._speed_j_spin, 0, 1)
-        job_g.addWidget(self._acc_j_spin, 0, 2)
-        job_g.addWidget(QLabel('SpeedL / AccL:'), 1, 0)
-        job_g.addWidget(self._speed_l_spin, 1, 1)
-        job_g.addWidget(self._acc_l_spin, 1, 2)
-        job_g.addWidget(QLabel('CP:'), 2, 0)
-        job_g.addWidget(self._cp_spin, 2, 1)
+        self._speed_factor_slider, self._speed_factor_value = self._make_tuning_slider(
+            1, 100, 50, 'Global Dobot SpeedFactor; applied immediately when connected')
+        self._speed_j_slider, self._speed_j_value = self._make_tuning_slider(
+            1, 100, 40, 'Joint speed for future JointMovJ commands')
+        self._acc_j_slider, self._acc_j_value = self._make_tuning_slider(
+            1, 100, 80, 'Joint acceleration for future JointMovJ commands')
+        self._speed_l_slider, self._speed_l_value = self._make_tuning_slider(
+            1, 100, 40, 'Cartesian speed for future MovL/Arc commands')
+        self._acc_l_slider, self._acc_l_value = self._make_tuning_slider(
+            1, 100, 80, 'Cartesian acceleration for future MovL/Arc commands')
+        self._cp_slider, self._cp_value = self._make_tuning_slider(
+            0, 100, 30, 'Blend CP for future commands')
+
+        self._add_tuning_row(job_g, 0, 'SpeedFactor:', self._speed_factor_slider, self._speed_factor_value)
+        self._add_tuning_row(job_g, 1, 'SpeedJ:', self._speed_j_slider, self._speed_j_value)
+        self._add_tuning_row(job_g, 2, 'AccJ:', self._acc_j_slider, self._acc_j_value)
+        self._add_tuning_row(job_g, 3, 'SpeedL:', self._speed_l_slider, self._speed_l_value)
+        self._add_tuning_row(job_g, 4, 'AccL:', self._acc_l_slider, self._acc_l_value)
+        self._add_tuning_row(job_g, 5, 'CP:', self._cp_slider, self._cp_value)
 
         self._btn_validate = _btn('Validate Plan', '#1f4f64',
                                   'Compile/check the teach job; does not move the robot')
@@ -157,25 +165,35 @@ class TeachPanel(QWidget):
         self._btn_validate.clicked.connect(lambda: self._request_teach_job('compile'))
         self._btn_execute.clicked.connect(lambda: self._request_teach_job('execute'))
 
-        job_g.addWidget(self._btn_validate, 3, 0, 1, 3)
-        job_g.addWidget(self._btn_execute, 4, 0, 1, 3)
+        job_g.addWidget(self._btn_validate, 6, 0, 1, 3)
+        job_g.addWidget(self._btn_execute, 7, 0, 1, 3)
 
         self._job_status_lbl = QLabel(
             'Validate first. Execute is enabled after the plan passes.')
         self._job_status_lbl.setStyleSheet('color:#888; font-size:8px;')
-        job_g.addWidget(self._job_status_lbl, 5, 0, 1, 3)
+        job_g.addWidget(self._job_status_lbl, 8, 0, 1, 3)
         layout.addWidget(job_box)
         self._set_job_state('idle')
 
-    def _make_tuning_spin(self, lo: int, hi: int, value: int, tip: str) -> QSpinBox:
-        spin = QSpinBox()
-        spin.setRange(lo, hi)
-        spin.setValue(value)
-        spin.setFixedHeight(22)
-        spin.setToolTip(tip)
-        spin.valueChanged.connect(self._on_tuning_changed)
-        self._tuning_controls.append(spin)
-        return spin
+    def _make_tuning_slider(self, lo: int, hi: int, value: int, tip: str):
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(lo, hi)
+        slider.setValue(value)
+        slider.setMinimumWidth(170)
+        slider.setToolTip(tip)
+        value_lbl = QLabel(f'{value}%')
+        value_lbl.setMinimumWidth(34)
+        value_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        slider.valueChanged.connect(lambda v, lbl=value_lbl: lbl.setText(f'{v}%'))
+        slider.valueChanged.connect(self._on_tuning_changed)
+        self._tuning_controls.append(slider)
+        return slider, value_lbl
+
+    @staticmethod
+    def _add_tuning_row(grid: QGridLayout, row: int, label: str, slider: QSlider, value_lbl: QLabel):
+        grid.addWidget(QLabel(label), row, 0)
+        grid.addWidget(slider, row, 1)
+        grid.addWidget(value_lbl, row, 2)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -415,11 +433,12 @@ class TeachPanel(QWidget):
     def _tuning_options(self) -> dict:
         return {
             'use_recorded_timing': False,
-            'speed_j': int(self._speed_j_spin.value()),
-            'acc_j': int(self._acc_j_spin.value()),
-            'speed_l': int(self._speed_l_spin.value()),
-            'acc_l': int(self._acc_l_spin.value()),
-            'cp': int(self._cp_spin.value()),
+            'speed_factor': int(self._speed_factor_slider.value()),
+            'speed_j': int(self._speed_j_slider.value()),
+            'acc_j': int(self._acc_j_slider.value()),
+            'speed_l': int(self._speed_l_slider.value()),
+            'acc_l': int(self._acc_l_slider.value()),
+            'cp': int(self._cp_slider.value()),
             'final_cp': 0,
             'command_interval_s': 0.18,
             'queue_lookahead_commands': 3,

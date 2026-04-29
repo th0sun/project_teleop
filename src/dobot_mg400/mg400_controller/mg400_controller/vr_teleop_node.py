@@ -35,7 +35,7 @@ from mg400_controller.common.config.motion_config import (
 import mg400_controller.common.config.motion_config as motion_config
 
 # Vendor protocol surface (do not hardcode MG400 ASCII strings here).
-from mg400_protocol.dashboard import clear_error, get_tool
+from mg400_protocol.dashboard import clear_error, get_tool, speed_factor
 
 # Import core modules
 from mg400_controller.common.core.robot_connection import RobotConnection
@@ -160,6 +160,7 @@ class TeleopNode(Node):
             teach_status_callback=self._teach_status_callback,
             traj_data_callback=self._traj_data_callback,
             joint_trajectory_callback=self._joint_trajectory_callback,
+            speed_factor_callback=self._speed_factor_callback,
             teach_job_request_callback=self._teach_job_request_callback,
             topics=self.topics,
         )
@@ -443,6 +444,21 @@ class TeleopNode(Node):
             self.connection.send_dashboard_cmd(cmd)
         else:
             self.get_logger().warn(f"⚠️ Cannot send dashboard cmd '{cmd}'; Robot disconnected.")
+
+    def _speed_factor_callback(self, msg):
+        """Apply Dobot global SpeedFactor from GUI/Unity."""
+        try:
+            value = int(msg.data)
+        except (TypeError, ValueError):
+            self.get_logger().warn(f"⚠️ Invalid SpeedFactor payload: {msg.data!r}")
+            return
+        value = max(1, min(100, value))
+        if self.connection.connected:
+            cmd = speed_factor(value).render()
+            self.get_logger().info(f"🏃 SpeedFactor update from GUI: {value}%")
+            self.connection.send_dashboard_cmd(cmd + "\n")
+        else:
+            self.get_logger().warn(f"⚠️ Cannot set SpeedFactor({value}); Robot disconnected.")
 
     # ── Teach & Repeat callbacks ──────────────────────────────────────────────
     def _teach_status_callback(self, msg):

@@ -247,6 +247,7 @@ class MainWindow(QMainWindow):
             self._enable_feedback_follow('teach_execute')
         else:
             self._disable_feedback_follow(f'teach_{action}')
+        self._publish_teach_speed_factor(options)
         job_id = self._ros.publish_teach_job_request(action, trajectory, options=options)
         if job_id:
             frame_count = len(trajectory.get('frames', []))
@@ -261,6 +262,7 @@ class MainWindow(QMainWindow):
         """Teach panel: update speed/acc/CP for commands not sent yet."""
         if not self._ros.connected:
             return
+        self._publish_teach_speed_factor(options)
         job_id = self._ros.publish_teach_job_request(
             'tune',
             {'filename': 'runtime_tuning', 'frames': []},
@@ -270,6 +272,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f'Playback tuning update sent (job_id={job_id[:8]})',
                 1500)
+
+    def _publish_teach_speed_factor(self, options: dict):
+        try:
+            speed_factor = int(options.get('speed_factor', 0))
+        except (TypeError, ValueError, AttributeError):
+            return
+        if speed_factor <= 0:
+            return
+        self._ros.publish_speed(max(1, min(100, speed_factor)))
 
     @pyqtSlot()
     def _send_joints_to_ros(self):
