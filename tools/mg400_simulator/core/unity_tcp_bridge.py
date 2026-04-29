@@ -103,8 +103,37 @@ def parse_cdr_string(data: bytes) -> str:
     return text
 
 
+def active_joint_positions_deg(names: List[str], positions: List[float]) -> List[float]:
+    """Extract MG400 active joints [J1,J2,J3,J4] from a JointState message.
+
+    `/joint_states` for RViz uses the full URDF joint list, including passive
+    mimic joints.  The simulator UI needs the four controller joints.  When the
+    message is the Unity command contract (`joint1`..`joint4`) this function
+    returns those directly.
+    """
+    if len(positions) < 4:
+        return []
+
+    name_to_pos = {name: positions[idx] for idx, name in enumerate(names)}
+
+    for active_names in (
+        ("mg400_j1", "mg400_j2_1", "mg400_j3", "mg400_j5"),
+        ("joint1", "joint2", "joint3", "joint4"),
+    ):
+        if all(name in name_to_pos for name in active_names):
+            return [math.degrees(name_to_pos[name]) for name in active_names]
+
+    # Compatibility fallback for old `/joint_states` publishers that emitted
+    # the full URDF positions but forgot names.  Indices match
+    # KinematicsCalculator.joint_names.
+    if len(positions) >= 9:
+        return [math.degrees(positions[idx]) for idx in (0, 1, 3, 8)]
+
+    return [math.degrees(v) for v in positions[:4]]
+
+
 def parse_cdr_joint_state_deg(data: bytes) -> List[float]:
-    """Parse ROS-TCP serialized sensor_msgs/JointState into first 4 joints in deg."""
+    """Parse ROS-TCP serialized sensor_msgs/JointState into active MG400 joints."""
     if len(data) < 24:
         return []
 
@@ -118,9 +147,11 @@ def parse_cdr_joint_state_deg(data: bytes) -> List[float]:
 
     offset = _align(offset, 4, 4)
     name_count, offset = _read_u32(data, offset)
+    names = []
     for _ in range(name_count):
         offset = _align(offset, 4, 4)
-        _, offset = _read_cdr_string(data, offset)
+        name, offset = _read_cdr_string(data, offset)
+        names.append(name)
 
     offset = _align(offset, 4, 4)
     position_count, offset = _read_u32(data, offset)
@@ -129,10 +160,10 @@ def parse_cdr_joint_state_deg(data: bytes) -> List[float]:
 
     offset = _align(offset, 4, 8)
     positions = []
-    for _ in range(min(position_count, 4)):
+    for _ in range(position_count):
         positions.append(struct.unpack_from('<d', data, offset)[0])
         offset += 8
-    return [math.degrees(v) for v in positions]
+    return active_joint_positions_deg(names, positions)
 
 class UnityTcpBridge:
     def __init__(self,

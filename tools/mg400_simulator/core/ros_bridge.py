@@ -12,7 +12,7 @@ import time
 import uuid
 from typing import Optional, Callable, List
 
-from core.unity_tcp_bridge import UnityTcpBridge
+from core.unity_tcp_bridge import UnityTcpBridge, active_joint_positions_deg
 
 try:
     import rclpy
@@ -241,7 +241,10 @@ if _ROS_AVAILABLE:
 
         def _cb_joints(self, msg: JointState):
             if self.on_joint_update and len(msg.position) >= 4:
-                self.on_joint_update([math.degrees(v) for v in msg.position[:4]])
+                self.on_joint_update(active_joint_positions_deg(
+                    list(getattr(msg, 'name', []) or []),
+                    list(msg.position),
+                ))
 
         def _cb_status(self, msg: String):
             if self.on_status_update:
