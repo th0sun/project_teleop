@@ -141,18 +141,18 @@ class TeachPanel(QWidget):
         job_g.setSpacing(4)
 
         self._speed_factor_slider, self._speed_factor_value = self._make_tuning_slider(
-            1, 100, 50, 'Global Dobot SpeedFactor; applied immediately when connected',
-            on_change=self._on_speed_factor_changed)
+            1, 100, 50, 'Global Dobot SpeedFactor; sent when the slider is released',
+            on_release=self._on_speed_factor_released)
         self._speed_j_slider, self._speed_j_value = self._make_tuning_slider(
-            1, 100, 40, 'Joint speed for future JointMovJ commands')
+            1, 100, 40, 'Joint speed for next Execute or not-yet-sent commands')
         self._acc_j_slider, self._acc_j_value = self._make_tuning_slider(
-            1, 100, 80, 'Joint acceleration for future JointMovJ commands')
+            1, 100, 80, 'Joint acceleration for next Execute or not-yet-sent commands')
         self._speed_l_slider, self._speed_l_value = self._make_tuning_slider(
-            1, 100, 40, 'Cartesian speed for future MovL/Arc commands')
+            1, 100, 40, 'Cartesian speed for next Execute or not-yet-sent MovL/Arc commands')
         self._acc_l_slider, self._acc_l_value = self._make_tuning_slider(
-            1, 100, 80, 'Cartesian acceleration for future MovL/Arc commands')
+            1, 100, 80, 'Cartesian acceleration for next Execute or not-yet-sent MovL/Arc commands')
         self._cp_slider, self._cp_value = self._make_tuning_slider(
-            0, 100, 30, 'Blend CP for future commands')
+            0, 100, 30, 'Blend CP for next Execute or not-yet-sent commands')
 
         self._add_tuning_row(job_g, 0, 'SpeedFactor:', self._speed_factor_slider, self._speed_factor_value)
         self._add_tuning_row(job_g, 1, 'SpeedJ:', self._speed_j_slider, self._speed_j_value)
@@ -178,7 +178,7 @@ class TeachPanel(QWidget):
         layout.addWidget(job_box)
         self._set_job_state('idle')
 
-    def _make_tuning_slider(self, lo: int, hi: int, value: int, tip: str, on_change=None):
+    def _make_tuning_slider(self, lo: int, hi: int, value: int, tip: str, on_release=None):
         slider = QSlider(Qt.Horizontal)
         slider.setRange(lo, hi)
         slider.setValue(value)
@@ -188,7 +188,9 @@ class TeachPanel(QWidget):
         value_lbl.setMinimumWidth(34)
         value_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         slider.valueChanged.connect(lambda v, lbl=value_lbl: lbl.setText(f'{v}%'))
-        slider.valueChanged.connect(on_change or self._on_tuning_changed)
+        slider.sliderReleased.connect(
+            lambda s=slider, cb=on_release or self._on_tuning_released: cb(s.value())
+        )
         self._tuning_controls.append(slider)
         return slider, value_lbl
 
@@ -452,21 +454,21 @@ class TeachPanel(QWidget):
             'queue_lookahead_commands': 3,
         }
 
-    def _on_tuning_changed(self, *_):
+    def _on_tuning_released(self, *_):
         if self._job_state == 'executing':
             self.teach_tuning_requested.emit(self._tuning_options())
-            self._job_status_lbl.setText('Executing: tuning update sent for future commands')
+            self._job_status_lbl.setText('Executing: tuning sent for not-yet-sent commands')
         else:
             self._job_status_lbl.setText(
-                'Tuning changed. Execute will use the latest SpeedJ/AccJ/SpeedL/AccL/CP.'
+                'Tuning saved. Next Execute will use the latest SpeedJ/AccJ/SpeedL/AccL/CP.'
             )
 
-    def _on_speed_factor_changed(self, value: int):
+    def _on_speed_factor_released(self, value: int):
         value = max(1, min(100, int(value)))
         self.speed_factor_requested.emit(value)
         if self._job_state == 'executing':
             self._job_status_lbl.setText(
-                f'Executing: SpeedFactor({value}) sent; future commands keep current tuning'
+                f'Executing: SpeedFactor({value}) sent; other tuning applies to not-yet-sent commands'
             )
         else:
             self._job_status_lbl.setText(
