@@ -1,0 +1,136 @@
+flowchart LR
+    %% Current MG400 teleoperation + teach-repeat architecture.
+    %% Source checked from:
+    %% - TeleOp/Assets/Scripts/*.cs
+    %% - project_teleop/src/dobot_mg400/mg400_controller
+    %% - project_teleop/tools/mg400_simulator
+
+    vr["Meta Quest / VR input\nhand tracking + controller"]
+
+    subgraph unity["Unity VR Frontend (TeleOp, C#)"]
+        robotCtrl["RobotController\nFK / IK + Unity robot"]
+        ctr["ContinuousTeachAndRepeat\nrecord / preview / execute UI"]
+        pathPub["ROSPathPublisher\nrealtime joint stream\nlegacy json mirror"]
+        teachPub["TeachJobPublisher\njob request + tuning + safety toggle"]
+        ghost["DobotROSReceiver\n/joint_states feedback ghost"]
+        alarmSub["RobotAlarmSubscriber\n/mg400/safety_status"]
+        vacuum["VacummRosControl\nvacuum event capture + command"]
+    end
+
+    subgraph simui["MG400 Simulator UI (optional Mac/Python UI)"]
+        simTeach["Teach panel\nload Unity JSON / add waypoint"]
+        simBridge["ROSBridge / UnityTcpBridge\nsame topic contract as Unity"]
+    end
+
+    subgraph rosTcp["ROS-TCP-Endpoint\nPort 10000"]
+        endpoint["UnityEndpoint\nROS TCP bridge"]
+    end
+
+    subgraph ros["ROS 2 MG400 Control Stack (Python)"]
+        teleopNode["vr_teleop_node\nTeleopNode"]
+        topicCfg["TeleopTopicConfig\ncentral topic profile"]
+        validator["JointValidator\nlimits + sanity"]
+        planner["MotionPlanner\nqueue-aware send decision"]
+        controller["TeleopController\nskip / send / stuck recovery"]
+        sceneGuard["SceneSafetyGuard\nmeasured fixture boxes\noptional"]
+        recorder["TrajectoryRecorder\nload / simplify / compile / playback"]
+        jobHandler["TeachJobHandler\ncompile / execute / tune / stop"]
+        safety["SafetyMonitor + ErrorDecoder\nrobot alarms + status"]
+        feedback["FeedbackReader\nTCP 30004 feedback"]
+        sender["CommandSender\nTCP command wrapper"]
+    end
+
+    subgraph protocol["MG400 Protocol Layer"]
+        proto["mg400_protocol\nDashboard + Motion command builders"]
+        tcp["TCP/IP sockets\n29999 dashboard\n30003 motion\n30004 feedback"]
+    end
+
+    robot[("Dobot MG400\nreal robot or MG400_Mock")]
+
+    subgraph outputs["ROS Feedback / Debug Topics"]
+        jointStates["/joint_states\nrobot joint feedback"]
+        safetyStatus["/mg400/safety_status\nalarm text + error metadata"]
+        doStatus["/mg400/do_status\nDigital Output status"]
+        debugTopics["/teleop/debug\n/predicted_target\n/sent_command"]
+        artifact["/teach/job_status\n/teach/job_artifact"]
+    end
+
+    %% Unity local interaction.
+    vr --> robotCtrl
+    robotCtrl --> ctr
+    ctr --> pathPub
+    ctr --> teachPub
+    ctr --> vacuum
+    ghost --> robotCtrl
+    alarmSub --> ctr
+
+    %% Unity to ROS via ROS-TCP-Endpoint.
+    pathPub -- "/unity/joint_cmd\nsensor_msgs/JointState" --> endpoint
+    pathPub -.->|"legacy: /unity/trajectory_data\nstd_msgs/String JSON"| endpoint
+    pathPub -.->|"legacy: /mg400/joint_trajectory_controller/command"| endpoint
+    teachPub -- "/teach/job_request\ncompile / execute / tune / stop" --> endpoint
+    teachPub -- "/unity/speed_factor\nstd_msgs/Int32" --> endpoint
+    teachPub -- "/mg400/scene_safety_enabled\nstd_msgs/Bool" --> endpoint
+    vacuum -- "/vr/suction_cmd\nstd_msgs/Bool" --> endpoint
+    ctr -- "/mg400/light_cmd\nstd_msgs/Int32MultiArray" --> endpoint
+
+    endpoint --> teleopNode
+
+    %% Optional simulator UI uses the same contract.
+    simTeach --> simBridge
+    simBridge -- "/unity/joint_cmd" --> teleopNode
+    simBridge -- "/teach/job_request" --> teleopNode
+    teleopNode -- "/joint_states\n/teach/job_status" --> simBridge
+
+    %% Realtime path.
+    teleopNode --> topicCfg
+    teleopNode --> validator
+    teleopNode --> planner
+    teleopNode --> controller
+    teleopNode --> sceneGuard
+    controller -- "latest realtime target\nsend / skip decision" --> sender
+    sceneGuard -. "blocks unsafe realtime target\nwhen enabled" .-> sender
+
+    %% Teach-repeat path.
+    teleopNode -- "/teach/job_request" --> jobHandler
+    jobHandler --> recorder
+    recorder -- "RDP simplify\nJointMovJ compile\nmixed primitives currently guarded/off by default" --> sender
+    sceneGuard -. "compile metadata + execute gate" .-> jobHandler
+    jobHandler -- "status + artifact" --> artifact
+
+    %% Robot IO.
+    sender --> proto
+    proto --> tcp
+    tcp --> robot
+    robot -- "125 Hz feedback" --> feedback
+    feedback --> teleopNode
+    feedback --> safety
+
+    %% Feedback publishing.
+    teleopNode --> jointStates
+    safety --> safetyStatus
+    teleopNode --> doStatus
+    teleopNode --> debugTopics
+    jointStates --> endpoint
+    artifact --> endpoint
+    safetyStatus --> endpoint
+    endpoint --> ghost
+    endpoint --> teachPub
+    endpoint --> alarmSub
+
+    %% Visual styling.
+    classDef external fill:#e8e2ff,stroke:#6b5ca5,stroke-width:1px,color:#111;
+    classDef unity fill:#fff2cc,stroke:#d6a600,stroke-width:1px,color:#111;
+    classDef sim fill:#dff3ff,stroke:#4a97bd,stroke-width:1px,color:#111;
+    classDef ros fill:#ffe6cc,stroke:#d68a00,stroke-width:1px,color:#111;
+    classDef protocol fill:#f2f2f2,stroke:#666,stroke-width:1px,color:#111;
+    classDef robot fill:#ffd6d6,stroke:#bf4d4d,stroke-width:2px,color:#111;
+    classDef topic fill:#eef7e8,stroke:#6a9b4b,stroke-width:1px,color:#111;
+
+    class vr external;
+    class robotCtrl,ctr,pathPub,teachPub,ghost,alarmSub,vacuum unity;
+    class simTeach,simBridge sim;
+    class teleopNode,topicCfg,validator,planner,controller,sceneGuard,recorder,jobHandler,safety,feedback,sender ros;
+    class proto,tcp,endpoint protocol;
+    class robot robot;
+    class jointStates,safetyStatus,doStatus,debugTopics,artifact topic;
