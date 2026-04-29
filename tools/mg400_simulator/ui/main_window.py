@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
         self._teach.send_waypoint.connect(self._on_teach_send_waypoint)
         self._teach.teach_job_requested.connect(self._on_teach_job_requested)
         self._teach.teach_tuning_requested.connect(self._on_teach_tuning_requested)
+        self._teach.speed_factor_requested.connect(self._on_teach_speed_factor_requested)
 
         # Panel → ROS / commands
         self._panel.send_joints.connect(self._send_joints_to_ros)
@@ -272,6 +273,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f'Playback tuning update sent (job_id={job_id[:8]})',
                 1500)
+
+    @pyqtSlot(int)
+    def _on_teach_speed_factor_requested(self, value: int):
+        """Teach panel: apply Dobot global SpeedFactor immediately."""
+        if not self._ros.connected:
+            self.statusBar().showMessage(
+                f'ROS bridge offline — SpeedFactor({value}) not sent.',
+                1500)
+            return
+        value = max(1, min(100, int(value)))
+        self._ros.publish_speed(value)
+        self.statusBar().showMessage(f'SpeedFactor({value}) sent.', 1200)
 
     def _publish_teach_speed_factor(self, options: dict):
         try:

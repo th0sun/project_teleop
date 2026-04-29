@@ -31,12 +31,14 @@ class TeachPanel(QWidget):
         send_waypoint(list)    – user wants to send one waypoint to ROS
         teach_job_requested(str, dict, dict) – action + trajectory + tuning options
         teach_tuning_requested(dict) – live speed/acc/CP update while executing
+        speed_factor_requested(int) – immediate Dobot SpeedFactor update
     """
 
     goto_waypoint = pyqtSignal(list)
     send_waypoint = pyqtSignal(list)
     teach_job_requested = pyqtSignal(str, dict, dict)
     teach_tuning_requested = pyqtSignal(dict)
+    speed_factor_requested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -139,7 +141,8 @@ class TeachPanel(QWidget):
         job_g.setSpacing(4)
 
         self._speed_factor_slider, self._speed_factor_value = self._make_tuning_slider(
-            1, 100, 50, 'Global Dobot SpeedFactor; applied immediately when connected')
+            1, 100, 50, 'Global Dobot SpeedFactor; applied immediately when connected',
+            on_change=self._on_speed_factor_changed)
         self._speed_j_slider, self._speed_j_value = self._make_tuning_slider(
             1, 100, 40, 'Joint speed for future JointMovJ commands')
         self._acc_j_slider, self._acc_j_value = self._make_tuning_slider(
@@ -175,7 +178,7 @@ class TeachPanel(QWidget):
         layout.addWidget(job_box)
         self._set_job_state('idle')
 
-    def _make_tuning_slider(self, lo: int, hi: int, value: int, tip: str):
+    def _make_tuning_slider(self, lo: int, hi: int, value: int, tip: str, on_change=None):
         slider = QSlider(Qt.Horizontal)
         slider.setRange(lo, hi)
         slider.setValue(value)
@@ -185,7 +188,7 @@ class TeachPanel(QWidget):
         value_lbl.setMinimumWidth(34)
         value_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         slider.valueChanged.connect(lambda v, lbl=value_lbl: lbl.setText(f'{v}%'))
-        slider.valueChanged.connect(self._on_tuning_changed)
+        slider.valueChanged.connect(on_change or self._on_tuning_changed)
         self._tuning_controls.append(slider)
         return slider, value_lbl
 
@@ -453,6 +456,22 @@ class TeachPanel(QWidget):
         if self._job_state == 'executing':
             self.teach_tuning_requested.emit(self._tuning_options())
             self._job_status_lbl.setText('Executing: tuning update sent for future commands')
+        else:
+            self._job_status_lbl.setText(
+                'Tuning changed. Execute will use the latest SpeedJ/AccJ/SpeedL/AccL/CP.'
+            )
+
+    def _on_speed_factor_changed(self, value: int):
+        value = max(1, min(100, int(value)))
+        self.speed_factor_requested.emit(value)
+        if self._job_state == 'executing':
+            self._job_status_lbl.setText(
+                f'Executing: SpeedFactor({value}) sent; future commands keep current tuning'
+            )
+        else:
+            self._job_status_lbl.setText(
+                f'SpeedFactor({value}) sent. Other tuning applies on next Execute.'
+            )
 
     def _invalidate_plan(self, message: str):
         if self._job_busy:
