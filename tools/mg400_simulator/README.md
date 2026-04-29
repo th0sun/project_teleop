@@ -106,14 +106,20 @@ contract used by the real Unity `TeachJobPublisher`.
 4. Use **ROS Teach Job**:
    - **Validate Plan** publishes `action=compile` to `/teach/job_request`; ROS
      compiles/checks the plan only and must not move the robot.
+   - Set **SpeedJ/AccJ**, **SpeedL/AccL**, and **CP** before Execute. These are
+     sent as teach-job options; playback no longer tries to reproduce the
+     demonstrator's original timestamps.
    - **Execute** publishes `action=execute`; Mock/robot motion is owned by ROS,
      and the simulator viewport follows `/joint_states` feedback during that job.
      The button is enabled only after validation succeeds.
+   - While Execute is running, changing Speed/Acc/CP sends `action=tune`; commands
+     that have not yet been sent to the MG400 pick up the new values.
 
 During realtime control, the simulator treats the GUI as the target source and
 does not continuously overwrite the sliders/viewport with robot feedback.  It
 uses feedback for the initial connection sync and for ROS-owned teach/repeat
-execution.
+execution. The old local "Play Live" path is intentionally hidden from the
+Teach tab so it cannot stream `/unity/joint_cmd` on top of a ROS-owned Execute.
 
 The emitted payload is a `std_msgs/String` on:
 
@@ -132,6 +138,26 @@ Its trajectory body matches the Unity job shape:
     {"timeStamp": 0.0, "j1": 0.0, "j2": 0.0, "j3": -45.0, "j4": 0.0}
   ],
   "events": []
+}
+```
+
+Runtime tuning uses the same topic with an empty trajectory:
+
+```json
+{
+  "action": "tune",
+  "target": "mg400",
+  "trajectory": {"filename": "runtime_tuning", "frames": []},
+  "options": {
+    "use_recorded_timing": false,
+    "speed_j": 40,
+    "acc_j": 80,
+    "speed_l": 40,
+    "acc_l": 80,
+    "cp": 30,
+    "final_cp": 0,
+    "queue_lookahead_commands": 3
+  }
 }
 ```
 

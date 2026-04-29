@@ -20,7 +20,7 @@ JobRequest schema (JSON over ``std_msgs/String``)::
 
     {
       "job_id": "uuid-v4",
-      "action": "compile|preview_sim|execute|export|stop|record_start|record_stop",
+      "action": "compile|execute|tune|export|stop|record_start|record_stop",
       "target": "mg400" | "robot_a" | ...,
       "trajectory": {
         "filename": "...",
@@ -40,7 +40,7 @@ JobStatus schema::
 
     {
       "job_id": "...",
-      "stage": "received|compiled|preview_started|executing|done|failed|stopped",
+      "stage": "received|compiled|executing|tuned|done|failed|stopped",
       "progress": 0.0..1.0,
       "message": "...",
       "error_code": null | "BAD_PAYLOAD" | "EMPTY_TRAJECTORY" | "ROBOT_DISCONNECTED" | "EXECUTE_FORBIDDEN" | "ALREADY_PLAYING" | "EXPORT_FAILED" | "UNKNOWN_ACTION" | "PLAYBACK_TIMEOUT" | "PLAYBACK_FAILED",
@@ -66,6 +66,7 @@ from mg400_controller.common.trajectory.trajectory_recorder import (
 ACTION_COMPILE = "compile"
 ACTION_PREVIEW_SIM = "preview_sim"
 ACTION_EXECUTE = "execute"
+ACTION_TUNE = "tune"
 ACTION_EXPORT = "export"
 ACTION_STOP = "stop"
 ACTION_RECORD_START = "record_start"
@@ -75,6 +76,7 @@ VALID_ACTIONS = frozenset({
     ACTION_COMPILE,
     ACTION_PREVIEW_SIM,
     ACTION_EXECUTE,
+    ACTION_TUNE,
     ACTION_EXPORT,
     ACTION_STOP,
     ACTION_RECORD_START,
@@ -87,6 +89,7 @@ STAGE_COMPILED = "compiled"
 STAGE_PREVIEW_READY = "preview_ready"
 STAGE_PREVIEW_STARTED = "preview_started"
 STAGE_EXECUTING = "executing"
+STAGE_TUNED = "tuned"
 STAGE_DONE = "done"
 STAGE_FAILED = "failed"
 STAGE_STOPPED = "stopped"
@@ -301,6 +304,8 @@ class TeachJobHandler:
                 return self._handle_preview_sim(request)
             if request.action == ACTION_EXECUTE:
                 return self._handle_play(request, sim=False)
+            if request.action == ACTION_TUNE:
+                return self._handle_tune(request)
             if request.action == ACTION_EXPORT:
                 return self._handle_export(request)
             if request.action == ACTION_STOP:
@@ -318,6 +323,7 @@ class TeachJobHandler:
 
     # ── Action handlers ─────────────────────────────────────────────────────
     def _handle_compile(self, request: JobRequest) -> JobStatus:
+        self._apply_request_tuning(request)
         if not self._load_trajectory_or_fail(request):
             return self._last_status
 
@@ -350,6 +356,7 @@ class TeachJobHandler:
                 "total_duration_s": plan.total_duration_s,
                 "time_scale": plan.time_scale,
                 "original_timing_feasible": plan.original_timing_feasible,
+                "playback_tuning": self._current_tuning(),
             },
         )
 
@@ -362,6 +369,7 @@ class TeachJobHandler:
         backend lands (e.g. the unity_simulator package) it can be invoked
         from this method without changing the contract.
         """
+        self._apply_request_tuning(request)
         if not self._load_trajectory_or_fail(request):
             return self._last_status
 
@@ -399,6 +407,7 @@ class TeachJobHandler:
                 "total_duration_s": plan.total_duration_s,
                 "time_scale": plan.time_scale,
                 "original_timing_feasible": plan.original_timing_feasible,
+                "playback_tuning": self._current_tuning(),
             },
         )
 
@@ -419,6 +428,7 @@ class TeachJobHandler:
                 "Sim playback path disabled: use preview_sim (compile-only).",
             )
 
+        self._apply_request_tuning(request)
         if not self._load_trajectory_or_fail(request):
             return self._last_status
 
@@ -445,10 +455,21 @@ class TeachJobHandler:
                 "sim": False,
                 "real_robot_moved": True,
                 "waypoint_count": len(self._recorder.loaded_frames),
+                "playback_tuning": self._current_tuning(),
             },
         )
 
+    def _handle_tune(self, request: JobRequest) -> JobStatus:
+        tuning = self._apply_request_tuning(request, merge=True)
+        return self._succeed(
+            request,
+            stage=STAGE_TUNED,
+            message="Playback tuning updated",
+            metadata={"playback_tuning": tuning},
+        )
+
     def _handle_export(self, request: JobRequest) -> JobStatus:
+        self._apply_request_tuning(request)
         if not self._load_trajectory_or_fail(request):
             return self._last_status
 
@@ -560,6 +581,18 @@ class TeachJobHandler:
         ))
 
     # ── Helpers ─────────────────────────────────────────────────────────────
+    def _apply_request_tuning(self, request: JobRequest, *, merge: bool = False) -> Dict[str, Any]:
+        if merge and hasattr(self._recorder, "update_playback_tuning"):
+            return dict(self._recorder.update_playback_tuning(request.options))
+        if hasattr(self._recorder, "set_playback_tuning"):
+            return dict(self._recorder.set_playback_tuning(request.options))
+        return {}
+
+    def _current_tuning(self) -> Dict[str, Any]:
+        if hasattr(self._recorder, "playback_tuning"):
+            return dict(self._recorder.playback_tuning())
+        return {}
+
     def _load_trajectory_or_fail(self, request: JobRequest) -> bool:
         frames = request.frames()
         if frames:

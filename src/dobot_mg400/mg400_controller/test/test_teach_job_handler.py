@@ -12,6 +12,7 @@ from mg400_controller.common.trajectory.teach_job_handler import (  # noqa: E402
     ACTION_RECORD_START,
     ACTION_RECORD_STOP,
     ACTION_STOP,
+    ACTION_TUNE,
     ERR_ALREADY_PLAYING,
     ERR_BAD_PAYLOAD,
     ERR_EMPTY_TRAJECTORY,
@@ -30,6 +31,7 @@ from mg400_controller.common.trajectory.teach_job_handler import (  # noqa: E402
     STAGE_PREVIEW_STARTED,
     STAGE_RECEIVED,
     STAGE_STOPPED,
+    STAGE_TUNED,
     TeachJobHandler,
     parse_job_request,
 )
@@ -70,6 +72,7 @@ class FakeRecorder:
         self.start_recording_called = 0
         self.stop_recording_called = 0
         self.playback_event_callbacks = []
+        self._playback_tuning = {}
 
     # -- stub plan ------------------------------------------------------
     def set_compile_plan(self, plan):
@@ -121,6 +124,17 @@ class FakeRecorder:
 
     def add_playback_event_callback(self, callback):
         self.playback_event_callbacks.append(callback)
+
+    def set_playback_tuning(self, options):
+        self._playback_tuning = dict(options or {})
+        return dict(self._playback_tuning)
+
+    def update_playback_tuning(self, options):
+        self._playback_tuning.update(dict(options or {}))
+        return dict(self._playback_tuning)
+
+    def playback_tuning(self):
+        return dict(self._playback_tuning)
 
     def emit_playback_complete(self, **payload):
         for callback in list(self.playback_event_callbacks):
@@ -335,6 +349,7 @@ class TeachJobHandlerTest(unittest.TestCase):
             "job_id": "j-exec",
             "action": ACTION_EXECUTE,
             "trajectory": _frames_payload(),
+            "options": {"speed_j": 35, "acc_j": 70, "cp": 25},
         })
         self.handler.handle(payload)
 
@@ -342,6 +357,22 @@ class TeachJobHandlerTest(unittest.TestCase):
         terminal = self._decoded_status()[-1]
         self.assertEqual(terminal["stage"], STAGE_EXECUTING)
         self.assertFalse(terminal["metadata"]["sim"])
+        self.assertEqual(terminal["metadata"]["playback_tuning"]["speed_j"], 35)
+        self.assertEqual(self.recorder.playback_tuning()["cp"], 25)
+
+    def test_tune_updates_playback_tuning_without_trajectory(self):
+        payload = json.dumps({
+            "job_id": "j-tune",
+            "action": ACTION_TUNE,
+            "options": {"speed_j": 55, "acc_j": 65, "speed_l": 40, "cp": 10},
+        })
+        self.handler.handle(payload)
+
+        statuses = self._decoded_status()
+        self.assertEqual([s["stage"] for s in statuses], [STAGE_RECEIVED, STAGE_TUNED])
+        terminal = statuses[-1]
+        self.assertEqual(terminal["metadata"]["playback_tuning"]["speed_j"], 55)
+        self.assertEqual(self.recorder.playback_tuning()["acc_j"], 65)
 
     def test_execute_emits_done_when_recorder_reports_success(self):
         payload = json.dumps({

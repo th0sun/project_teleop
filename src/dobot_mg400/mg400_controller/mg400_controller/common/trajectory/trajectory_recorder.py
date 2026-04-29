@@ -12,10 +12,9 @@ Handles the full lifecycle:
                  to the Unity money.json format.
 2. **Save**    — persist as ``{"frames": [{timeStamp, j1..j4}, ...]}``.
 3. **Load**    — read a saved JSON trajectory (Unity or native format).
-4. **Preview** — temporal sequencer that replays each frame with the
-                 EXACT joint values from the JSON, computing SpeedJ to
-                 match original timing.  No decimation needed because
-                 recording already produces clean 8-10 Hz data.
+4. **Execute** — command sequencer that keeps the taught waypoint order/path,
+                 but uses operator-selected Speed/Acc/CP tuning instead of
+                 trying to reproduce the demonstrator's timestamps.
 5. **Stop**    — abort any operation and send the robot Home (0,0,0,0).
 
 Topic integration (managed by vr_teleop_node.py):
@@ -27,6 +26,7 @@ import os
 import time
 import json
 import math
+import re
 import threading
 import numpy as np
 from pathlib import Path
@@ -73,6 +73,14 @@ PREVIEW_STREAM_SPEEDJ = 100
 PREVIEW_STREAM_MIN_SPEEDJ = 15
 PREVIEW_STREAM_CP = 20
 PREVIEW_FINAL_CP = 0
+PLAYBACK_DEFAULT_SPEED_J = 40
+PLAYBACK_DEFAULT_ACC_J = 80
+PLAYBACK_DEFAULT_SPEED_L = 40
+PLAYBACK_DEFAULT_ACC_L = 80
+PLAYBACK_DEFAULT_CP = 30
+PLAYBACK_DEFAULT_FINAL_CP = 0
+PLAYBACK_DEFAULT_COMMAND_INTERVAL_SEC = 0.18
+PLAYBACK_DEFAULT_QUEUE_LOOKAHEAD_COMMANDS = 3
 PREVIEW_START_TIMEOUT_SEC = 6.0
 PREVIEW_START_TOLERANCE_DEG = 3.0
 PREVIEW_FINAL_TOLERANCE_DEG = 0.05
@@ -264,6 +272,8 @@ class TrajectoryRecorder:
         self._traj_dir = TRAJ_DIR if traj_dir is None else traj_dir
         self._time_fn = time.time if time_fn is None else time_fn
         self._sleep_fn = time.sleep if sleep_fn is None else sleep_fn
+        self._playback_tuning_lock = threading.Lock()
+        self._playback_tuning = self._default_playback_tuning()
 
         # ── State ────────────────────────────────────────────────────────────
         self.is_recording  = False
@@ -290,6 +300,81 @@ class TrajectoryRecorder:
         self.loaded_name: str = ""
 
         os.makedirs(self._traj_dir, exist_ok=True)
+
+    @staticmethod
+    def _clamp_int(value, lo: int, hi: int, default: int) -> int:
+        try:
+            parsed = int(round(float(value)))
+        except (TypeError, ValueError):
+            return int(default)
+        return max(int(lo), min(int(hi), parsed))
+
+    @classmethod
+    def _default_playback_tuning(cls) -> Dict[str, Any]:
+        return {
+            "use_recorded_timing": False,
+            "speed_j": PLAYBACK_DEFAULT_SPEED_J,
+            "acc_j": PLAYBACK_DEFAULT_ACC_J,
+            "speed_l": PLAYBACK_DEFAULT_SPEED_L,
+            "acc_l": PLAYBACK_DEFAULT_ACC_L,
+            "cp": PLAYBACK_DEFAULT_CP,
+            "final_cp": PLAYBACK_DEFAULT_FINAL_CP,
+            "command_interval_s": PLAYBACK_DEFAULT_COMMAND_INTERVAL_SEC,
+            "queue_lookahead_commands": PLAYBACK_DEFAULT_QUEUE_LOOKAHEAD_COMMANDS,
+        }
+
+    @classmethod
+    def _normalize_playback_tuning(cls, options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        base = cls._default_playback_tuning()
+        if not isinstance(options, dict):
+            return base
+
+        use_recorded = options.get("use_recorded_timing", base["use_recorded_timing"])
+        if isinstance(use_recorded, str):
+            use_recorded = use_recorded.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            use_recorded = bool(use_recorded)
+
+        speed = options.get("speed", base["speed_j"])
+        acc = options.get("acc", base["acc_j"])
+        base.update({
+            "use_recorded_timing": use_recorded,
+            "speed_j": cls._clamp_int(options.get("speed_j", speed), 1, 100, base["speed_j"]),
+            "acc_j": cls._clamp_int(options.get("acc_j", acc), 1, 100, base["acc_j"]),
+            "speed_l": cls._clamp_int(options.get("speed_l", speed), 1, 100, base["speed_l"]),
+            "acc_l": cls._clamp_int(options.get("acc_l", acc), 1, 100, base["acc_l"]),
+            "cp": cls._clamp_int(options.get("cp", base["cp"]), 0, 100, base["cp"]),
+            "final_cp": cls._clamp_int(options.get("final_cp", base["final_cp"]), 0, 100, base["final_cp"]),
+            "queue_lookahead_commands": cls._clamp_int(
+                options.get("queue_lookahead_commands", base["queue_lookahead_commands"]),
+                1,
+                10,
+                base["queue_lookahead_commands"],
+            ),
+        })
+        try:
+            interval = float(options.get("command_interval_s", base["command_interval_s"]))
+        except (TypeError, ValueError):
+            interval = base["command_interval_s"]
+        base["command_interval_s"] = max(0.05, min(2.0, interval))
+        return base
+
+    def set_playback_tuning(self, options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        tuning = self._normalize_playback_tuning(options)
+        with self._playback_tuning_lock:
+            self._playback_tuning = tuning
+        return dict(tuning)
+
+    def update_playback_tuning(self, options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        with self._playback_tuning_lock:
+            merged = dict(self._playback_tuning)
+        if isinstance(options, dict):
+            merged.update(options)
+        return self.set_playback_tuning(merged)
+
+    def playback_tuning(self) -> Dict[str, Any]:
+        with self._playback_tuning_lock:
+            return dict(self._playback_tuning)
 
     # ═════════════════════════════════════════════════════════════════════════
     #  RECORD  (smart-sampled at ~8-10 Hz)
@@ -528,7 +613,13 @@ class TrajectoryRecorder:
     def _fastest_path_repeat_enabled(self) -> bool:
         return self._playback_execution_profile() == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT
 
+    def _use_recorded_timing(self) -> bool:
+        return bool(self.playback_tuning().get("use_recorded_timing", False))
+
     def _stream_cp(self, *, is_final: bool) -> int:
+        tuning = self.playback_tuning()
+        if not tuning.get("use_recorded_timing", False):
+            return int(tuning["final_cp"] if is_final else tuning["cp"])
         if self._fastest_path_repeat_enabled():
             key = "FAST_REPEAT_FINAL_CP" if is_final else "FAST_REPEAT_CP"
             fallback = PREVIEW_FINAL_CP if is_final else PREVIEW_STREAM_CP
@@ -536,19 +627,72 @@ class TrajectoryRecorder:
         return PREVIEW_FINAL_CP if is_final else PREVIEW_STREAM_CP
 
     def _stream_acc_j(self) -> Optional[int]:
+        tuning = self.playback_tuning()
+        if not tuning.get("use_recorded_timing", False):
+            return int(tuning["acc_j"])
         if not self._fastest_path_repeat_enabled():
             return None
         return int(getattr(motion_config, "FAST_REPEAT_ACC_J", 100))
 
     def _stream_acc_l(self) -> int:
+        tuning = self.playback_tuning()
+        if not tuning.get("use_recorded_timing", False):
+            return int(tuning["acc_l"])
         if self._fastest_path_repeat_enabled():
             return int(getattr(motion_config, "FAST_REPEAT_ACC_L", 100))
         return int(getattr(motion_config, "SEGMENT_ACC_L", 80))
 
     def _max_commands_per_cycle(self) -> int:
+        tuning = self.playback_tuning()
+        if not tuning.get("use_recorded_timing", False):
+            return int(tuning.get(
+                "queue_lookahead_commands",
+                PLAYBACK_DEFAULT_QUEUE_LOOKAHEAD_COMMANDS,
+            ))
         if self._fastest_path_repeat_enabled():
             return max(1, int(getattr(motion_config, "FAST_REPEAT_MAX_COMMANDS_PER_CYCLE", 1)))
         return 1_000_000
+
+    @staticmethod
+    def _set_command_option(command: str, key: str, value: int) -> str:
+        """Replace or append a Dobot command option such as SpeedJ=40."""
+        value = int(value)
+        pattern = rf"(?<![A-Za-z0-9_]){re.escape(key)}\s*=\s*[^,\)]*"
+        replacement = f"{key}={value}"
+        if re.search(pattern, command):
+            return re.sub(pattern, replacement, command)
+        end = command.rfind(")")
+        if end < 0:
+            return command
+        prefix = command[:end].rstrip()
+        suffix = command[end:]
+        sep = "," if not prefix.endswith("(") else ""
+        return f"{prefix}{sep}{replacement}{suffix}"
+
+    def _apply_runtime_tuning_to_command(self, command: str, *, is_final: bool) -> str:
+        """Apply the latest operator speed/acc/CP tuning before a command is sent.
+
+        This is intentionally late-bound.  Compile validates the path and creates
+        the command order, while the operator can still adjust motion tuning
+        during playback; queued commands that have not been sent yet pick up the
+        latest values.
+        """
+        tuning = self.playback_tuning()
+        if tuning.get("use_recorded_timing", False):
+            return command
+
+        cp = int(tuning["final_cp"] if is_final else tuning["cp"])
+        name = command.split("(", 1)[0].strip()
+        updated = command
+        if name == "JointMovJ":
+            updated = self._set_command_option(updated, "SpeedJ", int(tuning["speed_j"]))
+            updated = self._set_command_option(updated, "AccJ", int(tuning["acc_j"]))
+            updated = self._set_command_option(updated, "CP", cp)
+        elif name in {"MovL", "Arc"}:
+            updated = self._set_command_option(updated, "SpeedL", int(tuning["speed_l"]))
+            updated = self._set_command_option(updated, "AccL", int(tuning["acc_l"]))
+            updated = self._set_command_option(updated, "CP", cp)
+        return updated
 
     def _fast_repeat_schedule_times(self, frames, fallback_target_t):
         """Return command schedule times for fastest path repeat.
@@ -573,6 +717,13 @@ class TrajectoryRecorder:
             max_delta = float(np.max(np.abs(q - prev_q)))
             target_t.append(target_t[-1] + max_delta / speed_deg_s)
         return np.asarray(target_t, dtype=float)
+
+    def _operator_schedule_times(self, frames) -> np.ndarray:
+        interval = float(self.playback_tuning().get(
+            "command_interval_s",
+            PLAYBACK_DEFAULT_COMMAND_INTERVAL_SEC,
+        ))
+        return np.asarray([idx * interval for idx in range(len(frames))], dtype=float)
 
     def _retime_frames_for_playback(self, frames):
         """Return frames with preserved-or-stretched timestamps.
@@ -608,6 +759,9 @@ class TrajectoryRecorder:
         return retimed_frames, timing
 
     def _segment_speed_j(self, prev_frame, frame):
+        tuning = self.playback_tuning()
+        if not tuning.get("use_recorded_timing", False):
+            return int(tuning["speed_j"])
         if self._fastest_path_repeat_enabled():
             return int(getattr(motion_config, "FAST_REPEAT_SPEED_J", PREVIEW_STREAM_SPEEDJ))
         dt = max(float(frame["timeStamp"] - prev_frame["timeStamp"]), 1e-3)
@@ -622,6 +776,9 @@ class TrajectoryRecorder:
 
     def _segment_speed_l(self, segment, frames):
         """Calculate dynamic Cartesian SpeedL percentage based on timestamp dt."""
+        tuning = self.playback_tuning()
+        if not tuning.get("use_recorded_timing", False):
+            return int(tuning["speed_l"])
         if self._fastest_path_repeat_enabled():
             return int(getattr(motion_config, "FAST_REPEAT_SPEED_L", 100))
 
@@ -764,6 +921,11 @@ class TrajectoryRecorder:
         return float(max_error)
 
     def _lookahead_seconds(self, target_t):
+        tuning = self.playback_tuning()
+        if not tuning.get("use_recorded_timing", False):
+            interval = float(tuning.get("command_interval_s", PLAYBACK_DEFAULT_COMMAND_INTERVAL_SEC))
+            commands = int(tuning.get("queue_lookahead_commands", PLAYBACK_DEFAULT_QUEUE_LOOKAHEAD_COMMANDS))
+            return max(interval, interval * max(1, commands))
         if self._fastest_path_repeat_enabled():
             return float(getattr(motion_config, "FAST_REPEAT_LOOKAHEAD_SEC", 10.0))
         if len(target_t) < 2:
@@ -944,7 +1106,25 @@ class TrajectoryRecorder:
                 f"(RDP @ {tolerance:.2f}°)"
             )
 
-        frames, timing = self._retime_frames_for_playback(source_frames)
+        if self._use_recorded_timing():
+            frames, timing = self._retime_frames_for_playback(source_frames)
+        else:
+            frames = [dict(frame) for frame in source_frames]
+            original_duration = float(source_frames[-1]["timeStamp"] - source_frames[0]["timeStamp"])
+            operator_duration = max(
+                0.0,
+                (len(frames) - 1)
+                * float(self.playback_tuning().get(
+                    "command_interval_s",
+                    PLAYBACK_DEFAULT_COMMAND_INTERVAL_SEC,
+                )),
+            )
+            timing = type("OperatorTiming", (), {
+                "original_duration_s": original_duration,
+                "retimed_duration_s": operator_duration,
+                "time_scale": 1.0,
+                "is_original_timing_feasible": True,
+            })()
         source_t0_traj = float(source_frames[0]["timeStamp"])
         t0_traj = float(frames[0]["timeStamp"])
         total_dur = float(frames[-1]["timeStamp"] - t0_traj)
@@ -953,8 +1133,12 @@ class TrajectoryRecorder:
             [float(f["timeStamp"]) - source_t0_traj for f in source_frames]
         )
         execution_profile = self._playback_execution_profile()
-        target_t = self._fast_repeat_schedule_times(frames, target_t)
-        if execution_profile == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT:
+        if not self._use_recorded_timing():
+            target_t = self._operator_schedule_times(frames)
+            total_dur = float(target_t[-1]) if len(target_t) else 0.0
+        else:
+            target_t = self._fast_repeat_schedule_times(frames, target_t)
+        if self._use_recorded_timing() and execution_profile == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT:
             total_dur = max(total_dur, float(target_t[-1]) if len(target_t) else 0.0)
         lookahead = self._lookahead_seconds(target_t)
 
@@ -1404,16 +1588,20 @@ class TrajectoryRecorder:
                 and plan.queued_commands[command_idx].target_time_s <= elapsed + plan.lookahead_s
             ):
                 compiled = plan.queued_commands[command_idx]
-                self._send(compiled.command)
+                command = self._apply_runtime_tuning_to_command(
+                    compiled.command,
+                    is_final=command_idx == len(plan.queued_commands) - 1,
+                )
+                self._send(command)
                 self._emit_playback_event(
                     "waypoint_queued",
                     index=compiled.index,
-                    command=compiled.command,
+                    command=command,
                     target_time_s=compiled.target_time_s,
                     original_target_time_s=compiled.original_target_time_s,
                     elapsed_s=float(elapsed),
-                    speed_j=compiled.speed_j,
-                    cp=compiled.cp,
+                    speed_j=int(self.playback_tuning().get("speed_j", compiled.speed_j)),
+                    cp=int(self.playback_tuning().get("cp", compiled.cp)),
                     frame=frames[compiled.index],
                 )
                 

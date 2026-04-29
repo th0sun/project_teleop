@@ -174,10 +174,8 @@ class MainWindow(QMainWindow):
         # Teach panel signals
         self._teach.goto_waypoint.connect(self._on_teach_goto)
         self._teach.send_waypoint.connect(self._on_teach_send_waypoint)
-        self._teach.play_frame.connect(self._on_teach_frame)
         self._teach.teach_job_requested.connect(self._on_teach_job_requested)
-        self._teach.play_started.connect(self._on_teach_play_started)
-        self._teach.play_stopped.connect(self._on_teach_play_stopped)
+        self._teach.teach_tuning_requested.connect(self._on_teach_tuning_requested)
 
         # Panel → ROS / commands
         self._panel.send_joints.connect(self._send_joints_to_ros)
@@ -196,6 +194,7 @@ class MainWindow(QMainWindow):
     def _on_viewport_joints(self, joints: list):
         """Viewport (EE drag) → update panel sliders + stream to ROS."""
         self._disable_feedback_follow('viewport realtime input')
+        self._viewport.set_ghost_joints(None)
         self._panel.set_joints(joints)
         self._teach.set_current_joints(joints)
         if self._ros.connected:
@@ -209,6 +208,7 @@ class MainWindow(QMainWindow):
     def _on_panel_joints(self, joints: list):
         """Panel slider → update viewport + stream to ROS."""
         self._disable_feedback_follow('panel realtime input')
+        self._viewport.set_ghost_joints(None)
         self._viewport.set_joints(joints)
         self._teach.set_current_joints(joints)
         if self._ros.connected:
@@ -217,6 +217,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(list)
     def _on_teach_goto(self, joints: list):
         """Teach panel: preview a waypoint in the local 3-D view only."""
+        self._viewport.set_ghost_joints(None)
         self._viewport.set_joints(joints)
         self._panel.set_joints(joints)
         self._teach.set_current_joints(joints)
@@ -230,34 +231,12 @@ class MainWindow(QMainWindow):
         self._teach.set_current_joints(joints)
         if self._ros.connected:
             self._ros.publish_joint_cmd(joints)
-            self._viewport.set_ghost_joints(joints)
             self.statusBar().showMessage('Teach waypoint sent as live target.', 2500)
         else:
             self.statusBar().showMessage('ROS bridge offline — waypoint shown locally only.', 2500)
 
-    @pyqtSlot(list)
-    def _on_teach_frame(self, joints: list):
-        """Teach panel: replay one frame locally and stream it if connected."""
-        self._disable_feedback_follow('live preview playback')
-        self._viewport.set_joints(joints)
-        self._panel.set_joints(joints)
-        self._teach.set_current_joints(joints)
-        if self._ros.connected:
-            self._ros.publish_joint_cmd(joints)
-
-    def _on_teach_play_started(self):
-        if self._ros.connected:
-            self._sb_ros.setText('▶ Live preview streaming...')
-            self.statusBar().showMessage('Live preview streaming /unity/joint_cmd.', 3000)
-        else:
-            self._sb_ros.setText('▶ Local preview...')
-            self.statusBar().showMessage('Local preview only — ROS bridge offline.', 3000)
-
-    def _on_teach_play_stopped(self):
-        self._sb_ros.setText('ROS: online' if self._ros.connected else 'ROS: offline')
-
-    @pyqtSlot(str, dict)
-    def _on_teach_job_requested(self, action: str, trajectory: dict):
+    @pyqtSlot(str, dict, dict)
+    def _on_teach_job_requested(self, action: str, trajectory: dict, options: dict):
         """Teach panel: send a Unity-format /teach/job_request payload."""
         if not self._ros.connected:
             self.statusBar().showMessage('ROS-TCP not connected — cannot send teach job.', 4000)
@@ -268,7 +247,7 @@ class MainWindow(QMainWindow):
             self._enable_feedback_follow('teach_execute')
         else:
             self._disable_feedback_follow(f'teach_{action}')
-        job_id = self._ros.publish_teach_job_request(action, trajectory)
+        job_id = self._ros.publish_teach_job_request(action, trajectory, options=options)
         if job_id:
             frame_count = len(trajectory.get('frames', []))
             self.statusBar().showMessage(
@@ -277,13 +256,27 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage('Teach job send failed: ROS bridge offline.', 4000)
 
+    @pyqtSlot(dict)
+    def _on_teach_tuning_requested(self, options: dict):
+        """Teach panel: update speed/acc/CP for commands not sent yet."""
+        if not self._ros.connected:
+            return
+        job_id = self._ros.publish_teach_job_request(
+            'tune',
+            {'filename': 'runtime_tuning', 'frames': []},
+            options=options,
+        )
+        if job_id:
+            self.statusBar().showMessage(
+                f'Playback tuning update sent (job_id={job_id[:8]})',
+                1500)
+
     @pyqtSlot()
     def _send_joints_to_ros(self):
         joints = self._viewport.get_joints()
         self._disable_feedback_follow('manual send joints')
         if self._ros.connected:
             self._ros.publish_joint_cmd(joints.tolist())
-            self._viewport.set_ghost_joints(joints.tolist())
             self.statusBar().showMessage(
                 f'Sent → J1:{joints[0]:.1f}°  J2:{joints[1]:.1f}°'
                 f'  J3:{joints[2]:.1f}°  J4:{joints[3]:.1f}°', 3000)
@@ -378,6 +371,7 @@ class MainWindow(QMainWindow):
             self._disable_feedback_follow('disconnected')
 
     def _enable_feedback_follow(self, reason: str, samples: int = 0):
+        self._viewport.set_ghost_joints(None)
         self._feedback_follow_reason = reason
         self._feedback_sync_samples_remaining = int(samples)
 

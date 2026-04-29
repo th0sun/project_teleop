@@ -214,6 +214,9 @@ class TrajectoryRecorderTest(unittest.TestCase):
         slow_frame = {"timeStamp": 0.20, "j1": 2.0, "j2": 0.0, "j3": 0.0, "j4": 0.0}
         fast_frame = {"timeStamp": 0.05, "j1": 5.0, "j2": 0.0, "j3": 0.0, "j4": 0.0}
 
+        self.assertEqual(recorder._segment_speed_j(prev_frame, slow_frame), 40)
+
+        recorder.set_playback_tuning({"use_recorded_timing": True})
         slow_speed = recorder._segment_speed_j(prev_frame, slow_frame)
         fast_speed = recorder._segment_speed_j(prev_frame, fast_frame)
 
@@ -265,20 +268,25 @@ class TrajectoryRecorderTest(unittest.TestCase):
         # may be collapsed into fewer commands than 2.  The key invariant is
         # that we get at least 1 queued command and the plan compiles.
         self.assertGreaterEqual(len(plan.queued_commands), 1)
-        self.assertAlmostEqual(plan.total_duration_s, 0.3)
+        self.assertAlmostEqual(plan.total_duration_s, 0.36)
         self.assertTrue(plan.original_timing_feasible)
         # Last command must settle (CP=0)
         self.assertEqual(plan.queued_commands[-1].cp, 0)
 
-    def test_fastest_path_repeat_uses_fast_caps_instead_of_hand_timestamps(self):
+    def test_operator_tuning_uses_fixed_speed_instead_of_hand_timestamps(self):
         self._set_simplify_tolerance(0.0)
         self._set_mixed_primitives(False)
-        self._set_execution_profile("fastest_path_repeat")
         recorder = TrajectoryRecorder(
             command_send_fn=lambda cmd: True,
             logger=FakeLogger(),
             traj_dir=self.temp_dir.name,
         )
+        recorder.set_playback_tuning({
+            "speed_j": 55,
+            "acc_j": 65,
+            "cp": 25,
+            "command_interval_s": 0.2,
+        })
         recorder.load_frames(
             [
                 {"timeStamp": 0.0, "j1": 0.0, "j2": 0.0, "j3": 0.0, "j4": 0.0},
@@ -291,13 +299,12 @@ class TrajectoryRecorderTest(unittest.TestCase):
         plan = recorder.compile_loaded_plan()
         payload = compiled_playback_plan_to_dict(plan)
 
-        self.assertEqual(plan.execution_profile, "fastest_path_repeat")
-        self.assertEqual(payload["execution_profile"], "fastest_path_repeat")
-        self.assertEqual([cmd.speed_j for cmd in plan.queued_commands], [100, 100])
+        self.assertEqual(payload["execution_profile"], plan.execution_profile)
+        self.assertEqual([cmd.speed_j for cmd in plan.queued_commands], [55, 55])
         self.assertLess(plan.queued_commands[0].target_time_s, 2.0)
         self.assertLess(plan.queued_commands[1].target_time_s, 4.0)
-        self.assertIn("AccJ=100", plan.queued_commands[0].command)
-        self.assertIn("CP=100", plan.queued_commands[0].command)
+        self.assertIn("AccJ=65", plan.queued_commands[0].command)
+        self.assertIn("CP=25", plan.queued_commands[0].command)
         self.assertIn("CP=0", plan.queued_commands[-1].command)
 
     def test_compile_loaded_plan_includes_robot_neutral_io_events(self):
@@ -581,7 +588,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(len(io), 1)
         # Retimed event time should land roughly at the midpoint of the
         # simplified 0→1.0s path.  Allow ±0.1s slack for retiming math.
-        self.assertAlmostEqual(io[0][1]["target_time_s"], 0.5, delta=0.1)
+        self.assertAlmostEqual(io[0][1]["target_time_s"], 0.09, delta=0.02)
 
     def test_translate_digital_event_raises_when_vacuum_port_misconfigured(self):
         import mg400_controller.common.config.motion_config as cfg
@@ -708,9 +715,10 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(len(sent_commands), 3)
         self.assertIn("SpeedJ=20", sent_commands[0])  # go-to-start
         self.assertIn("JointMovJ(2.0000", sent_commands[1])
-        self.assertIn("SpeedJ=15", sent_commands[1])  # 2 deg / 0.2 s fits below min preview speed
+        self.assertIn("SpeedJ=40", sent_commands[1])
+        self.assertIn("AccJ=80", sent_commands[1])
         self.assertIn("JointMovJ(10.0000", sent_commands[2])
-        self.assertIn("SpeedJ=89", sent_commands[2])  # 8 deg / 0.1 s -> 80 deg/s of 90 deg/s at SpeedJ=100
+        self.assertIn("SpeedJ=40", sent_commands[2])
         self.assertIn("CP=0", sent_commands[2])  # final command should settle, not blend
         self.assertEqual(events[0][0], "go_to_start_command")
         self.assertEqual(events[1][0], "playback_start")
@@ -757,7 +765,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertEqual(len(io_events), 1)
         self.assertEqual(io_events[0][1]["channel"], "green_light")
 
-    def test_play_worker_retimes_too_fast_segments_instead_of_decimating(self):
+    def test_play_worker_uses_operator_tuning_instead_of_retiming_hand_speed(self):
         self._set_mixed_primitives(False)  # Test JointMovJ-only pipeline
         sent_commands = []
         events = []
@@ -785,14 +793,15 @@ class TrajectoryRecorderTest(unittest.TestCase):
 
         self.assertEqual(len(sent_commands), 2)
         self.assertIn("JointMovJ(30.0000", sent_commands[1])
-        self.assertIn("SpeedJ=100", sent_commands[1])
+        self.assertIn("SpeedJ=40", sent_commands[1])
+        self.assertIn("AccJ=80", sent_commands[1])
         playback_start = events[1][1]
-        self.assertFalse(playback_start["original_timing_feasible"])
+        self.assertTrue(playback_start["original_timing_feasible"])
         self.assertAlmostEqual(playback_start["original_duration_s"], 0.05)
-        self.assertAlmostEqual(playback_start["retimed_duration_s"], 30.0 / 90.0)
+        self.assertAlmostEqual(playback_start["retimed_duration_s"], 0.18)
         queued = [event for event in events if event[0] == "waypoint_queued"]
         self.assertAlmostEqual(queued[0][1]["original_target_time_s"], 0.05)
-        self.assertAlmostEqual(queued[0][1]["target_time_s"], 30.0 / 90.0, places=5)
+        self.assertAlmostEqual(queued[0][1]["target_time_s"], 0.18, places=5)
 
     def test_converts_unity_joint_trajectory_msg_to_internal_degree_frames(self):
         class Duration:
