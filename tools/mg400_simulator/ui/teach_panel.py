@@ -257,11 +257,34 @@ class TeachPanel(QWidget):
         if stage == 'failed':
             self._job_timeout_timer.stop()
             suffix = f' [{error_code}]' if error_code else ''
-            self._set_job_state('failed', (message or 'Teach job failed') + suffix)
+            detail = self._status_detail(metadata)
+            text = (message or 'Teach job failed') + suffix
+            if detail:
+                text += f' | {detail}'
+            self._set_job_state('failed', text)
             return
 
         if message:
             self._job_status_lbl.setText(message)
+
+    @staticmethod
+    def _status_detail(metadata: dict) -> str:
+        parts = []
+        if 'final_max_error_deg' in metadata and metadata.get('final_max_error_deg') is not None:
+            try:
+                parts.append(f"final err {float(metadata['final_max_error_deg']):.2f}°")
+            except (TypeError, ValueError):
+                pass
+        if 'final_robot_mode' in metadata and metadata.get('final_robot_mode') is not None:
+            parts.append(f"mode {metadata['final_robot_mode']}")
+        if 'elapsed_s' in metadata and metadata.get('elapsed_s') is not None:
+            try:
+                parts.append(f"{float(metadata['elapsed_s']):.1f}s")
+            except (TypeError, ValueError):
+                pass
+        if metadata.get('queue_flushed'):
+            parts.append('queue flushed')
+        return ', '.join(parts)
 
     # ── Waypoint operations ───────────────────────────────────────────────────
 

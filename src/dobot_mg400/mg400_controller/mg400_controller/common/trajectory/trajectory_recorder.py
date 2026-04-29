@@ -78,6 +78,8 @@ PREVIEW_START_TOLERANCE_DEG = 3.0
 PREVIEW_FINAL_TOLERANCE_DEG = 0.05
 PREVIEW_FINAL_EXTRA_TIMEOUT_SEC = 2.0
 PREVIEW_ABSOLUTE_TIMEOUT_SEC = 10.0
+PREVIEW_TIMEOUT_PER_COMMAND_SEC = 0.35
+PREVIEW_MAX_TIMEOUT_MARGIN_SEC = 60.0
 PREVIEW_POLL_SEC = 0.01
 PREVIEW_WAIT_POLL_SEC = 0.05
 PREVIEW_LOOKAHEAD_MIN_SEC = 0.10
@@ -1329,8 +1331,14 @@ class TrajectoryRecorder:
 
         return elapsed >= total_dur + PREVIEW_FINAL_EXTRA_TIMEOUT_SEC
 
-    def _playback_timed_out(self, elapsed, total_dur):
-        return elapsed >= total_dur + PREVIEW_ABSOLUTE_TIMEOUT_SEC
+    def _playback_timeout_margin(self, command_count: Optional[int] = None) -> float:
+        margin = PREVIEW_ABSOLUTE_TIMEOUT_SEC
+        if command_count is not None:
+            margin = max(margin, float(command_count) * PREVIEW_TIMEOUT_PER_COMMAND_SEC)
+        return min(margin, PREVIEW_MAX_TIMEOUT_MARGIN_SEC)
+
+    def _playback_timed_out(self, elapsed, total_dur, command_count: Optional[int] = None):
+        return elapsed >= total_dur + self._playback_timeout_margin(command_count)
 
     def _play_worker(self):
         """Execute a precompiled playback job while publishing monitoring data."""
@@ -1439,7 +1447,7 @@ class TrajectoryRecorder:
                 and self._playback_complete(True, elapsed, total_dur, target_q)
             ):
                 break
-            if self._playback_timed_out(elapsed, total_dur):
+            if self._playback_timed_out(elapsed, total_dur, len(plan.queued_commands)):
                 break
                 
             self._sleep_fn(PREVIEW_POLL_SEC) # 100Hz interpolation and polling loop
@@ -1449,7 +1457,7 @@ class TrajectoryRecorder:
         elapsed_total = float(self._time_fn() - t_start)
         timed_out = bool(
             not self._stop_flag.is_set()
-            and self._playback_timed_out(elapsed_total, total_dur)
+            and self._playback_timed_out(elapsed_total, total_dur, len(plan.queued_commands))
             and (
                 final_max_error is None
                 or final_max_error > PREVIEW_FINAL_TOLERANCE_DEG
