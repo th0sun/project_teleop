@@ -22,7 +22,9 @@ Usage from ``project_teleop``:
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
+import html
 import json
 import math
 import os
@@ -72,6 +74,8 @@ DEFAULT_TRAJECTORIES = (
     _WORKSPACE / "_supporting_materials/data/trajectories/json_trajectories/Pick_place_1.json",
     _WORKSPACE / "_supporting_materials/data/trajectories/json_trajectories/Pick_place_2.json",
 )
+
+DEFAULT_JSON_DIR = _WORKSPACE / "_supporting_materials/data/trajectories/json_trajectories"
 
 NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 
@@ -1240,6 +1244,220 @@ def _default_out_dir() -> Path:
     return _WORKSPACE / "_supporting_materials/generated" / f"teach_filter_analysis_{stamp}"
 
 
+def _config_override_map(args) -> dict:
+    overrides = {}
+    if args.use_mixed_primitives:
+        overrides["USE_MIXED_PRIMITIVES"] = True
+    if args.joint_only:
+        overrides["USE_MIXED_PRIMITIVES"] = False
+    if args.disable_arc:
+        overrides["SEGMENT_ENABLE_ARC"] = False
+    if args.enable_arc:
+        overrides["SEGMENT_ENABLE_ARC"] = True
+    if args.simplify_tol_deg is not None:
+        overrides["PATH_SIMPLIFY_TOLERANCE_DEG"] = float(args.simplify_tol_deg)
+    if args.line_tol_mm is not None:
+        overrides["SEGMENT_LINE_TOLERANCE_MM"] = float(args.line_tol_mm)
+    if args.arc_tol_mm is not None:
+        overrides["SEGMENT_ARC_TOLERANCE_MM"] = float(args.arc_tol_mm)
+    if args.raw_fit_tol_mm is not None:
+        overrides["SEGMENT_RAW_FIT_TOLERANCE_MM"] = float(args.raw_fit_tol_mm)
+    if args.r_tol_deg is not None:
+        overrides["SEGMENT_R_TOLERANCE_DEG"] = float(args.r_tol_deg)
+    if args.max_arc_radius_mm is not None:
+        overrides["SEGMENT_MAX_ARC_RADIUS_MM"] = float(args.max_arc_radius_mm)
+    return overrides
+
+
+def _apply_motion_config_overrides(overrides: dict) -> dict:
+    previous = {}
+    for name, value in overrides.items():
+        previous[name] = getattr(motion_config, name)
+        setattr(motion_config, name, value)
+    return previous
+
+
+def _restore_motion_config(previous: dict) -> None:
+    for name, value in previous.items():
+        setattr(motion_config, name, value)
+
+
+def _relative_path(path: Path, base: Path) -> str:
+    try:
+        return path.relative_to(base).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _html_escape(value) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _render_review_html(index_path: Path, summaries: Sequence[dict], out_dir: Path) -> Path:
+    """Write a small offline review GUI for primitive decisions.
+
+    The page deliberately has no dependencies.  It lets the operator inspect
+    every command segment, assign an override/label, add a note, and download
+    the annotations JSON for the next tuning pass.
+    """
+    rows = []
+    options = ("auto", "line", "arc", "joint", "split", "reject")
+    for traj_idx, summary in enumerate(summaries):
+        outputs = summary["outputs"]
+        fig_rel = _relative_path(Path(outputs["figure_png"]), out_dir)
+        detail_rels = [_relative_path(Path(p), out_dir) for p in outputs.get("segment_detail_pngs", [])]
+        counts = summary["command_type_counts"]
+        rows.append(
+            "<section class='trajectory'>"
+            f"<h2>{_html_escape(Path(summary['source']).name)}</h2>"
+            "<div class='summary'>"
+            f"raw <b>{summary['raw_waypoint_count']}</b> -> kept <b>{summary['kept_waypoint_count']}</b> "
+            f"-> commands <b>{summary['queued_command_count']}</b> | "
+            f"J {counts.get('JointMovJ', 0)} / L {counts.get('MovL', 0)} / A {counts.get('Arc', 0)} | "
+            f"max raw fit <b>{max((cmd['raw_fit_max_mm'] for cmd in summary['commands']), default=0.0):.2f} mm</b>"
+            "</div>"
+            f"<img class='overview' src='{_html_escape(fig_rel)}' alt='overview'>"
+        )
+        if detail_rels:
+            rows.append("<details open><summary>Per-command fit pages</summary>")
+            for rel in detail_rels:
+                rows.append(f"<img class='detail' src='{_html_escape(rel)}' alt='segment detail'>")
+            rows.append("</details>")
+
+        rows.append("<table><thead><tr>"
+                    "<th>#</th><th>auto</th><th>raw</th><th>fit max/mean</th>"
+                    "<th>command</th><th>your label</th><th>note</th>"
+                    "</tr></thead><tbody>")
+        for cmd in summary["commands"]:
+            row_id = f"t{traj_idx}_c{cmd['ordinal']}"
+            option_html = "".join(
+                f"<option value='{opt}'>{opt}</option>"
+                for opt in options
+            )
+            rows.append(
+                "<tr>"
+                f"<td>{cmd['ordinal']}</td>"
+                f"<td><span class='pill {cmd['type']}'>{_html_escape(cmd['type'])}</span></td>"
+                f"<td>{cmd['raw_start_index']}->{cmd['raw_end_index']}</td>"
+                f"<td>{cmd['raw_fit_max_mm']:.2f}/{cmd['raw_fit_mean_mm']:.2f} mm</td>"
+                f"<td><code>{_html_escape(cmd['command'])}</code></td>"
+                f"<td><select data-row='{row_id}' data-kind='label'>{option_html}</select></td>"
+                f"<td><input data-row='{row_id}' data-kind='note' placeholder='เช่น ควร split / arc ฝั่งซ้าย'></td>"
+                "</tr>"
+            )
+        rows.append("</tbody></table></section>")
+
+    payload = base64.b64encode(json.dumps(summaries, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    html_text = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Teach Filter Review</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; background: #f6f7f9; color: #1f2933; }}
+h1 {{ margin-bottom: 4px; }}
+.toolbar {{ position: sticky; top: 0; z-index: 3; background: #f6f7f9; padding: 12px 0; border-bottom: 1px solid #d8dee8; }}
+button {{ border: 0; background: #1f6feb; color: white; border-radius: 6px; padding: 9px 12px; cursor: pointer; margin-right: 8px; }}
+button.secondary {{ background: #4b5563; }}
+.trajectory {{ background: white; border: 1px solid #d8dee8; border-radius: 8px; padding: 16px; margin: 18px 0 28px; box-shadow: 0 1px 3px rgba(15,23,42,.05); }}
+.summary {{ margin: 8px 0 12px; color: #4b5563; }}
+img.overview {{ width: 100%; max-width: 1450px; display: block; border: 1px solid #e5e7eb; border-radius: 6px; background: white; }}
+img.detail {{ width: 100%; max-width: 1450px; display: block; margin: 12px 0; border: 1px solid #e5e7eb; border-radius: 6px; background: white; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 13px; }}
+th, td {{ border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: top; padding: 8px; }}
+th {{ background: #f3f4f6; position: sticky; top: 60px; z-index: 2; }}
+code {{ white-space: pre-wrap; word-break: break-word; color: #334155; }}
+input, select {{ width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #cbd5e1; border-radius: 5px; }}
+.pill {{ display: inline-block; min-width: 68px; text-align: center; border-radius: 99px; padding: 3px 8px; color: white; font-weight: 700; font-size: 12px; }}
+.Arc {{ background: #dc2626; }}
+.MovL {{ background: #2563eb; }}
+.JointMovJ {{ background: #7c3aed; }}
+.hint {{ color: #6b7280; max-width: 980px; line-height: 1.45; }}
+</style>
+</head>
+<body>
+<h1>Teach Filter Review</h1>
+<p class="hint">สี/label: <b>A/Arc</b> = โค้ง Dobot Arc, <b>L/MovL</b> = เส้นตรง Cartesian, <b>J/JointMovJ</b> = fallback รายจุด. เลือก label/note แล้วกด Download annotations เพื่อเอากลับไป tuning ได้.</p>
+<div class="toolbar">
+  <button onclick="downloadAnnotations()">Download annotations JSON</button>
+  <button class="secondary" onclick="clearAnnotations()">Clear local choices</button>
+  <span id="saveState" class="hint"></span>
+</div>
+{''.join(rows)}
+<script>
+const summaries = JSON.parse(atob("{payload}"));
+const storageKey = "teach-filter-review:" + location.pathname;
+function loadState() {{
+  let state = {{}};
+  try {{ state = JSON.parse(localStorage.getItem(storageKey) || "{{}}"); }} catch (e) {{ state = {{}}; }}
+  document.querySelectorAll("[data-row]").forEach(el => {{
+    const row = el.dataset.row;
+    const kind = el.dataset.kind;
+    if (state[row] && state[row][kind] !== undefined) el.value = state[row][kind];
+    el.addEventListener("input", saveState);
+    el.addEventListener("change", saveState);
+  }});
+}}
+function saveState() {{
+  const state = {{}};
+  document.querySelectorAll("[data-row]").forEach(el => {{
+    const row = el.dataset.row;
+    const kind = el.dataset.kind;
+    state[row] = state[row] || {{}};
+    state[row][kind] = el.value;
+  }});
+  localStorage.setItem(storageKey, JSON.stringify(state));
+  document.getElementById("saveState").textContent = "saved locally";
+}}
+function collectAnnotations() {{
+  let state = {{}};
+  try {{ state = JSON.parse(localStorage.getItem(storageKey) || "{{}}"); }} catch (e) {{ state = {{}}; }}
+  const annotations = [];
+  summaries.forEach((summary, ti) => {{
+    summary.commands.forEach(cmd => {{
+      const row = `t${{ti}}_c${{cmd.ordinal}}`;
+      const entry = state[row] || {{}};
+      if ((entry.label && entry.label !== "auto") || entry.note) {{
+        annotations.push({{
+          source: summary.source,
+          ordinal: cmd.ordinal,
+          raw_start_index: cmd.raw_start_index,
+          raw_end_index: cmd.raw_end_index,
+          auto_type: cmd.type,
+          user_label: entry.label || "auto",
+          note: entry.note || "",
+          command: cmd.command,
+          raw_fit_max_mm: cmd.raw_fit_max_mm,
+          raw_fit_mean_mm: cmd.raw_fit_mean_mm
+        }});
+      }}
+    }});
+  }});
+  return {{ generated_at: new Date().toISOString(), annotations }};
+}}
+function downloadAnnotations() {{
+  const blob = new Blob([JSON.stringify(collectAnnotations(), null, 2)], {{ type: "application/json" }});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "teach_filter_annotations.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}}
+function clearAnnotations() {{
+  localStorage.removeItem(storageKey);
+  document.querySelectorAll("[data-row]").forEach(el => el.value = el.tagName === "SELECT" ? "auto" : "");
+  document.getElementById("saveState").textContent = "cleared";
+}}
+loadState();
+</script>
+</body>
+</html>
+"""
+    index_path.write_text(html_text, encoding="utf-8")
+    return index_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Visualize the production teach-and-repeat filtering pipeline."
@@ -1249,6 +1467,11 @@ def main() -> int:
         action="append",
         default=[],
         help="Trajectory JSON to analyze. Repeat for multiple files. Defaults to money/Pick_place_1/Pick_place_2.",
+    )
+    parser.add_argument(
+        "--all-json",
+        action="store_true",
+        help="Analyze every *.json file in _supporting_materials/data/trajectories/json_trajectories.",
     )
     parser.add_argument(
         "--out-dir",
@@ -1272,11 +1495,32 @@ def main() -> int:
     parser.add_argument("--scene-avoid-clearance-mm", type=float, default=20.0)
     parser.add_argument("--scene-max-raise-mm", type=float, default=240.0)
     parser.add_argument("--scene-raise-step-mm", type=float, default=2.0)
+    parser.add_argument("--use-mixed-primitives", action="store_true", help="Temporarily enable MovL/Arc analysis mode.")
+    parser.add_argument("--joint-only", action="store_true", help="Temporarily force JointMovJ-only analysis mode.")
+    parser.add_argument("--enable-arc", action="store_true", help="Temporarily enable Arc classification.")
+    parser.add_argument("--disable-arc", action="store_true", help="Temporarily disable Arc classification.")
+    parser.add_argument("--simplify-tol-deg", type=float, default=None, help="Override PATH_SIMPLIFY_TOLERANCE_DEG.")
+    parser.add_argument("--line-tol-mm", type=float, default=None, help="Override SEGMENT_LINE_TOLERANCE_MM.")
+    parser.add_argument("--arc-tol-mm", type=float, default=None, help="Override SEGMENT_ARC_TOLERANCE_MM.")
+    parser.add_argument("--raw-fit-tol-mm", type=float, default=None, help="Override SEGMENT_RAW_FIT_TOLERANCE_MM.")
+    parser.add_argument("--r-tol-deg", type=float, default=None, help="Override SEGMENT_R_TOLERANCE_DEG.")
+    parser.add_argument("--max-arc-radius-mm", type=float, default=None, help="Override SEGMENT_MAX_ARC_RADIUS_MM.")
+    parser.add_argument("--no-html-review", action="store_true", help="Skip the offline HTML review UI.")
     args = parser.parse_args()
 
     sources = [Path(p).expanduser().resolve() for p in args.trajectory_json]
+    if args.all_json:
+        sources.extend(sorted(DEFAULT_JSON_DIR.glob("*.json")))
     if not sources:
         sources = [p.resolve() for p in DEFAULT_TRAJECTORIES]
+    # Preserve order but remove duplicates when --all-json and explicit paths overlap.
+    deduped_sources = []
+    seen = set()
+    for source in sources:
+        if source not in seen:
+            deduped_sources.append(source)
+            seen.add(source)
+    sources = deduped_sources
     missing = [p for p in sources if not p.is_file()]
     if missing:
         for path in missing:
@@ -1289,39 +1533,51 @@ def main() -> int:
     if scene_model is not None and not scene_model.is_file():
         print(f"missing scene repair model: {scene_model}", file=sys.stderr)
         return 2
+    overrides = _config_override_map(args)
+    previous_config = _apply_motion_config_overrides(overrides)
+    if overrides:
+        print("analysis config overrides:")
+        for name, value in sorted(overrides.items()):
+            print(f"  {name}={value}")
     all_summaries = []
-    for source in sources:
-        print(f"\n=== analyzing {source.name} ===")
-        summary = _analyze_one(
-            source,
-            out_dir,
-            points_dir,
-            scene_model=scene_model,
-            scene_contact_clearance_mm=args.scene_contact_clearance_mm,
-            scene_avoid_clearance_mm=args.scene_avoid_clearance_mm,
-            scene_max_raise_mm=args.scene_max_raise_mm,
-            scene_raise_step_mm=args.scene_raise_step_mm,
-        )
-        all_summaries.append(summary)
-        counts = summary["command_type_counts"]
-        print(
-            f"{source.name}: raw {summary['raw_waypoint_count']} -> "
-            f"kept {summary['kept_waypoint_count']} -> "
-            f"commands {summary['queued_command_count']} "
-            f"(JointMovJ={counts.get('JointMovJ', 0)}, "
-            f"MovL={counts.get('MovL', 0)}, Arc={counts.get('Arc', 0)})"
-        )
-        repair = summary["scene_repair"]
-        if repair["enabled"]:
-            print(
-                f"  scene repair: {repair['repaired_frame_count']} frame(s), "
-                f"max raise {repair['max_raise_observed_mm']:.1f} mm"
+    try:
+        for source in sources:
+            print(f"\n=== analyzing {source.name} ===")
+            summary = _analyze_one(
+                source,
+                out_dir,
+                points_dir,
+                scene_model=scene_model,
+                scene_contact_clearance_mm=args.scene_contact_clearance_mm,
+                scene_avoid_clearance_mm=args.scene_avoid_clearance_mm,
+                scene_max_raise_mm=args.scene_max_raise_mm,
+                scene_raise_step_mm=args.scene_raise_step_mm,
             )
-        print(f"  figure: {summary['outputs']['figure_png']}")
-        print(f"  points: {summary['outputs']['real_robot_points_txt']}")
+            all_summaries.append(summary)
+            counts = summary["command_type_counts"]
+            print(
+                f"{source.name}: raw {summary['raw_waypoint_count']} -> "
+                f"kept {summary['kept_waypoint_count']} -> "
+                f"commands {summary['queued_command_count']} "
+                f"(JointMovJ={counts.get('JointMovJ', 0)}, "
+                f"MovL={counts.get('MovL', 0)}, Arc={counts.get('Arc', 0)})"
+            )
+            repair = summary["scene_repair"]
+            if repair["enabled"]:
+                print(
+                    f"  scene repair: {repair['repaired_frame_count']} frame(s), "
+                    f"max raise {repair['max_raise_observed_mm']:.1f} mm"
+                )
+            print(f"  figure: {summary['outputs']['figure_png']}")
+            print(f"  points: {summary['outputs']['real_robot_points_txt']}")
+    finally:
+        _restore_motion_config(previous_config)
 
     index_path = out_dir / "teach_filter_analysis_index.json"
     index_path.write_text(json.dumps(all_summaries, indent=2, ensure_ascii=False) + "\n")
+    if not args.no_html_review:
+        html_path = _render_review_html(out_dir / "teach_filter_review.html", all_summaries, out_dir)
+        print(f"review_html: {html_path}")
     print(f"\nindex: {index_path}")
     return 0
 
