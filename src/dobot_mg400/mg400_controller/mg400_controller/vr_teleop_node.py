@@ -17,7 +17,6 @@ from std_msgs.msg import String, Float64MultiArray, Int64, Int32, Bool
 import threading
 import numpy as np
 import time
-import datetime
 import json
 import os
 
@@ -55,14 +54,12 @@ from mg400_controller.common.utils.collision_haptic import CollisionHaptic
 from mg400_controller.common.trajectory.trajectory_recorder import TrajectoryRecorder
 from mg400_controller.common.trajectory.trajectory_recorder import frames_from_joint_trajectory_msg
 from mg400_controller.common.trajectory.teach_job_handler import TeachJobHandler
-from mg400_controller.common.utils.teleop_logger import TeleopLogger
 from mg400_controller.common.logic.safety_monitor import SafetyMonitor
 from mg400_controller.common.logic.scene_safety_guard import SceneSafetyGuard
 from mg400_controller.common.logic.teleop_controller import TeleopController
 from mg400_controller.common.utils.latency_analyzer import LatencyAnalyzer
 from mg400_controller.common.utils.clock_calibrator import ClockCalibrator
 from mg400_controller.common.utils.mode_selection import select_control_mode
-from mg400_controller.common.utils.async_event_logger import AsyncEventLogger
 from mg400_controller.common.utils.unified_triple_logger import (
     UnifiedTripleLogger,
     prompt_enable_triple_logging,
@@ -110,10 +107,6 @@ class TeleopNode(Node):
         self.ros_publishers = create_publishers(self, topics=self.topics)
         self.create_timer(1.0, self._publish_heartbeat) # 1Hz Ping
 
-        # --- Analytics Logging (Async) ---
-        self.csv_filename = f"teleop_analytics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        self.analytics_logger = None
-
         # Cross-layer timestamp contract:
         # - T1/T2/T3/T4/T5 and CSV log timestamps are ROS-local wall seconds.
         # - perf_counter is used only for control-loop intervals and stuck logic.
@@ -121,31 +114,15 @@ class TeleopNode(Node):
         self.unity_send_time = 0.0   # T1: Unity send time calibrated into ROS wall time
 
         self._tool_query_counter = 0
-        self._sample_counter = 0  # For triple-layer logger decimation
+        self._sample_counter = 0  # For session logger feedback decimation
 
-        # File Logger
-        self.teleop_logger = TeleopLogger("~/project_teleop_ws/logs")
-        self.analytics_logger = AsyncEventLogger(
-            csv_path=self.csv_filename,
-            csv_header=[
-                'Timestamp_ROS_Wall', 'Timestamp_Unity_ROS_Wall',
-                'Raw_J1', 'Raw_J2', 'Raw_J3', 'Raw_J4',
-                'Pred_J1', 'Pred_J2', 'Pred_J3', 'Pred_J4',
-            ],
-            handlers={
-                'TELEOP_LATENCY': self.teleop_logger.log_latency_breakdown,
-                'TELEOP_PERF': self.teleop_logger.log_performance_metrics,
-            },
-        )
-
-        # --- Triple-Layer Logger (Unity → ROS2 → Robot) ---
+        # --- One-file Teleop Session Logger (Unity → ROS2 → Robot) ---
         self.triple_logger = None
         if prompt_enable_triple_logging():
             self.triple_logger = UnifiedTripleLogger()
-            self.get_logger().info(f"🔬 Triple-layer logging enabled: {self.triple_logger.file_path}")
-
-        self.get_logger().info(f"📊 Logging analytics to: {self.csv_filename} (Async Thread Started)")
-        self.get_logger().info(f" Logging to: {self.teleop_logger.log_dir}")
+            self.get_logger().info(f"Teleop session logging enabled: {self.triple_logger.file_path}")
+        else:
+            self.get_logger().info("Teleop session logging disabled")
 
         # 2. Setup ROS Interfaces
         qos_profile = QoSProfile(
@@ -385,17 +362,14 @@ class TeleopNode(Node):
             except Exception:
                 pass
 
-            # --- Log to CSV (Async) ---
-            self.analytics_logger.put('CSV', [
-                now_ros_sec, corrected_unity_time,
-                q_safe[0], q_safe[1], q_safe[2], q_safe[3],
-                q_compensated_safe[0], q_compensated_safe[1], q_compensated_safe[2], q_compensated_safe[3]
-            ])
-
-            # --- Triple-Layer Log: Unity Layer ---
             if self.triple_logger:
-                unity_joints_deg = tuple(np.degrees(q_safe))
-                self.triple_logger.log_unity_only(unity_joints_deg, now_ros_sec)
+                self.triple_logger.log_unity_target(
+                    q_safe,
+                    q_compensated_safe,
+                    unity_send_time_sec,
+                    corrected_unity_time,
+                    now_ros_sec,
+                )
 
             # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
             self.latest_target = q_compensated_safe          # Latency-compensated target
@@ -701,11 +675,6 @@ class TeleopNode(Node):
             now = time.perf_counter()
             now_wall = time.time()
 
-            # --- Triple-Layer Log: Robot Layer (periodic, ~10Hz decimated) ---
-            if self.triple_logger and self._sample_counter % 5 == 0:
-                robot_joints_deg = tuple(np.degrees(q_current))
-                self.triple_logger.log_robot_feedback(robot_joints_deg, ros_timestamp=now_wall)
-
             # === TEACH & REPEAT GATING ===
             # is_blocked: during playback OR during post-stop homing (5 s window)
             tr = self.trajectory_recorder
@@ -767,6 +736,15 @@ class TeleopNode(Node):
             err_msg.data = int(err_info['error_status'])
             self.ros_publishers.error_status.publish(err_msg)
 
+            if self.triple_logger and self._sample_counter % 5 == 0:
+                self.triple_logger.log_robot_feedback(
+                    q_current,
+                    ros_timestamp=now_wall,
+                    robot_mode=current_mode,
+                    error_status=err_info['error_status'],
+                    joints_are_degrees=False,
+                )
+
             # === PERIODIC TOOL INDEX QUERY (every ~5s at 50Hz = 250 cycles) ===
             self._tool_query_counter += 1
             if self._tool_query_counter >= 250:
@@ -819,15 +797,8 @@ class TeleopNode(Node):
                         # CLI Log
                         self.get_logger().info(report)
 
-                        # CSV Log (Async)
-                        self.analytics_logger.put('TELEOP_LATENCY', [
-                            now_wall, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
-                            metrics['network_ms'], metrics['decision_ms'], metrics['command_ms'],
-                            metrics['response_ms'], metrics['motion_time_ms'], metrics['execution_ms'],
-                            metrics['e2e_ms'],
-                            metrics['target'], metrics['final_q'],
-                            metrics['final_error'], metrics['max_error'], metrics['velocity'], metrics['is_valid']
-                        ])
+                        if self.triple_logger:
+                            self.triple_logger.log_latency_event(metrics)
 
             # === SKIP TELEOP COMMANDS DURING PLAYBACK / POST-STOP HOMING ===
             if is_blocked:
@@ -878,20 +849,6 @@ class TeleopNode(Node):
                 t3_cmd_send = time.time()
                 # 3. Send to Robot
                 if self.sender.send(cmd_str):
-                    # --- Triple-Layer Log: ROS Command Layer ---
-                    if self.triple_logger:
-                        ros_cmd_joints_deg = tuple(np.degrees(q_safe))
-                        unity_joints_deg = (
-                            tuple(np.degrees(self.latest_target))
-                            if self.latest_target is not None
-                            else None
-                        )
-                        self.triple_logger.log_ros_cmd(
-                            ros_cmd_joints_deg,
-                            unity_joints_deg,
-                            t3_cmd_send,
-                        )
-
                     # Start Tracking (T1-T3)
                     self.latency_analyzer.start_tracking(
                         self.unity_send_time,
@@ -919,6 +876,25 @@ class TeleopNode(Node):
 
                     robot_status = self.feedback.get_error_status()
 
+                    if self.triple_logger:
+                        self.triple_logger.log_ros_cmd(
+                            q_safe,
+                            self.latest_target,
+                            t3_cmd_send,
+                            t1_unity_send_ros_wall=self.unity_send_time,
+                            t2_ros_recv_wall=self.target_recv_time,
+                            network_delay_ms=network_delay_ms,
+                            decision_delay_ms=decision_delay_ms,
+                            send_reason=send_reason,
+                            robot_mode=robot_status['robot_mode'],
+                            error_status=robot_status['error_status'],
+                            queue_backlog_rad=queue_backlog_rad,
+                            run_queued_cmd=run_queued_cmd,
+                            time_since_last_cmd_ms=time_since_last * 1000.0,
+                            velocity_mag_rad_s=velocity_mag,
+                            joints_are_degrees=False,
+                        )
+
                     # CLI Report
                     msg = self.latency_analyzer.format_sent_report(
                         should_send, send_reason, q_current, self.latest_target,
@@ -939,32 +915,18 @@ class TeleopNode(Node):
                     # Update State in Controller
                     self.controller.mark_command_sent(q_safe, sent_mono)
 
-                    self.analytics_logger.put('TELEOP_PERF', [
-                        t3_cmd_send, self.unity_send_time, self.target_recv_time, t3_cmd_send,
-                        network_delay_ms, decision_delay_ms,
-                        q_current, self.latest_target,
-                        dist_to_last, send_reason,
-                        time_since_last, velocity_mag, self.controller.robot_velocity
-                    ])
-
     def shutdown(self):
         """ปิดทุกอย่างอย่างเรียบร้อย"""
         self.get_logger().info("Shutting down...")
         self.stop_event.set()
 
-        if self.analytics_logger:
-            self.analytics_logger.close(timeout=1.0)
-
-        # --- Close Triple-Layer Logger ---
         if self.triple_logger:
             self.triple_logger.close()
-            self.get_logger().info(f"🔬 Closed triple-layer log: {self.triple_logger.file_path}")
+            self.get_logger().info(f"Closed teleop session log: {self.triple_logger.file_path}")
 
         self.feedback.stop()
         self.interactive.stop()
         self.connection.disconnect()
-
-        self.get_logger().info(f"📊 Closed analytics log: {self.csv_filename}")
 
     def execute_motion_command(self, q_target):
         """

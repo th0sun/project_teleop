@@ -678,8 +678,8 @@ max(abs(QActual - last_sent_target)) < base + velocity * lookahead
   `sender.send(...)` succeeds, through `mark_command_sent(...)`.
 - runtime mode selection was moved to
   `mg400_controller.common.utils.mode_selection.select_control_mode()`.
-- background CSV/event logging was moved to
-  `mg400_controller.common.utils.async_event_logger.AsyncEventLogger()`.
+- teleop experiment logging now uses one event-style session CSV through
+  `mg400_controller.common.utils.unified_triple_logger.UnifiedTripleLogger`.
 - Unity latency compensation was moved to
   `mg400_controller.common.logic.target_compensator.TargetLatencyCompensator()`.
 - ROS publisher/subscriber setup was moved to the ROS interface layer:
@@ -737,9 +737,32 @@ Latency logs use one shared cross-layer clock:
 `time.perf_counter()` is still used inside the control loop for intervals,
 rate control, stuck detection, and command spacing. It must not be written into
 cross-layer latency columns because it cannot be compared with Unity/ROS wall
-timestamps. `teleop_latency_*.csv`, `teleop_struct_*.csv`, the async analytics
-CSV, and `unified_triple_log_*.csv` now label their wall-clock columns
-explicitly.
+timestamps.
+
+For experiments, the node asks once at startup whether to record a session log.
+When enabled, it writes one event-style CSV:
+
+```text
+logs/teleop_sessions/teleop_session_YYYYMMDD_HHMMSS.csv
+```
+
+The important event types are:
+
+- `unity_target`: Unity raw joint target plus ROS latency-compensated target.
+- `ros_command`: command sent to the MG400 TCP layer plus queue/network/decision
+  context.
+- `robot_feedback`: decimated robot or mock feedback samples.
+- `latency_arrival`: T1-T5 end-to-end arrival metrics.
+
+Use `tools/analyze_teleop_session.py` to turn that single CSV into report-ready
+numbers and figures:
+
+```bash
+python3 tools/analyze_teleop_session.py logs/teleop_sessions/teleop_session_*.csv
+```
+
+It generates `summary.md`, `summary_metrics.csv/json`, Cartesian samples, joint
+plots, latency plots, Cartesian error plots, and a 3D TCP path plot.
 
 ## Validation
 

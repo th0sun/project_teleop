@@ -1,278 +1,431 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""Single-file teleop session logger.
+
+This logger replaces the older split logs for day-to-day experiments:
+
+- teleop_analytics_*.csv: Unity raw target vs compensated target
+- teleop_struct_*.csv: send decision and network/decision latency
+- teleop_latency_*.csv: T1-T5 arrival latency
+- unified_triple_log_*.csv: Unity / ROS command / robot feedback comparison
+
+The file is an event log.  Each row has an ``event_type`` and a shared schema,
+so one session can be analyzed without opening several CSVs.
 """
-🔬 Unified Triple-Layer Logger (Unity → ROS2 → Robot)
 
-บันทึกข้อมูลจาก 3 เลเยอร์พร้อมกัน เพื่อ validate ความตรงกัน:
-- Layer 1: Unity (target ที่ส่งมาจาก VR/Controller)
-- Layer 2: ROS2 (command ที่ ROS ส่งให้หุ่น)
-- Layer 3: Robot (actual position ที่หุ่นรายงานกลับ)
+from __future__ import annotations
 
-File format: unified_triple_log_YYYYMMDD_HHMMSS.csv
-"""
-
-import os
 import csv
-import time
+import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Iterable, Optional
+
 import numpy as np
 
 
+JOINT_COUNT = 4
+
+FLOW_LABELS = {
+    "unity_target": ("Unity", "ROS", "Unity -> ROS target receive"),
+    "ros_command": ("ROS", "MG400 TCP", "ROS -> MG400 command send"),
+    "robot_feedback": ("MG400 feedback", "ROS", "MG400 -> ROS feedback"),
+    "latency_arrival": ("Unity", "MG400 feedback", "Unity -> MG400 target reached"),
+    "full_sync": ("Unity / ROS / MG400", "analysis", "3-layer sync sample"),
+}
+
+
 class UnifiedTripleLogger:
-    """
-    Synchronized 3-layer logger for cross-validation between
-    Unity virtual model, ROS planning layer, and real robot state.
-    """
-    
-    def __init__(self, log_dir: str = None):
-        """
-        Initialize triple-layer logger
-        
-        Args:
-            log_dir: Directory to save log files (default: project_teleop/logs/triple_layer)
-        """
+    """Canonical one-file logger for Unity -> ROS -> MG400 experiments."""
+
+    def __init__(self, log_dir: str | None = None):
         if log_dir is None:
-            # Default: save to project_teleop/logs/triple_layer (relative to CWD)
-            log_dir = os.path.abspath("./logs/triple_layer")
+            log_dir = os.path.abspath("./logs/teleop_sessions")
         else:
             log_dir = os.path.expanduser(log_dir)
-        
+
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Generate filename with timestamp
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.file_path = self.log_dir / f"unified_triple_log_{timestamp}.csv"
-        
-        # CSV file handle
-        self._file = None
-        self._writer = None
+        self.file_path = self.log_dir / f"teleop_session_{timestamp}.csv"
+
+        self._file = open(self.file_path, mode="w", newline="")
+        self._writer = csv.writer(self._file)
         self._lock = threading.Lock()
-        
-        # Sample counter
         self._sample_count = 0
         self._start_time = time.time()
-        
-        # Initialize CSV
-        self._init_csv()
-        
-    def _init_csv(self):
-        """Initialize CSV file with headers"""
-        self._file = open(self.file_path, mode='w', newline='')
-        self._writer = csv.writer(self._file)
-        
-        # Timestamp contract:
-        # - ros_timestamp is ROS-local wall-clock seconds (time.time()).
-        # - elapsed_sec is only for within-file plotting.
-        # - Monotonic/perf_counter values must not be written here because this
-        #   file is used to compare Unity, ROS command, and robot feedback rows.
-        header = [
-            'sample_id',
-            'elapsed_sec',
-            'ros_wall_timestamp',
-            # Layer 1: Unity (Input from user/VR)
-            'unity_j1_deg', 'unity_j2_deg', 'unity_j3_deg', 'unity_j4_deg',
-            # Layer 2: ROS2 (Command sent to robot)
-            'ros_cmd_j1_deg', 'ros_cmd_j2_deg', 'ros_cmd_j3_deg', 'ros_cmd_j4_deg',
-            # Layer 3: Robot (Actual feedback)
-            'robot_j1_deg', 'robot_j2_deg', 'robot_j3_deg', 'robot_j4_deg',
-            # Deltas for validation
-            'delta_unity_ros_j1', 'delta_unity_ros_j2', 'delta_unity_ros_j3', 'delta_unity_ros_j4',
-            'delta_ros_robot_j1', 'delta_ros_robot_j2', 'delta_ros_robot_j3', 'delta_ros_robot_j4',
-        ]
-        self._writer.writerow(header)
+
+        self._last_unity_raw_rad: list[float | None] = [None] * JOINT_COUNT
+        self._last_unity_comp_rad: list[float | None] = [None] * JOINT_COUNT
+        self._last_ros_cmd_rad: list[float | None] = [None] * JOINT_COUNT
+        self._last_robot_rad: list[float | None] = [None] * JOINT_COUNT
+
+        self._writer.writerow(self._header())
         self._file.flush()
-        
-    def log_sample(
-        self,
-        unity_joints: Optional[Tuple[float, float, float, float]] = None,
-        ros_cmd_joints: Optional[Tuple[float, float, float, float]] = None,
-        robot_joints: Optional[Tuple[float, float, float, float]] = None,
-        ros_timestamp: Optional[float] = None,
-    ):
-        """
-        Log one synchronized sample from all 3 layers
-        
-        Args:
-            unity_joints: (j1,j2,j3,j4) in degrees from Unity
-            ros_cmd_joints: (j1,j2,j3,j4) in degrees that ROS sent
-            robot_joints: (j1,j2,j3,j4) in degrees from robot feedback
-            ros_timestamp: ROS time when sample was captured
-        """
+
+    @staticmethod
+    def _header() -> list[str]:
+        common = [
+            "sample_id",
+            "event_type",
+            "source_layer",
+            "target_layer",
+            "flow_label",
+            "notes",
+            "elapsed_sec",
+            "ros_wall_timestamp",
+            "unity_raw_timestamp",
+            "t1_unity_send_ros_wall",
+            "t2_ros_recv_wall",
+            "t3_cmd_send_wall",
+            "t4_motion_start_wall",
+            "t5_target_reached_wall",
+            "network_delay_ms",
+            "decision_delay_ms",
+            "command_latency_ms",
+            "robot_response_ms",
+            "motion_time_ms",
+            "motion_execution_ms",
+            "true_end_to_end_ms",
+            "send_reason",
+            "robot_mode",
+            "error_status",
+            "queue_backlog_rad",
+            "run_queued_cmd",
+            "time_since_last_cmd_ms",
+            "velocity_mag_rad_s",
+            "final_error_rad",
+            "max_joint_error_rad",
+            "is_valid_arrival",
+        ]
+        joint_groups = []
+        for prefix in (
+            "unity_raw",
+            "unity_compensated",
+            "ros_cmd",
+            "robot",
+            "delta_unity_comp_to_ros_cmd",
+            "delta_ros_cmd_to_robot",
+        ):
+            for unit in ("rad", "deg"):
+                for idx in range(1, JOINT_COUNT + 1):
+                    joint_groups.append(f"{prefix}_j{idx}_{unit}")
+        return common + joint_groups
+
+    @staticmethod
+    def _joint4(values: Optional[Iterable[float]]) -> list[float | None]:
+        if values is None:
+            return [None] * JOINT_COUNT
+        arr = list(values)[:JOINT_COUNT]
+        if len(arr) < JOINT_COUNT:
+            arr.extend([None] * (JOINT_COUNT - len(arr)))
+        return arr
+
+    @staticmethod
+    def _deg(values: list[float | None]) -> list[float | None]:
+        out: list[float | None] = []
+        for value in values:
+            out.append(None if value is None else float(np.degrees(value)))
+        return out
+
+    @staticmethod
+    def _delta(a: list[float | None], b: list[float | None]) -> list[float | None]:
+        out: list[float | None] = []
+        for left, right in zip(a, b):
+            if left is None or right is None:
+                out.append(None)
+            else:
+                out.append(left - right)
+        return out
+
+    @staticmethod
+    def _fmt(value, digits: int = 6) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)):
+            return f"{float(value):.{digits}f}"
+        return str(value)
+
+    def _write_event(self, event_type: str, **fields) -> None:
         with self._lock:
             self._sample_count += 1
             elapsed = time.time() - self._start_time
-            ros_ts = ros_timestamp if ros_timestamp is not None else time.time()
-            
-            # Convert to lists (handle None)
-            unity = list(unity_joints) if unity_joints else [None, None, None, None]
-            ros_cmd = list(ros_cmd_joints) if ros_cmd_joints else [None, None, None, None]
-            robot = list(robot_joints) if robot_joints else [None, None, None, None]
-            
-            # Calculate deltas (only if both values exist)
-            delta_unity_ros = []
-            delta_ros_robot = []
-            
-            for i in range(4):
-                # Unity vs ROS
-                if unity[i] is not None and ros_cmd[i] is not None:
-                    delta_unity_ros.append(unity[i] - ros_cmd[i])
-                else:
-                    delta_unity_ros.append(None)
-                    
-                # ROS vs Robot
-                if ros_cmd[i] is not None and robot[i] is not None:
-                    delta_ros_robot.append(ros_cmd[i] - robot[i])
-                else:
-                    delta_ros_robot.append(None)
-            
+            ros_ts = fields.get("ros_wall_timestamp")
+            if ros_ts is None:
+                ros_ts = time.time()
+
+            raw = fields.get("unity_raw_rad")
+            comp = fields.get("unity_compensated_rad")
+            cmd = fields.get("ros_cmd_rad")
+            robot = fields.get("robot_rad")
+
+            if raw is not None:
+                self._last_unity_raw_rad = self._joint4(raw)
+            if comp is not None:
+                self._last_unity_comp_rad = self._joint4(comp)
+            if cmd is not None:
+                self._last_ros_cmd_rad = self._joint4(cmd)
+            if robot is not None:
+                self._last_robot_rad = self._joint4(robot)
+
+            delta_unity_cmd = self._delta(self._last_unity_comp_rad, self._last_ros_cmd_rad)
+            delta_cmd_robot = self._delta(self._last_ros_cmd_rad, self._last_robot_rad)
+            source, target, flow = FLOW_LABELS.get(event_type, ("", "", ""))
+
             row = [
                 self._sample_count,
-                f"{elapsed:.6f}",
-                f"{ros_ts:.6f}",
-                # Unity
-                *[f"{v:.4f}" if v is not None else "" for v in unity],
-                # ROS Command
-                *[f"{v:.4f}" if v is not None else "" for v in ros_cmd],
-                # Robot
-                *[f"{v:.4f}" if v is not None else "" for v in robot],
-                # Deltas
-                *[f"{v:.4f}" if v is not None else "" for v in delta_unity_ros],
-                *[f"{v:.4f}" if v is not None else "" for v in delta_ros_robot],
+                event_type,
+                fields.get("source_layer") or source,
+                fields.get("target_layer") or target,
+                fields.get("flow_label") or flow,
+                fields.get("notes") or "",
+                self._fmt(elapsed, 6),
+                self._fmt(ros_ts, 6),
+                self._fmt(fields.get("unity_raw_timestamp"), 6),
+                self._fmt(fields.get("t1_unity_send_ros_wall"), 6),
+                self._fmt(fields.get("t2_ros_recv_wall"), 6),
+                self._fmt(fields.get("t3_cmd_send_wall"), 6),
+                self._fmt(fields.get("t4_motion_start_wall"), 6),
+                self._fmt(fields.get("t5_target_reached_wall"), 6),
+                self._fmt(fields.get("network_delay_ms"), 3),
+                self._fmt(fields.get("decision_delay_ms"), 3),
+                self._fmt(fields.get("command_latency_ms"), 3),
+                self._fmt(fields.get("robot_response_ms"), 3),
+                self._fmt(fields.get("motion_time_ms"), 3),
+                self._fmt(fields.get("motion_execution_ms"), 3),
+                self._fmt(fields.get("true_end_to_end_ms"), 3),
+                fields.get("send_reason") or "",
+                self._fmt(fields.get("robot_mode"), 0),
+                self._fmt(fields.get("error_status"), 0),
+                self._fmt(fields.get("queue_backlog_rad"), 6),
+                self._fmt(fields.get("run_queued_cmd"), 0),
+                self._fmt(fields.get("time_since_last_cmd_ms"), 3),
+                self._fmt(fields.get("velocity_mag_rad_s"), 6),
+                self._fmt(fields.get("final_error_rad"), 6),
+                self._fmt(fields.get("max_joint_error_rad"), 6),
+                self._fmt(fields.get("is_valid_arrival")),
             ]
-            
+
+            groups = [
+                self._last_unity_raw_rad,
+                self._last_unity_comp_rad,
+                self._last_ros_cmd_rad,
+                self._last_robot_rad,
+                delta_unity_cmd,
+                delta_cmd_robot,
+            ]
+            for group in groups:
+                row.extend(self._fmt(v, 6) for v in group)
+                row.extend(self._fmt(v, 4) for v in self._deg(group))
+
             self._writer.writerow(row)
-            
-            # Flush every 100 samples
             if self._sample_count % 100 == 0:
                 self._file.flush()
-                
-    def log_unity_only(self, unity_joints: Tuple[float, float, float, float], ros_timestamp: float):
-        """Log when only Unity data is available (no command sent yet)"""
-        self.log_sample(unity_joints=unity_joints, ros_timestamp=ros_timestamp)
-        
-    def log_ros_cmd(self, ros_cmd_joints: Tuple[float, float, float, float], unity_joints: Optional[Tuple] = None, ros_timestamp: float = None):
-        """Log when ROS sends command to robot"""
-        self.log_sample(unity_joints=unity_joints, ros_cmd_joints=ros_cmd_joints, ros_timestamp=ros_timestamp)
-        
-    def log_robot_feedback(self, robot_joints: Tuple[float, float, float, float], ros_cmd_joints: Optional[Tuple] = None, ros_timestamp: float = None):
-        """Log when robot feedback arrives"""
-        self.log_sample(ros_cmd_joints=ros_cmd_joints, robot_joints=robot_joints, ros_timestamp=ros_timestamp)
-        
-    def log_full_sync(
+
+    def log_unity_target(
         self,
-        unity_joints: Tuple[float, float, float, float],
-        ros_cmd_joints: Tuple[float, float, float, float],
-        robot_joints: Tuple[float, float, float, float],
-        ros_timestamp: float,
-    ):
-        """Log complete synchronized sample (all 3 layers)"""
-        self.log_sample(unity_joints, ros_cmd_joints, robot_joints, ros_timestamp)
-        
-    def close(self):
-        """Close log file"""
+        unity_raw_rad,
+        unity_compensated_rad,
+        unity_raw_timestamp: float,
+        unity_ros_timestamp: float,
+        ros_recv_timestamp: float,
+    ) -> None:
+        self._write_event(
+            "unity_target",
+            ros_wall_timestamp=ros_recv_timestamp,
+            unity_raw_timestamp=unity_raw_timestamp,
+            t1_unity_send_ros_wall=unity_ros_timestamp,
+            t2_ros_recv_wall=ros_recv_timestamp,
+            network_delay_ms=max(0.0, (ros_recv_timestamp - unity_ros_timestamp) * 1000.0),
+            unity_raw_rad=unity_raw_rad,
+            unity_compensated_rad=unity_compensated_rad,
+        )
+
+    def log_unity_only(self, unity_joints, ros_timestamp: float) -> None:
+        """Backward-compatible wrapper. Input is in degrees."""
+        self._write_event(
+            "unity_target",
+            ros_wall_timestamp=ros_timestamp,
+            unity_raw_rad=np.radians(self._joint4(unity_joints)),
+            unity_compensated_rad=np.radians(self._joint4(unity_joints)),
+        )
+
+    def log_ros_cmd(
+        self,
+        ros_cmd_joints,
+        unity_joints=None,
+        ros_timestamp: float | None = None,
+        *,
+        t1_unity_send_ros_wall: float | None = None,
+        t2_ros_recv_wall: float | None = None,
+        network_delay_ms: float | None = None,
+        decision_delay_ms: float | None = None,
+        send_reason: str | None = None,
+        robot_mode: int | None = None,
+        error_status: int | None = None,
+        queue_backlog_rad: float | None = None,
+        run_queued_cmd: int | None = None,
+        time_since_last_cmd_ms: float | None = None,
+        velocity_mag_rad_s: float | None = None,
+        joints_are_degrees: bool = True,
+    ) -> None:
+        cmd_rad = np.radians(self._joint4(ros_cmd_joints)) if joints_are_degrees else self._joint4(ros_cmd_joints)
+        unity_comp_rad = None
+        if unity_joints is not None:
+            unity_comp_rad = np.radians(self._joint4(unity_joints)) if joints_are_degrees else self._joint4(unity_joints)
+        self._write_event(
+            "ros_command",
+            ros_wall_timestamp=ros_timestamp,
+            t1_unity_send_ros_wall=t1_unity_send_ros_wall,
+            t2_ros_recv_wall=t2_ros_recv_wall,
+            t3_cmd_send_wall=ros_timestamp,
+            network_delay_ms=network_delay_ms,
+            decision_delay_ms=decision_delay_ms,
+            send_reason=send_reason,
+            robot_mode=robot_mode,
+            error_status=error_status,
+            queue_backlog_rad=queue_backlog_rad,
+            run_queued_cmd=run_queued_cmd,
+            time_since_last_cmd_ms=time_since_last_cmd_ms,
+            velocity_mag_rad_s=velocity_mag_rad_s,
+            unity_compensated_rad=unity_comp_rad,
+            ros_cmd_rad=cmd_rad,
+        )
+
+    def log_robot_feedback(
+        self,
+        robot_joints,
+        ros_cmd_joints=None,
+        ros_timestamp: float | None = None,
+        *,
+        robot_mode: int | None = None,
+        error_status: int | None = None,
+        joints_are_degrees: bool = True,
+    ) -> None:
+        robot_rad = np.radians(self._joint4(robot_joints)) if joints_are_degrees else self._joint4(robot_joints)
+        cmd_rad = None
+        if ros_cmd_joints is not None:
+            cmd_rad = np.radians(self._joint4(ros_cmd_joints)) if joints_are_degrees else self._joint4(ros_cmd_joints)
+        self._write_event(
+            "robot_feedback",
+            ros_wall_timestamp=ros_timestamp,
+            robot_mode=robot_mode,
+            error_status=error_status,
+            ros_cmd_rad=cmd_rad,
+            robot_rad=robot_rad,
+        )
+
+    def log_latency_event(self, metrics: dict) -> None:
+        self._write_event(
+            "latency_arrival",
+            ros_wall_timestamp=metrics.get("now"),
+            t1_unity_send_ros_wall=metrics.get("t1"),
+            t2_ros_recv_wall=metrics.get("t2"),
+            t3_cmd_send_wall=metrics.get("t3"),
+            t4_motion_start_wall=metrics.get("t4"),
+            t5_target_reached_wall=metrics.get("t5"),
+            network_delay_ms=metrics.get("network_ms"),
+            decision_delay_ms=metrics.get("decision_ms"),
+            command_latency_ms=metrics.get("command_ms"),
+            robot_response_ms=metrics.get("response_ms"),
+            motion_time_ms=metrics.get("motion_time_ms"),
+            motion_execution_ms=metrics.get("execution_ms"),
+            true_end_to_end_ms=metrics.get("e2e_ms"),
+            velocity_mag_rad_s=metrics.get("velocity"),
+            final_error_rad=metrics.get("final_error"),
+            max_joint_error_rad=metrics.get("max_error"),
+            is_valid_arrival=metrics.get("is_valid"),
+            ros_cmd_rad=metrics.get("target"),
+            robot_rad=metrics.get("final_q"),
+        )
+
+    def log_full_sync(self, unity_joints, ros_cmd_joints, robot_joints, ros_timestamp: float) -> None:
+        """Backward-compatible full-sync row. Inputs are in degrees."""
+        self._write_event(
+            "full_sync",
+            ros_wall_timestamp=ros_timestamp,
+            unity_raw_rad=np.radians(self._joint4(unity_joints)),
+            unity_compensated_rad=np.radians(self._joint4(unity_joints)),
+            ros_cmd_rad=np.radians(self._joint4(ros_cmd_joints)),
+            robot_rad=np.radians(self._joint4(robot_joints)),
+        )
+
+    def close(self) -> None:
         with self._lock:
             if self._file and not self._file.closed:
                 self._file.flush()
                 self._file.close()
-                
+
     def get_summary(self) -> str:
-        """Get summary of logged data"""
         elapsed = time.time() - self._start_time
-        return (
-            f"🔬 Triple-Layer Log: {self._sample_count} samples "
-            f"({elapsed:.1f}s) → {self.file_path.name}"
-        )
-        
+        return f"Teleop session log: {self._sample_count} rows ({elapsed:.1f}s) -> {self.file_path.name}"
+
     def __del__(self):
-        """Destructor - ensure file is closed"""
         self.close()
 
 
-# ── Interactive Prompt ─────────────────────────────────────────────────
-
 def prompt_enable_triple_logging() -> bool:
-    """
-    Interactive prompt to ask user if they want to enable 3-layer logging
-    Returns: True if logging should be enabled
-    """
+    """Ask whether to record the one-file teleop session log."""
     print("\n" + "=" * 60)
-    print("🔬 Unified Triple-Layer Logger")
+    print("Teleop Session Logger")
     print("=" * 60)
-    print("\nบันทึกข้อมูลจาก 3 เลเยอร์พร้อมกัน:")
-    print("  Layer 1: Unity (VR/Controller target)")
-    print("  Layer 2: ROS2 (Command sent to robot)")
-    print("  Layer 3: Robot (Actual feedback)")
-    print("\nใช้สำหรับ:")
-    print("  • Validate ความตรงกันระหว่างโมเดลกับหุ่นจริง")
-    print("  • วิเคราะห์ latency และ tracking error")
-    print("  • สร้างรีพอร์ตเปรียบเทียบ")
-    print("\nไฟล์บันทึก: ~/project_teleop_ws/logs/triple_layer/unified_triple_log_YYYYMMDD_HHMMSS.csv")
+    print("\nRecord one CSV for this run:")
+    print("  unity_target    : Unity raw target + ROS latency-compensated target")
+    print("  ros_command     : sent command + network/decision latency")
+    print("  robot_feedback  : 10 Hz robot/Mock feedback samples")
+    print("  latency_arrival : T1-T5 end-to-end arrival metrics")
+    print("\nFile: ./logs/teleop_sessions/teleop_session_YYYYMMDD_HHMMSS.csv")
     print("=" * 60)
-    
-    response = input("\nEnable 3-layer logging? [Y/n]: ").strip().lower()
-    return response in ('', 'y', 'yes', 'yes')
 
+    response = input("\nRecord teleop session log? [Y/n]: ").strip().lower()
+    return response in ("", "y", "yes")
 
-# ── Analysis Tools ─────────────────────────────────────────────────────
 
 def analyze_triple_log(file_path: str) -> dict:
-    """
-    Analyze a triple-layer log file and return statistics
-    
-    Returns dict with:
-        - total_samples
-        - avg_delta_unity_ros (per joint)
-        - avg_delta_ros_robot (per joint)
-        - max_delta_ros_robot (per joint)
-    """
-    import pandas as pd
-    
-    df = pd.read_csv(file_path)
-    
+    """Analyze a teleop session CSV and return simple delta statistics."""
+    with open(file_path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
     results = {
-        'total_samples': len(df),
-        'duration_sec': df['elapsed_sec'].max() if len(df) > 0 else 0,
+        "total_samples": len(rows),
+        "duration_sec": max((float(r.get("elapsed_sec") or 0.0) for r in rows), default=0.0),
     }
-    
-    # Calculate statistics for deltas
-    for i in range(1, 5):
-        unity_ros_col = f'delta_unity_ros_j{i}'
-        ros_robot_col = f'delta_ros_robot_j{i}'
-        
-        if unity_ros_col in df.columns:
-            valid_data = df[df[unity_ros_col].notna()][unity_ros_col]
-            if len(valid_data) > 0:
-                results[f'j{i}_unity_ros_mean'] = valid_data.mean()
-                results[f'j{i}_unity_ros_max'] = valid_data.abs().max()
-                
-        if ros_robot_col in df.columns:
-            valid_data = df[df[ros_robot_col].notna()][ros_robot_col]
-            if len(valid_data) > 0:
-                results[f'j{i}_ros_robot_mean'] = valid_data.mean()
-                results[f'j{i}_ros_robot_max'] = valid_data.abs().max()
-    
+    for i in range(1, JOINT_COUNT + 1):
+        for name in ("delta_unity_comp_to_ros_cmd", "delta_ros_cmd_to_robot"):
+            col = f"{name}_j{i}_rad"
+            valid = []
+            for row in rows:
+                value = row.get(col)
+                if value:
+                    try:
+                        valid.append(float(value))
+                    except ValueError:
+                        pass
+            if valid:
+                arr = np.asarray(valid, dtype=float)
+                results[f"j{i}_{name}_mean_rad"] = float(np.mean(arr))
+                results[f"j{i}_{name}_max_rad"] = float(np.max(np.abs(arr)))
     return results
 
 
 if __name__ == "__main__":
-    # Test the logger
     if prompt_enable_triple_logging():
         logger = UnifiedTripleLogger()
-        
-        # Simulate some data
         for i in range(10):
-            unity = (i * 0.5, i * 0.3, i * 0.2, i * 0.1)
-            ros_cmd = (i * 0.5 + 0.01, i * 0.3 + 0.01, i * 0.2 + 0.01, i * 0.1 + 0.01)
-            robot = (i * 0.5 + 0.02, i * 0.3 + 0.02, i * 0.2 + 0.02, i * 0.1 + 0.02)
-            
-            logger.log_full_sync(unity, ros_cmd, robot, time.time())
+            unity = np.radians((i * 0.5, i * 0.3, i * 0.2, i * 0.1))
+            ros_cmd = unity + np.radians((0.01, 0.01, 0.01, 0.01))
+            robot = unity + np.radians((0.02, 0.02, 0.02, 0.02))
+            logger.log_unity_target(unity, unity, time.time(), time.time(), time.time())
+            logger.log_ros_cmd(ros_cmd, unity, time.time(), joints_are_degrees=False)
+            logger.log_robot_feedback(robot, ros_timestamp=time.time(), joints_are_degrees=False)
             time.sleep(0.1)
-            
         print(logger.get_summary())
         logger.close()
-        print(f"\n✅ Log saved to: {logger.file_path}")
+        print(f"Log saved to: {logger.file_path}")
