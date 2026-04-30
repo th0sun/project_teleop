@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import os
 import sys
@@ -71,7 +72,12 @@ def _float(value) -> float:
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="") as fh:
-        return list(csv.DictReader(fh))
+        data_lines = [
+            line
+            for line in fh
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    return list(csv.DictReader(io.StringIO("".join(data_lines))))
 
 
 def _first_valid(values: Iterable[float]) -> float:
@@ -82,9 +88,17 @@ def _first_valid(values: Iterable[float]) -> float:
 
 
 def _time_axis(rows: list[dict[str, str]]) -> np.ndarray:
+    if not rows:
+        return np.array([], dtype=float)
+
     elapsed = np.array([_float(r.get("elapsed_sec")) for r in rows], dtype=float)
     if np.isfinite(elapsed).any():
         return np.nan_to_num(elapsed, nan=0.0)
+
+    timestamp = np.array([_float(r.get("Timestamp")) for r in rows], dtype=float)
+    if np.isfinite(timestamp).any():
+        first = _first_valid(timestamp)
+        return np.nan_to_num(timestamp - first, nan=0.0)
 
     stamp_key = "ros_wall_timestamp"
     if stamp_key not in rows[0] and "ros_timestamp" in rows[0]:
@@ -97,6 +111,11 @@ def _time_axis(rows: list[dict[str, str]]) -> np.ndarray:
 def _joint_matrix(rows: list[dict[str, str]], prefix: str) -> np.ndarray:
     values = np.full((len(rows), 4), np.nan, dtype=float)
     for row_idx, row in enumerate(rows):
+        if prefix == "robot" and all(f"J{i}" in row for i in range(1, 5)):
+            for joint_idx in range(1, 5):
+                values[row_idx, joint_idx - 1] = np.radians(_float(row.get(f"J{joint_idx}")))
+            continue
+
         for joint_idx, joint in enumerate(JOINTS, start=1):
             rad_key = f"{prefix}_{joint}_rad"
             deg_key = f"{prefix}_{joint}_deg"
@@ -138,6 +157,8 @@ def _norm_rows(values: np.ndarray) -> np.ndarray:
 
 
 def _event_type(row: dict[str, str]) -> str:
+    if all(key in row for key in ("Timestamp", "J1", "X", "Y", "Z")):
+        return "robot_feedback"
     return row.get("event_type") or "legacy_triple"
 
 
@@ -166,6 +187,12 @@ def _summary_stats(values: np.ndarray) -> dict[str, float | int | None]:
         "p95": float(np.percentile(valid, 95)),
         "max": float(np.max(valid)),
     }
+
+
+def _single_stat(value: float, unit: str) -> dict[str, float | int | None | str]:
+    if not np.isfinite(value):
+        return {"count": 0, "mean": None, "median": None, "p95": None, "max": None, "unit": unit}
+    return {"count": 1, "mean": float(value), "median": float(value), "p95": float(value), "max": float(value), "unit": unit}
 
 
 def _fk_xyz(joints_rad: np.ndarray) -> np.ndarray:
@@ -246,16 +273,21 @@ def _plot_joint_error(t, joints, out: Path) -> None:
     cmd = joints["ros_cmd"]
     robot = joints["robot"]
     mask = _finite_rows(cmd, robot)
+    plotted = False
     if mask.any():
         err_deg = np.degrees(cmd[mask] - robot[mask])
         for i in range(4):
             ax.plot(t[mask], err_deg[:, i], linewidth=1.1, label=f"J{i + 1}")
         ax.plot(t[mask], np.max(np.abs(err_deg), axis=1), color="black", linewidth=1.5, label="max abs")
+        plotted = True
+    else:
+        ax.text(0.5, 0.5, "No ROS command + robot feedback overlap", ha="center", va="center", transform=ax.transAxes)
     ax.set_title("ROS Command -> Robot Feedback Joint Error")
     ax.set_xlabel("time in session (s)")
     ax.set_ylabel("error (deg)")
     ax.grid(True, alpha=0.25)
-    ax.legend(ncol=5)
+    if plotted:
+        ax.legend(ncol=5)
     fig.tight_layout()
     fig.savefig(out, dpi=180)
     plt.close(fig)
@@ -317,16 +349,21 @@ def _plot_cartesian(t, xyz, out_xyz: Path, out_error: Path, out_3d: Path) -> Non
         ("unity_compensated", "robot", "Unity compensated -> Robot"),
         ("ros_cmd", "robot", "ROS command -> Robot"),
     ]
+    plotted = False
     for a, b, label in pairs:
         mask = _finite_rows(xyz[a], xyz[b])
         if mask.any():
             err = _norm_rows(xyz[a][mask] - xyz[b][mask])
             ax.plot(t[mask], err, linewidth=1.3, label=label)
+            plotted = True
+    if not plotted:
+        ax.text(0.5, 0.5, "No Cartesian layer overlap for error plot", ha="center", va="center", transform=ax.transAxes)
     ax.set_title("Cartesian Tracking Error")
     ax.set_xlabel("time in session (s)")
     ax.set_ylabel("3D error (mm)")
     ax.grid(True, alpha=0.25)
-    ax.legend()
+    if plotted:
+        ax.legend()
     fig.tight_layout()
     fig.savefig(out_error, dpi=180)
     plt.close(fig)
@@ -383,6 +420,11 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
     t = _time_axis(rows)
     joints = {layer: _fill_forward(_joint_matrix(rows, layer)) for layer in LAYERS}
     xyz = {layer: _fk_xyz(values) for layer, values in joints.items()}
+    if all(key in rows[0] for key in ("X", "Y", "Z")):
+        xyz["robot"] = np.asarray(
+            [[_float(row.get("X")), _float(row.get("Y")), _float(row.get("Z"))] for row in rows],
+            dtype=float,
+        )
 
     metrics: dict[str, dict] = {}
     for col in LATENCY_COLUMNS:
@@ -408,6 +450,34 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
         stat = _summary_stats(_norm_rows(xyz[a][mask] - xyz[b][mask]) if mask.any() else np.array([]))
         stat["unit"] = "mm"
         metrics[name] = stat
+
+    robot_xyz_mask = np.isfinite(xyz["robot"]).all(axis=1)
+    if robot_xyz_mask.any():
+        robot_xyz = xyz["robot"][robot_xyz_mask]
+        robot_t = t[robot_xyz_mask]
+        if len(robot_xyz) > 1:
+            segment_len = _norm_rows(np.diff(robot_xyz, axis=0))
+            dt = np.diff(robot_t)
+            speed = segment_len[dt > 0] / dt[dt > 0]
+            metrics["robot_tcp_path_length"] = _single_stat(float(np.sum(segment_len)), "mm")
+            stat = _summary_stats(speed)
+            stat["unit"] = "mm/s"
+            metrics["robot_tcp_speed"] = stat
+        x_range = float(np.nanmax(robot_xyz[:, 0]) - np.nanmin(robot_xyz[:, 0]))
+        y_range = float(np.nanmax(robot_xyz[:, 1]) - np.nanmin(robot_xyz[:, 1]))
+        z_range = float(np.nanmax(robot_xyz[:, 2]) - np.nanmin(robot_xyz[:, 2]))
+        metrics["robot_tcp_x_range"] = _single_stat(x_range, "mm")
+        metrics["robot_tcp_y_range"] = _single_stat(y_range, "mm")
+        metrics["robot_tcp_z_range"] = _single_stat(z_range, "mm")
+
+    if all(f"VJ{i}" in rows[0] for i in range(1, 5)):
+        joint_speed = np.asarray(
+            [max(abs(_float(row.get(f"VJ{i}"))) for i in range(1, 5)) for row in rows],
+            dtype=float,
+        )
+        stat = _summary_stats(joint_speed)
+        stat["unit"] = "deg/s"
+        metrics["robot_max_joint_speed"] = stat
 
     event_counts: dict[str, int] = {}
     for row in rows:
@@ -465,6 +535,10 @@ def _write_markdown_summary(path: Path, source: Path, rows, event_counts, metric
         _metric_line(metrics, "max_joint_error_ros_cmd_to_robot", "ROS command -> robot joint error"),
         _metric_line(metrics, "cartesian_error_unity_to_robot", "Unity target -> robot TCP error"),
         _metric_line(metrics, "cartesian_error_ros_cmd_to_robot", "ROS command -> robot TCP error"),
+        _metric_line(metrics, "robot_tcp_path_length", "Robot TCP path length"),
+        _metric_line(metrics, "robot_tcp_speed", "Robot TCP speed"),
+        _metric_line(metrics, "robot_max_joint_speed", "Robot max joint speed"),
+        _metric_line(metrics, "robot_tcp_z_range", "Robot TCP Z travel range"),
         "",
         "## Generated Figures",
         "",
