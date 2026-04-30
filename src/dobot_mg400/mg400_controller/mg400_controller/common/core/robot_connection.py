@@ -31,6 +31,12 @@ class RobotConnection:
         self.fb_sock = None
         self.connected = False
         self.dash_lock = threading.Lock() # Lock for Dashboard Port (29999) to avoid thread collision
+
+    def _send_dashboard_locked(self, command):
+        cmd_bytes = command.encode() if isinstance(command, str) else command
+        if not cmd_bytes.endswith(b'\n'):
+            cmd_bytes += b'\n'
+        self.dashboard.send(cmd_bytes)
     
     def connect(self):
         """เชื่อมต่อกับหุ่นยนต์ทั้ง 3 channels"""
@@ -73,9 +79,9 @@ class RobotConnection:
                 time.sleep(0.1)
 
                 # Unlock max robot speed limits via dashboard scalers.
-                self.dashboard.send((speed_factor(100).render() + "\n").encode())
-                self.dashboard.send((acc_j(100).render() + "\n").encode())
-                self.dashboard.send((speed_j(100).render() + "\n").encode())
+                self._send_dashboard_locked(speed_factor(100).render())
+                self._send_dashboard_locked(acc_j(100).render())
+                self._send_dashboard_locked(speed_j(100).render())
                 
                 self.logger.info("🟢 Robot Enabled and Speed Limits Unlocked")
                 return True
@@ -83,6 +89,21 @@ class RobotConnection:
                 self.logger.error(f"❌ Reconnect failed: {e}")
                 return False
         return False
+
+    def set_realtime_speed_defaults(self):
+        """Restore live teleop dashboard scalers after teach/replay tuning."""
+        if not self.connected:
+            return False
+        with self.dash_lock:
+            try:
+                self._send_dashboard_locked(speed_factor(100).render())
+                self._send_dashboard_locked(acc_j(100).render())
+                self._send_dashboard_locked(speed_j(100).render())
+                self.logger.info("🏃 Realtime speed defaults restored: SpeedFactor/AccJ/SpeedJ = 100")
+                return True
+            except Exception as e:
+                self.logger.warn(f"⚠️ Failed to restore realtime speed defaults: {e}")
+                return False
 
     def _reconnect_port(self, port_name):
         """Generic reconnect for a specific port"""

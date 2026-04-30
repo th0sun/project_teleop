@@ -63,6 +63,8 @@ class UnifiedTripleLogger:
         self._last_unity_comp_rad: list[float | None] = [None] * JOINT_COUNT
         self._last_ros_cmd_rad: list[float | None] = [None] * JOINT_COUNT
         self._last_robot_rad: list[float | None] = [None] * JOINT_COUNT
+        self._last_robot_tool_actual: list[float | None] = [None] * 6
+        self._last_robot_tool_target: list[float | None] = [None] * 6
 
         self._writer.writerow(self._header())
         self._file.flush()
@@ -75,6 +77,7 @@ class UnifiedTripleLogger:
             "source_layer",
             "target_layer",
             "flow_label",
+            "operation_mode",
             "notes",
             "elapsed_sec",
             "ros_wall_timestamp",
@@ -114,7 +117,11 @@ class UnifiedTripleLogger:
             for unit in ("rad", "deg"):
                 for idx in range(1, JOINT_COUNT + 1):
                     joint_groups.append(f"{prefix}_j{idx}_{unit}")
-        return common + joint_groups
+        tool_groups = []
+        for prefix in ("robot_tool_actual", "robot_tool_target"):
+            for name in ("x_mm", "y_mm", "z_mm", "r_deg", "aux5", "aux6"):
+                tool_groups.append(f"{prefix}_{name}")
+        return common + joint_groups + tool_groups
 
     @staticmethod
     def _joint4(values: Optional[Iterable[float]]) -> list[float | None]:
@@ -123,6 +130,15 @@ class UnifiedTripleLogger:
         arr = list(values)[:JOINT_COUNT]
         if len(arr) < JOINT_COUNT:
             arr.extend([None] * (JOINT_COUNT - len(arr)))
+        return arr
+
+    @staticmethod
+    def _tool6(values: Optional[Iterable[float]]) -> list[float | None]:
+        if values is None:
+            return [None] * 6
+        arr = list(values)[:6]
+        if len(arr) < 6:
+            arr.extend([None] * (6 - len(arr)))
         return arr
 
     @staticmethod
@@ -176,6 +192,13 @@ class UnifiedTripleLogger:
             if robot is not None:
                 self._last_robot_rad = self._joint4(robot)
 
+            robot_tool_actual = fields.get("robot_tool_actual")
+            robot_tool_target = fields.get("robot_tool_target")
+            if robot_tool_actual is not None:
+                self._last_robot_tool_actual = self._tool6(robot_tool_actual)
+            if robot_tool_target is not None:
+                self._last_robot_tool_target = self._tool6(robot_tool_target)
+
             delta_unity_cmd = self._delta(self._last_unity_comp_rad, self._last_ros_cmd_rad)
             delta_cmd_robot = self._delta(self._last_ros_cmd_rad, self._last_robot_rad)
             source, target, flow = FLOW_LABELS.get(event_type, ("", "", ""))
@@ -186,6 +209,7 @@ class UnifiedTripleLogger:
                 fields.get("source_layer") or source,
                 fields.get("target_layer") or target,
                 fields.get("flow_label") or flow,
+                fields.get("operation_mode") or "",
                 fields.get("notes") or "",
                 self._fmt(elapsed, 6),
                 self._fmt(ros_ts, 6),
@@ -225,6 +249,21 @@ class UnifiedTripleLogger:
             for group in groups:
                 row.extend(self._fmt(v, 6) for v in group)
                 row.extend(self._fmt(v, 4) for v in self._deg(group))
+
+            # ToolVectorActual/Target comes directly from the Dobot feedback packet.
+            # For MG400 4-axis logs, the first four values are [X, Y, Z, R].
+            # The last two packet values are preserved as aux fields instead
+            # of assigning unsupported semantic names.
+            for tool in (self._last_robot_tool_actual, self._last_robot_tool_target):
+                x, y, z, r, aux5, aux6 = tool
+                row.extend([
+                    self._fmt(x, 6),
+                    self._fmt(y, 6),
+                    self._fmt(z, 6),
+                    self._fmt(r, 6),
+                    self._fmt(aux5, 6),
+                    self._fmt(aux6, 6),
+                ])
 
             self._writer.writerow(row)
             if self._sample_count % 100 == 0:
@@ -308,6 +347,9 @@ class UnifiedTripleLogger:
         *,
         robot_mode: int | None = None,
         error_status: int | None = None,
+        robot_tool_actual=None,
+        robot_tool_target=None,
+        operation_mode: str | None = None,
         joints_are_degrees: bool = True,
     ) -> None:
         robot_rad = np.radians(self._joint4(robot_joints)) if joints_are_degrees else self._joint4(robot_joints)
@@ -321,6 +363,9 @@ class UnifiedTripleLogger:
             error_status=error_status,
             ros_cmd_rad=cmd_rad,
             robot_rad=robot_rad,
+            robot_tool_actual=robot_tool_actual,
+            robot_tool_target=robot_tool_target,
+            operation_mode=operation_mode,
         )
 
     def log_latency_event(self, metrics: dict) -> None:
@@ -343,8 +388,11 @@ class UnifiedTripleLogger:
             final_error_rad=metrics.get("final_error"),
             max_joint_error_rad=metrics.get("max_error"),
             is_valid_arrival=metrics.get("is_valid"),
+            operation_mode=metrics.get("operation_mode"),
             ros_cmd_rad=metrics.get("target"),
             robot_rad=metrics.get("final_q"),
+            robot_tool_actual=metrics.get("final_tool_actual"),
+            robot_tool_target=metrics.get("final_tool_target"),
         )
 
     def log_full_sync(self, unity_joints, ros_cmd_joints, robot_joints, ros_timestamp: float) -> None:

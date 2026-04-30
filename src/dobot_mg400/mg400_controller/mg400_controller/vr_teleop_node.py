@@ -115,6 +115,8 @@ class TeleopNode(Node):
 
         self._tool_query_counter = 0
         self._sample_counter = 0  # For session logger feedback decimation
+        self._realtime_speed_defaults_pending = False
+        self._last_realtime_speed_defaults_attempt = 0.0
 
         # --- One-file Teleop Session Logger (Unity → ROS2 → Robot) ---
         self.triple_logger = None
@@ -372,6 +374,12 @@ class TeleopNode(Node):
                 )
 
             # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
+            if self._realtime_speed_defaults_pending:
+                tr = self.trajectory_recorder
+                playback_blocked = tr.is_playing or (time.perf_counter() < tr._block_until)
+                if not playback_blocked:
+                    self._restore_realtime_speed_defaults("first_realtime_target")
+
             self.latest_target = q_compensated_safe          # Latency-compensated target
             self.target_recv_time = now_ros_sec          # T2: ROS receive time
             self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
@@ -601,6 +609,36 @@ class TeleopNode(Node):
     def _playback_lifecycle_callback(self, event_name, payload):
         if event_name in {"playback_start", "playback_complete"}:
             self._reset_live_teleop_reference(event_name)
+        if event_name == "playback_start":
+            # Teach/repeat owns SpeedFactor while it is executing.  Do not let
+            # a previously armed realtime reset overwrite a new teach run.
+            self._realtime_speed_defaults_pending = False
+        elif event_name == "playback_complete":
+            # Keep the teach/repeat speed profile available for repeated runs.
+            # Realtime speed is restored only when the next live Unity target
+            # arrives, so the two speed domains stay explicit.
+            self._realtime_speed_defaults_pending = True
+            self.get_logger().info(
+                "🏁 Teach/repeat playback complete; realtime SpeedFactor(100) "
+                "is armed for the next /unity/joint_cmd target"
+            )
+
+    def _restore_realtime_speed_defaults(self, reason: str):
+        """Make live teleop fast again after teach/repeat changed SpeedFactor."""
+        if not self.connection.connected:
+            self._realtime_speed_defaults_pending = True
+            self.get_logger().warn(
+                f"⚠️ Cannot restore realtime SpeedFactor after {reason}; robot disconnected"
+            )
+            return False
+        ok = self.connection.set_realtime_speed_defaults()
+        self._realtime_speed_defaults_pending = not ok
+        if ok:
+            self.get_logger().info(
+                f"🏃 Realtime mode speed restored after {reason}: "
+                "SpeedFactor/SpeedJ/AccJ = 100"
+            )
+        return ok
 
     def _playback_waypoint_callback(self, q_rad):
         """Called by TrajectoryRecorder when a waypoint is queued (sent to robot).
@@ -679,6 +717,7 @@ class TeleopNode(Node):
             # is_blocked: during playback OR during post-stop homing (5 s window)
             tr = self.trajectory_recorder
             is_blocked = tr.is_playing or (time.perf_counter() < tr._block_until)
+            operation_mode = "teach_repeat_playback" if is_blocked else "realtime"
             if tr.is_recording and not is_blocked:
                 # We record the *TARGET* from VR/Simulator, not the actual robot pos
                 tr.record_tick(self.latest_target)
@@ -742,6 +781,9 @@ class TeleopNode(Node):
                     ros_timestamp=now_wall,
                     robot_mode=current_mode,
                     error_status=err_info['error_status'],
+                    robot_tool_actual=tool_act,
+                    robot_tool_target=tool_tgt,
+                    operation_mode=operation_mode,
                     joints_are_degrees=False,
                 )
 
@@ -798,6 +840,9 @@ class TeleopNode(Node):
                         self.get_logger().info(report)
 
                         if self.triple_logger:
+                            metrics["final_tool_actual"] = tool_act
+                            metrics["final_tool_target"] = tool_tgt
+                            metrics["operation_mode"] = operation_mode
                             self.triple_logger.log_latency_event(metrics)
 
             # === SKIP TELEOP COMMANDS DURING PLAYBACK / POST-STOP HOMING ===
