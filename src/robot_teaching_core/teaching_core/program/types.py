@@ -1,7 +1,7 @@
 """Canonical program IR dataclasses (v0.1).
 
-This file mirrors the schema in ``schema.py`` and the example in
-``docs/ai_handoffs/next_phase_architecture_proposal.md`` §4.3.
+This file mirrors the schema in ``schema.py`` and the robot-neutral teaching
+architecture described by the report materials.
 
 Design notes:
 - Dataclasses are ``frozen=True`` so a loaded program is immutable in

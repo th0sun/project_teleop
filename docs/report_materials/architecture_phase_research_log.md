@@ -34,10 +34,9 @@ As of the current architecture phase:
 
 - the new architecture is still at the **proposal / research-backed design**
   stage;
-- the design direction is documented in
-  `docs/ai_handoffs/next_phase_architecture_proposal.md`;
-- research-backed corrections and audit notes are documented in
-  `docs/ai_handoffs/next_phase_architecture_revision.md`;
+- long-form AI handoff prompts and proposal drafts were archived outside the
+  production repository under
+  `_supporting_materials/archived_from_project_teleop/docs/`;
 - full implementation of the new multi-robot core has **not** been completed
   yet.
 
@@ -463,11 +462,9 @@ Suggested chapter use:
 Use this file together with:
 
 - `docs/project_objective.md`
-- `docs/current_refactor_status.md`
-- `docs/ai_handoffs/next_phase_architecture_brief.md`
-- `docs/ai_handoffs/next_phase_architecture_proposal.md`
-- `docs/ai_handoffs/next_phase_architecture_revision.md`
 - `docs/report_materials/report_writing_guideline.md`
+- `_supporting_materials/archived_from_project_teleop/docs/` for archived
+  handoff drafts and historical prompts
 
 ## 12. Short Summary
 
@@ -535,8 +532,9 @@ Implementation added:
     frames
   - starts MG400 TCP playback through the same retimed `TrajectoryRecorder`
     path used by saved JSON playback
-- `tools/demo_lift/retiming_demo.py`
+- archived retiming demo script
   - software-only demonstration showing both feasible and too-fast hand motion
+  - moved to `_supporting_materials/archived_from_project_teleop/tools/demo_lift/`
 
 Current software demo result:
 
@@ -675,7 +673,7 @@ Change made:
   robot is still executing the final segment.
 - `playback_complete` events now include final target, final actual, and
   per-joint final error plus final robot mode when feedback is available.
-- `tools/demo_lift/measure_replay_timing.py` now separates:
+- Archived `measure_replay_timing.py` script separated:
   - `completion_error_deg`: error when playback declares complete
   - `final_error_deg`: error after an additional post-settle observation window
 - The timing report now avoids a false arrival for a later waypoint whose target
@@ -1122,10 +1120,9 @@ Acceptance criteria (each tracked against Unity build + ROS Mock):
 - A4. **Disconnected fail-loud**: with the robot not connected,
   `execute` returns `stage="failed"` `error_code="EXECUTE_FORBIDDEN"`.
   Unity HUD shows the red failure state, not a silent toast.
-- A5. **Replay timing / path-error measurable**: the Mock playback can
-  be inspected with `tools/demo_lift/measure_replay_timing.py` and
-  `render_replay_animation.py` (already on this branch) to capture
-  baseline numbers for the demo deck.
+- A5. **Replay timing / path-error measurable**: historical Mock playback
+  measurement scripts are archived under
+  `_supporting_materials/archived_from_project_teleop/tools/demo_lift/`.
 
 Phase 2 smoke results on local MG400 Mock (`127.0.0.1:29999/30003/30004`):
 

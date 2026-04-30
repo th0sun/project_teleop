@@ -139,6 +139,7 @@ class SceneRepairEvent:
     old_joints_deg: Tuple[float, float, float, float]
     new_joints_deg: Tuple[float, float, float, float]
     raised_by_mm: float
+    applied: bool
 
 
 TYPE_LABEL = {
@@ -241,6 +242,30 @@ def _scene_floor_for_xy(
     return floor, source
 
 
+def _scene_contact_floor_for_xy(
+    x: float,
+    y: float,
+    boxes: Sequence[SceneFloorBox],
+    *,
+    contact_clearance_mm: float,
+) -> Tuple[float, str]:
+    floor = -math.inf
+    source = ""
+    for box in boxes:
+        if box.policy != "contact_allowed" or not _xy_inside_scene_box(x, y, box):
+            continue
+        expected_top = float(box.raw_min_xyz[2]) + float(box.workpiece_height_above_surface_mm)
+        candidate = expected_top + contact_clearance_mm
+        if candidate > floor:
+            floor = candidate
+            source = f"contact:{box.name}:expected_top+{contact_clearance_mm:g}"
+    return floor, source
+
+
+def _scene_has_avoid_at_xy(x: float, y: float, boxes: Sequence[SceneFloorBox]) -> bool:
+    return any(box.policy == "avoid" and _xy_inside_scene_box(x, y, box) for box in boxes)
+
+
 def _avoid_escape_xy_candidates(
     x: float,
     y: float,
@@ -267,18 +292,21 @@ def _scene_repair_frames(
     frames: Sequence[dict],
     scene_model: Optional[Path],
     *,
+    apply_repair: bool,
     contact_clearance_mm: float,
     avoid_clearance_mm: float,
     max_raise_mm: float,
     raise_step_mm: float,
 ) -> Tuple[List[dict], List[SceneRepairEvent]]:
-    """Raise unsafe taught TCP frames before simplification/classification.
+    """Diagnose or raise unsafe taught TCP frames before simplification/classification.
 
     The earlier post-compile clipper could raise only MovL/Arc endpoints.  That
     is too late: the classifier may already have chosen a primitive whose start
     and fitted curve still pass below a measured fixture surface.  This repair
     happens at the raw-frame layer, then IK converts each corrected TCP pose
-    back into a normal MG400 joint waypoint.
+    back into a normal MG400 joint waypoint.  The CLI is diagnostic-only by
+    default; mutation requires the explicit ``--apply-scene-repair`` flag so
+    analysis cannot silently change the path the user taught.
     """
     if scene_model is None:
         return list(frames), []
@@ -302,26 +330,58 @@ def _scene_repair_frames(
             repaired.append(dict(frame))
             continue
 
-        pose_candidates: List[Tuple[float, float, float, float, str]] = [
-            (float(old_xyzr[0]), float(old_xyzr[1]), floor, float(old_xyzr[3]), source)
-        ]
-        for esc_x, esc_y, esc_source in _avoid_escape_xy_candidates(
-            float(old_xyzr[0]),
-            float(old_xyzr[1]),
-            boxes,
-            outside_margin_mm=max(2.0, avoid_clearance_mm * 0.25),
-        ):
-            esc_floor, esc_floor_source = _scene_floor_for_xy(
-                esc_x,
-                esc_y,
+        if not apply_repair:
+            repaired.append(dict(frame))
+            events.append(
+                SceneRepairEvent(
+                    raw_index=idx,
+                    time_s=float(frame["timeStamp"]),
+                    source=source,
+                    old_xyzr=tuple(float(v) for v in old_xyzr[:4]),
+                    new_xyzr=(float(old_xyzr[0]), float(old_xyzr[1]), float(floor), float(old_xyzr[3])),
+                    old_joints_deg=tuple(float(v) for v in old_joints[:4]),
+                    new_joints_deg=tuple(float(v) for v in old_joints[:4]),
+                    raised_by_mm=float(floor - old_xyzr[2]),
+                    applied=False,
+                )
+            )
+            continue
+
+        pose_candidates: List[Tuple[int, float, float, float, float, str]] = []
+        old_x = float(old_xyzr[0])
+        old_y = float(old_xyzr[1])
+        old_z = float(old_xyzr[2])
+        old_r = float(old_xyzr[3])
+        inside_avoid = _scene_has_avoid_at_xy(old_x, old_y, boxes)
+
+        if inside_avoid:
+            # Avoid objects are hard obstacles.  Prefer a small horizontal escape
+            # from the inflated XY box over the previous "fly over the top"
+            # behavior, which could raise freehand paths by hundreds of mm.
+            for esc_x, esc_y, esc_source in _avoid_escape_xy_candidates(
+                old_x,
+                old_y,
                 boxes,
-                contact_clearance_mm=contact_clearance_mm,
-                avoid_clearance_mm=avoid_clearance_mm,
-            )
-            esc_z = max(floor, esc_floor if not math.isinf(esc_floor) else floor)
-            pose_candidates.append(
-                (esc_x, esc_y, esc_z, float(old_xyzr[3]), f"{source};{esc_source};{esc_floor_source}")
-            )
+                outside_margin_mm=max(2.0, avoid_clearance_mm * 0.25),
+            ):
+                contact_floor, contact_source = _scene_contact_floor_for_xy(
+                    esc_x,
+                    esc_y,
+                    boxes,
+                    contact_clearance_mm=contact_clearance_mm,
+                )
+                esc_z = max(old_z, contact_floor) if not math.isinf(contact_floor) else old_z
+                source_parts = [source, esc_source]
+                if contact_source:
+                    source_parts.append(contact_source)
+                pose_candidates.append((0, esc_x, esc_y, esc_z, old_r, ";".join(source_parts)))
+
+            # Last resort only: go vertically over the obstacle if there is no
+            # reachable side escape.  This keeps the old behavior available but
+            # makes it impossible for it to be chosen before the local detour.
+            pose_candidates.append((1, old_x, old_y, floor, old_r, f"{source};vertical_last_resort"))
+        else:
+            pose_candidates.append((0, old_x, old_y, floor, old_r, source))
 
         last_error: Optional[Exception] = None
         new_joints: Optional[np.ndarray] = None
@@ -329,10 +389,8 @@ def _scene_repair_frames(
         chosen_source = source
         # Try candidates closest to the demonstrated point first, then walk Z
         # upward only as much as needed to make the controller-space IK valid.
-        pose_candidates.sort(
-            key=lambda item: math.hypot(item[0] - float(old_xyzr[0]), item[1] - float(old_xyzr[1]))
-        )
-        for cand_x, cand_y, cand_z0, cand_r, cand_source in pose_candidates:
+        pose_candidates.sort(key=lambda item: (item[0], math.hypot(item[1] - old_x, item[2] - old_y)))
+        for _priority, cand_x, cand_y, cand_z0, cand_r, cand_source in pose_candidates:
             target_z = cand_z0
             max_z = max(cand_z0, float(old_xyzr[2]) + max_raise_mm)
             while target_z <= max_z + 1e-9:
@@ -375,6 +433,7 @@ def _scene_repair_frames(
                 old_joints_deg=tuple(float(v) for v in old_joints[:4]),
                 new_joints_deg=tuple(float(v) for v in new_joints[:4]),
                 raised_by_mm=float(chosen_xyzr[2] - old_xyzr[2]),
+                applied=True,
             )
         )
 
@@ -706,132 +765,127 @@ def _render_segment_detail_figures(
     *,
     per_page: int = 8,
 ) -> List[Path]:
-    """Render local per-segment fit panels.
+    """Render one local fit figure per emitted command segment.
 
-    The overview figure shows the whole trajectory.  These pages answer the
-    more surgical question: for each emitted command, which raw points did it
-    replace, what primitive did we choose, and how far is that primitive from
-    the original taught path?
+    The overview figure shows the whole trajectory.  These per-command cards
+    answer the surgical review question next to the human override controls:
+    which raw points did this command replace, what primitive did we choose,
+    and how far is that primitive from the original taught path?
     """
     if not segments:
         return []
 
     outputs: List[Path] = []
     cmap = plt.get_cmap("tab20")
-    for page_start in range(0, len(segments), per_page):
-        page_segments = segments[page_start:page_start + per_page]
-        rows = len(page_segments)
+    for ordinal, segment in enumerate(segments, start=1):
         fig, axes = plt.subplots(
-            rows,
+            1,
             3,
-            figsize=(16, 3.2 * rows),
+            figsize=(12.8, 3.7),
             squeeze=False,
             constrained_layout=True,
         )
-        for local_idx, segment in enumerate(page_segments):
-            row_axes = axes[local_idx]
-            ordinal = page_start + local_idx + 1
-            color = cmap((ordinal - 1) % 20)
+        row_axes = axes[0]
+        color = cmap((ordinal - 1) % 20)
 
-            raw_start = max(0, min(segment.raw_start_index, segment.raw_end_index))
-            raw_end = min(len(raw_xyzr) - 1, max(segment.raw_start_index, segment.raw_end_index))
-            raw_slice = raw_xyzr[raw_start:raw_end + 1, :3]
-            kept_slice = kept_xyzr[
-                segment.start_waypoint_index:segment.end_waypoint_index + 1,
-                :3,
-            ]
+        raw_start = max(0, min(segment.raw_start_index, segment.raw_end_index))
+        raw_end = min(len(raw_xyzr) - 1, max(segment.raw_start_index, segment.raw_end_index))
+        raw_slice = raw_xyzr[raw_start:raw_end + 1, :3]
+        kept_slice = kept_xyzr[
+            segment.start_waypoint_index:segment.end_waypoint_index + 1,
+            :3,
+        ]
 
-            title_prefix = (
-                f"{ordinal}:{TYPE_LABEL.get(segment.command_type, '?')} {segment.command_type} "
-                f"raw {segment.raw_start_index}->{segment.raw_end_index} "
-                f"fit {segment.raw_fit_max_mm:.1f}/{segment.raw_fit_mean_mm:.1f}mm"
-            )
-            projections = (
-                ("Top XY", (0, 1), "X", "Y"),
-                ("Front XZ", (0, 2), "X", "Z"),
-                ("Side YZ", (1, 2), "Y", "Z"),
-            )
-            for view_idx, (view_name, (x_i, y_i), x_label, y_label) in enumerate(projections):
-                ax = row_axes[view_idx]
-                if len(raw_slice):
-                    ax.plot(
-                        raw_slice[:, x_i],
-                        raw_slice[:, y_i],
-                        color="#b9b9b9",
-                        linewidth=1.2,
-                        label="raw",
-                    )
-                    ax.scatter(
-                        raw_slice[:, x_i],
-                        raw_slice[:, y_i],
-                        s=10,
-                        color="#9a9a9a",
-                        alpha=0.7,
-                    )
-
-                linestyle = TYPE_LINESTYLE.get(segment.command_type, "-")
+        title_prefix = (
+            f"{ordinal}:{TYPE_LABEL.get(segment.command_type, '?')} {segment.command_type} "
+            f"raw {segment.raw_start_index}->{segment.raw_end_index} "
+            f"fit {segment.raw_fit_max_mm:.1f}/{segment.raw_fit_mean_mm:.1f}mm"
+        )
+        projections = (
+            ("Top XY", (0, 1), "X", "Y"),
+            ("Front XZ", (0, 2), "X", "Z"),
+            ("Side YZ", (1, 2), "Y", "Z"),
+        )
+        for view_idx, (view_name, (x_i, y_i), x_label, y_label) in enumerate(projections):
+            ax = row_axes[view_idx]
+            if len(raw_slice):
                 ax.plot(
-                    segment.path_xyz[:, x_i],
-                    segment.path_xyz[:, y_i],
-                    color=color,
-                    linestyle=linestyle,
-                    linewidth=2.4,
-                    label=segment.command_type,
+                    raw_slice[:, x_i],
+                    raw_slice[:, y_i],
+                    color="#b9b9b9",
+                    linewidth=1.2,
+                    label="raw",
                 )
                 ax.scatter(
-                    kept_slice[:, x_i],
-                    kept_slice[:, y_i],
-                    s=28,
-                    facecolor="#1f77b4",
-                    edgecolor="white",
-                    linewidth=0.6,
-                    zorder=4,
-                    label="kept",
-                )
-                ax.scatter(
-                    segment.path_xyz[0, x_i],
-                    segment.path_xyz[0, y_i],
-                    marker="o",
-                    s=42,
-                    color="#2ca02c",
-                    zorder=5,
-                    label="start" if view_idx == 0 else None,
-                )
-                ax.scatter(
-                    segment.path_xyz[-1, x_i],
-                    segment.path_xyz[-1, y_i],
-                    marker="s",
-                    s=42,
-                    color="#d62728",
-                    zorder=5,
-                    label="end" if view_idx == 0 else None,
+                    raw_slice[:, x_i],
+                    raw_slice[:, y_i],
+                    s=10,
+                    color="#9a9a9a",
+                    alpha=0.7,
                 )
 
-                xs = np.concatenate([
-                    raw_slice[:, x_i] if len(raw_slice) else np.asarray([]),
-                    segment.path_xyz[:, x_i],
-                    kept_slice[:, x_i] if len(kept_slice) else np.asarray([]),
-                ])
-                ys = np.concatenate([
-                    raw_slice[:, y_i] if len(raw_slice) else np.asarray([]),
-                    segment.path_xyz[:, y_i],
-                    kept_slice[:, y_i] if len(kept_slice) else np.asarray([]),
-                ])
-                if len(xs) and len(ys):
-                    _set_equal_2d(ax, xs, ys, margin=0.18)
+            linestyle = TYPE_LINESTYLE.get(segment.command_type, "-")
+            ax.plot(
+                segment.path_xyz[:, x_i],
+                segment.path_xyz[:, y_i],
+                color=color,
+                linestyle=linestyle,
+                linewidth=2.4,
+                label=segment.command_type,
+            )
+            ax.scatter(
+                kept_slice[:, x_i],
+                kept_slice[:, y_i],
+                s=28,
+                facecolor="#1f77b4",
+                edgecolor="white",
+                linewidth=0.6,
+                zorder=4,
+                label="kept",
+            )
+            ax.scatter(
+                segment.path_xyz[0, x_i],
+                segment.path_xyz[0, y_i],
+                marker="o",
+                s=42,
+                color="#2ca02c",
+                zorder=5,
+                label="start" if view_idx == 0 else None,
+            )
+            ax.scatter(
+                segment.path_xyz[-1, x_i],
+                segment.path_xyz[-1, y_i],
+                marker="s",
+                s=42,
+                color="#d62728",
+                zorder=5,
+                label="end" if view_idx == 0 else None,
+            )
 
-                ax.set_title(f"{title_prefix}\n{view_name}", fontsize=8)
-                ax.set_xlabel(f"{x_label} (mm)", fontsize=7)
-                ax.set_ylabel(f"{y_label} (mm)", fontsize=7)
-                ax.grid(True, alpha=0.22)
-                ax.tick_params(labelsize=7)
-                if local_idx == 0 and view_idx == 0:
-                    ax.legend(fontsize=7, loc="best")
+            xs = np.concatenate([
+                raw_slice[:, x_i] if len(raw_slice) else np.asarray([]),
+                segment.path_xyz[:, x_i],
+                kept_slice[:, x_i] if len(kept_slice) else np.asarray([]),
+            ])
+            ys = np.concatenate([
+                raw_slice[:, y_i] if len(raw_slice) else np.asarray([]),
+                segment.path_xyz[:, y_i],
+                kept_slice[:, y_i] if len(kept_slice) else np.asarray([]),
+            ])
+            if len(xs) and len(ys):
+                _set_equal_2d(ax, xs, ys, margin=0.18)
 
-        page_num = page_start // per_page + 1
-        out_path = out_prefix.with_name(f"{out_prefix.name}_segments_detail_{page_num:02d}.png")
+            ax.set_title(view_name, fontsize=8)
+            ax.set_xlabel(f"{x_label} (mm)", fontsize=7)
+            ax.set_ylabel(f"{y_label} (mm)", fontsize=7)
+            ax.grid(True, alpha=0.22)
+            ax.tick_params(labelsize=7)
+            if view_idx == 0:
+                ax.legend(fontsize=7, loc="best")
+
+        out_path = out_prefix.with_name(f"{out_prefix.name}_segment_{ordinal:03d}.png")
         fig.suptitle(
-            f"{title} — per-command primitive fit, page {page_num}",
+            f"{title} — {title_prefix}",
             fontsize=12,
         )
         fig.savefig(out_path, dpi=170)
@@ -1035,6 +1089,7 @@ def _write_scene_repair_csv(path: Path, events: Sequence[SceneRepairEvent]) -> N
         "new_j2",
         "new_j3",
         "new_j4",
+        "applied",
     ]
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=columns)
@@ -1061,6 +1116,7 @@ def _write_scene_repair_csv(path: Path, events: Sequence[SceneRepairEvent]) -> N
                 "new_j2": f"{event.new_joints_deg[1]:.6f}",
                 "new_j3": f"{event.new_joints_deg[2]:.6f}",
                 "new_j4": f"{event.new_joints_deg[3]:.6f}",
+                "applied": "yes" if event.applied else "no",
             })
 
 
@@ -1070,6 +1126,7 @@ def _analyze_one(
     points_dir: Path,
     *,
     scene_model: Optional[Path] = None,
+    apply_scene_repair: bool = False,
     scene_contact_clearance_mm: float = 3.0,
     scene_avoid_clearance_mm: float = 20.0,
     scene_max_raise_mm: float = 240.0,
@@ -1085,6 +1142,7 @@ def _analyze_one(
     repaired_frames, scene_repair_events = _scene_repair_frames(
         original_frames,
         scene_model,
+        apply_repair=apply_scene_repair,
         contact_clearance_mm=scene_contact_clearance_mm,
         avoid_clearance_mm=scene_avoid_clearance_mm,
         max_raise_mm=scene_max_raise_mm,
@@ -1155,12 +1213,14 @@ def _analyze_one(
         "source": str(source),
         "scene_repair": {
             "enabled": scene_model is not None,
+            "applied": apply_scene_repair,
             "model": str(scene_model) if scene_model is not None else "",
             "contact_clearance_mm": scene_contact_clearance_mm,
             "avoid_clearance_mm": scene_avoid_clearance_mm,
             "max_raise_mm": scene_max_raise_mm,
             "raise_step_mm": scene_raise_step_mm,
             "repaired_frame_count": len(scene_repair_events),
+            "applied_frame_count": sum(1 for e in scene_repair_events if e.applied),
             "max_raise_observed_mm": max((e.raised_by_mm for e in scene_repair_events), default=0.0),
             "events": [
                 {
@@ -1170,6 +1230,7 @@ def _analyze_one(
                     "old_xyzr": [round(v, 6) for v in e.old_xyzr],
                     "new_xyzr": [round(v, 6) for v in e.new_xyzr],
                     "raised_by_mm": round(e.raised_by_mm, 6),
+                    "applied": e.applied,
                     "old_joints_deg": [round(v, 6) for v in e.old_joints_deg],
                     "new_joints_deg": [round(v, 6) for v in e.new_joints_deg],
                 }
@@ -1316,24 +1377,57 @@ def _render_review_html(index_path: Path, summaries: Sequence[dict], out_dir: Pa
             f"J {counts.get('JointMovJ', 0)} / L {counts.get('MovL', 0)} / A {counts.get('Arc', 0)} | "
             f"max raw fit <b>{max((cmd['raw_fit_max_mm'] for cmd in summary['commands']), default=0.0):.2f} mm</b>"
             "</div>"
+            "<figure class='image-card'>"
             f"<img class='overview' src='{_html_escape(fig_rel)}' alt='overview'>"
+            "<figcaption>"
+            "<b>Overview only</b> — ใช้ดูภาพรวมของ path ทั้งไฟล์. การเลือก/แก้ decision อยู่ใต้รูป command เล็ก ๆ ด้านล่าง."
+            "</figcaption>"
+            "</figure>"
         )
         if detail_rels:
-            rows.append("<details open><summary>Per-command fit pages</summary>")
-            for rel in detail_rels:
-                rows.append(f"<img class='detail' src='{_html_escape(rel)}' alt='segment detail'>")
+            rows.append("<details open><summary>Per-command fit and override cards</summary>")
+            rows.append("<div class='command-grid'>")
+            for cmd, rel in zip(summary["commands"], detail_rels):
+                row_id = f"t{traj_idx}_c{cmd['ordinal']}"
+                option_html = "".join(
+                    f"<option value='{opt}'>{opt}</option>"
+                    for opt in options
+                )
+                rows.append(
+                    "<figure class='command-card'>"
+                    f"<img class='detail' src='{_html_escape(rel)}' alt='segment {cmd['ordinal']} detail'>"
+                    "<figcaption>"
+                    "<div class='legend-row'>"
+                    "<span><b>gray</b> raw</span>"
+                    "<span><b>blue dots</b> kept</span>"
+                    "<span><b>green circle</b> start</span>"
+                    "<span><b>red square</b> end</span>"
+                    "<span><b>A</b> Arc</span>"
+                    "<span><b>L</b> MovL</span>"
+                    "<span><b>J</b> JointMovJ</span>"
+                    "</div>"
+                    "<div class='command-meta'>"
+                    f"<b>#{cmd['ordinal']} {TYPE_LABEL.get(cmd['type'], '?')} {cmd['type']}</b> "
+                    f"raw {cmd['raw_start_index']}->{cmd['raw_end_index']} | "
+                    f"fit max/mean {cmd['raw_fit_max_mm']:.2f}/{cmd['raw_fit_mean_mm']:.2f} mm"
+                    "</div>"
+                    "<div class='card-controls'>"
+                    "<label>ควรเป็น<select "
+                    f"data-row='{row_id}' data-kind='label'>{option_html}</select></label>"
+                    "<label>note<input "
+                    f"data-row='{row_id}' data-kind='note' placeholder='เช่น ควร split / arc ฝั่งซ้าย'></label>"
+                    "</div>"
+                    "</figcaption>"
+                    "</figure>"
+                )
+            rows.append("</div>")
             rows.append("</details>")
 
         rows.append("<table><thead><tr>"
                     "<th>#</th><th>auto</th><th>raw</th><th>fit max/mean</th>"
-                    "<th>command</th><th>your label</th><th>note</th>"
+                    "<th>command</th>"
                     "</tr></thead><tbody>")
         for cmd in summary["commands"]:
-            row_id = f"t{traj_idx}_c{cmd['ordinal']}"
-            option_html = "".join(
-                f"<option value='{opt}'>{opt}</option>"
-                for opt in options
-            )
             rows.append(
                 "<tr>"
                 f"<td>{cmd['ordinal']}</td>"
@@ -1341,8 +1435,6 @@ def _render_review_html(index_path: Path, summaries: Sequence[dict], out_dir: Pa
                 f"<td>{cmd['raw_start_index']}->{cmd['raw_end_index']}</td>"
                 f"<td>{cmd['raw_fit_max_mm']:.2f}/{cmd['raw_fit_mean_mm']:.2f} mm</td>"
                 f"<td><code>{_html_escape(cmd['command'])}</code></td>"
-                f"<td><select data-row='{row_id}' data-kind='label'>{option_html}</select></td>"
-                f"<td><input data-row='{row_id}' data-kind='note' placeholder='เช่น ควร split / arc ฝั่งซ้าย'></td>"
                 "</tr>"
             )
         rows.append("</tbody></table></section>")
@@ -1361,8 +1453,16 @@ button {{ border: 0; background: #1f6feb; color: white; border-radius: 6px; padd
 button.secondary {{ background: #4b5563; }}
 .trajectory {{ background: white; border: 1px solid #d8dee8; border-radius: 8px; padding: 16px; margin: 18px 0 28px; box-shadow: 0 1px 3px rgba(15,23,42,.05); }}
 .summary {{ margin: 8px 0 12px; color: #4b5563; }}
+.image-card {{ margin: 12px 0 18px; }}
+.command-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 16px; margin: 12px 0 18px; }}
+.command-card {{ margin: 0; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; background: #fbfcfe; }}
+figcaption {{ max-width: 1450px; color: #4b5563; font-size: 13px; line-height: 1.45; padding: 8px 2px 0; }}
 img.overview {{ width: 100%; max-width: 1450px; display: block; border: 1px solid #e5e7eb; border-radius: 6px; background: white; }}
-img.detail {{ width: 100%; max-width: 1450px; display: block; margin: 12px 0; border: 1px solid #e5e7eb; border-radius: 6px; background: white; }}
+img.detail {{ width: 100%; display: block; border: 1px solid #e5e7eb; border-radius: 6px; background: white; }}
+.legend-row {{ display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 6px; }}
+.command-meta {{ margin: 4px 0 8px; color: #334155; }}
+.card-controls {{ display: grid; grid-template-columns: minmax(130px, 180px) minmax(220px, 1fr); gap: 8px; align-items: end; }}
+.card-controls label {{ display: grid; gap: 3px; color: #475569; font-weight: 600; }}
 table {{ border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 13px; }}
 th, td {{ border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: top; padding: 8px; }}
 th {{ background: #f3f4f6; position: sticky; top: 60px; z-index: 2; }}
@@ -1488,7 +1588,24 @@ def main() -> int:
         default="",
         help=(
             "Optional scene safety model JSON. When set, unsafe raw frames are "
-            "raised and IK-repaired before simplification and primitive selection."
+            "reported before simplification and primitive selection. "
+            "Use --apply-scene-repair only for explicit experimental mutation."
+        ),
+    )
+    parser.add_argument(
+        "--apply-scene-repair",
+        action="store_true",
+        help=(
+            "Experimental: mutate raw frames using the scene model before "
+            "compilation. Default is diagnostic-only."
+        ),
+    )
+    parser.add_argument(
+        "--diagnose-scene-only",
+        action="store_true",
+        help=(
+            "With --scene-repair-model, only report unsafe raw frames and do not "
+            "mutate the generated trajectory."
         ),
     )
     parser.add_argument("--scene-contact-clearance-mm", type=float, default=3.0)
@@ -1533,6 +1650,9 @@ def main() -> int:
     if scene_model is not None and not scene_model.is_file():
         print(f"missing scene repair model: {scene_model}", file=sys.stderr)
         return 2
+    apply_scene_repair = bool(scene_model is not None and args.apply_scene_repair)
+    if args.diagnose_scene_only:
+        apply_scene_repair = False
     overrides = _config_override_map(args)
     previous_config = _apply_motion_config_overrides(overrides)
     if overrides:
@@ -1548,6 +1668,7 @@ def main() -> int:
                 out_dir,
                 points_dir,
                 scene_model=scene_model,
+                apply_scene_repair=apply_scene_repair,
                 scene_contact_clearance_mm=args.scene_contact_clearance_mm,
                 scene_avoid_clearance_mm=args.scene_avoid_clearance_mm,
                 scene_max_raise_mm=args.scene_max_raise_mm,
@@ -1565,7 +1686,8 @@ def main() -> int:
             repair = summary["scene_repair"]
             if repair["enabled"]:
                 print(
-                    f"  scene repair: {repair['repaired_frame_count']} frame(s), "
+                    f"  scene repair: {repair['repaired_frame_count']} frame(s) flagged, "
+                    f"{repair['applied_frame_count']} applied, "
                     f"max raise {repair['max_raise_observed_mm']:.1f} mm"
                 )
             print(f"  figure: {summary['outputs']['figure_png']}")

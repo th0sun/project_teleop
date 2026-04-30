@@ -115,11 +115,12 @@ Once the project objective was corrected, dedicated AI handoff material was
 created so the next architecture phase would not drift back into MG400-only
 cleanup.
 
-Key artifacts created for that purpose:
+Key artifacts created for that purpose, later archived outside the production
+repository under `_supporting_materials/archived_from_project_teleop/docs/`:
 
-- `docs/ai_handoffs/next_phase_architecture_brief.md`
-- `docs/skills/multi_robot_architecture/SKILL.md`
-- `docs/ai_handoffs/architecture_prompt_th.md`
+- architecture brief draft
+- multi-robot architecture skill draft
+- Thai architecture prompt
 
 Purpose of these files:
 
@@ -231,11 +232,9 @@ Why this phase matters in the report:
 At the current point in time, the key files of this phase are:
 
 - `docs/project_objective.md`
-- `docs/current_refactor_status.md`
-- `docs/ai_handoffs/next_phase_architecture_brief.md`
-- `docs/ai_handoffs/next_phase_architecture_proposal.md`
-- `docs/ai_handoffs/next_phase_architecture_revision.md`
 - `docs/report_materials/architecture_phase_research_log.md`
+- `_supporting_materials/archived_from_project_teleop/docs/` for archived
+  handoff drafts
 
 The intended source-of-truth logic is:
 

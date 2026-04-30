@@ -9,7 +9,7 @@ touch first, what not to break, and how to validate changes quickly.
 Read this first for project intent:
 
 - `docs/project_objective.md`
-- `docs/current_refactor_status.md`
+- `docs/teleop_command_logic.md`
 
 ## Scope
 
@@ -260,8 +260,7 @@ python3 -m py_compile \
 git diff --check -- \
   src/dobot_mg400/mg400_controller \
   docs/controller_continuation_guide.md \
-  docs/teleop_command_logic.md \
-  docs/session_handoff_2026-04-24.md
+  docs/teleop_command_logic.md
 ```
 
 Environment note:
@@ -278,7 +277,6 @@ If someone new joins the project, this order is the fastest path:
 2. `docs/setup_guide.md`
 3. `docs/teleop_command_logic.md`
 4. `docs/controller_continuation_guide.md`
-5. `docs/session_handoff_2026-04-24.md`
 
 That sequence gives:
 
@@ -286,4 +284,3 @@ That sequence gives:
 - how to run it
 - how command logic works
 - where maintainable code now lives
-- historical context and session decisions

@@ -7,7 +7,6 @@
     Robot-neutral core for the multi-robot teaching architecture: canonical
     program IR, robot capability profile, kinematics seam, and adapter-API
     contracts. This package must not import from any robot-specific adapter.
-    See docs/ai_handoffs/next_phase_architecture_proposal.md.
   </description>
   <maintainer email="m.hassunofficial@gmail.com">th0sun</maintainer>
   <license>MIT</license>

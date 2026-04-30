@@ -26,11 +26,6 @@ and limitations.
   Explains why the project uses the queue-aware default mode and why older
   experimental modes were removed from the production runtime.
 
-- `waypoint_teach_backlog.md`
-  Deferred design note for a future teach-pendant-style mode where the operator
-  captures only intentional waypoints and later chooses speed/acceleration/CP.
-  This is not part of the current demo scope.
-
 - `archive/experimental_logic_reference.py`  
   Archived source snapshot of old experimental strategies. This file is kept
   only as historical evidence for report writing. It is not imported by the ROS2
@@ -58,3 +53,10 @@ This folder is for the report story only.
 
 Do not reintroduce archived experimental modes into the runtime unless there is
 a new engineering reason and new validation evidence.
+
+Long-form AI handoff prompts, stale session handoffs, and deferred waypoint
+teach notes have been moved out of this repository to:
+
+```text
+../_supporting_materials/archived_from_project_teleop/
+```
