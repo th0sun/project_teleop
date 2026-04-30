@@ -723,6 +723,24 @@ Current behavior:
 Important: the Unity callback does not send commands directly. It only updates
 the latest target. Actual sending happens in the control loop.
 
+## Timestamp Contract
+
+Latency logs use one shared cross-layer clock:
+
+- `T1_Unity_Send_ROS_Wall`: Unity `header.stamp` calibrated into ROS wall time
+  by `ClockCalibrator`.
+- `T2_ROS_Recv_Wall`: ROS receives `/unity/joint_cmd`.
+- `T3_Cmd_Send_Wall`: ROS sends the Dobot TCP command.
+- `T4_Motion_Start_Wall`: robot feedback first shows motion.
+- `T5_Target_Reached_Wall`: robot feedback satisfies the arrival check.
+
+`time.perf_counter()` is still used inside the control loop for intervals,
+rate control, stuck detection, and command spacing. It must not be written into
+cross-layer latency columns because it cannot be compared with Unity/ROS wall
+timestamps. `teleop_latency_*.csv`, `teleop_struct_*.csv`, the async analytics
+CSV, and `unified_triple_log_*.csv` now label their wall-clock columns
+explicitly.
+
 ## Validation
 
 `JointValidator.validate_and_clamp()` is the first safety filter.

@@ -33,7 +33,7 @@ class TeleopLogger:
             "teleop_latency", 
             os.path.join(self.log_dir, f"teleop_latency_{timestamp}.csv"),
             (
-                "Timestamp,T1_Unity_Send,T2_ROS_Recv,T3_Cmd_Send,T4_Motion_Start,T5_Target_Reached,"
+                "Timestamp_ROS_Wall,T1_Unity_Send_ROS_Wall,T2_ROS_Recv_Wall,T3_Cmd_Send_Wall,T4_Motion_Start_Wall,T5_Target_Reached_Wall,"
                 "Network_Delay_ms,Decision_Delay_ms,Command_Latency_ms,Robot_Response_ms,Motion_Time_ms,Motion_Execution_ms,True_End_to_End_ms,"
                 "Q_Target_J1,Q_Target_J2,Q_Target_J3,Q_Target_J4,"
                 "Q_Final_J1,Q_Final_J2,Q_Final_J3,Q_Final_J4,"
@@ -47,7 +47,7 @@ class TeleopLogger:
             "teleop_perf", 
             os.path.join(self.log_dir, f"teleop_struct_{timestamp}.csv"),
             (
-                "Timestamp,T1_Unity_Send,T2_ROS_Recv,T3_Cmd_Send,"
+                "Timestamp_ROS_Wall,T1_Unity_Send_ROS_Wall,T2_ROS_Recv_Wall,T3_Cmd_Send_Wall,"
                 "Network_Delay_ms,Decision_Delay_ms,"
                 "Q_Current_J1,Q_Current_J2,Q_Current_J3,Q_Current_J4,"
                 "Q_Target_J1,Q_Target_J2,Q_Target_J3,Q_Target_J4,"

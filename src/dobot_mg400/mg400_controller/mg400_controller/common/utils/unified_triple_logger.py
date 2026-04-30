@@ -65,11 +65,15 @@ class UnifiedTripleLogger:
         self._file = open(self.file_path, mode='w', newline='')
         self._writer = csv.writer(self._file)
         
-        # Header: timestamp + 3 layers × 4 joints
+        # Timestamp contract:
+        # - ros_timestamp is ROS-local wall-clock seconds (time.time()).
+        # - elapsed_sec is only for within-file plotting.
+        # - Monotonic/perf_counter values must not be written here because this
+        #   file is used to compare Unity, ROS command, and robot feedback rows.
         header = [
             'sample_id',
             'elapsed_sec',
-            'ros_timestamp',
+            'ros_wall_timestamp',
             # Layer 1: Unity (Input from user/VR)
             'unity_j1_deg', 'unity_j2_deg', 'unity_j3_deg', 'unity_j4_deg',
             # Layer 2: ROS2 (Command sent to robot)
@@ -102,7 +106,7 @@ class UnifiedTripleLogger:
         with self._lock:
             self._sample_count += 1
             elapsed = time.time() - self._start_time
-            ros_ts = ros_timestamp if ros_timestamp else time.time()
+            ros_ts = ros_timestamp if ros_timestamp is not None else time.time()
             
             # Convert to lists (handle None)
             unity = list(unity_joints) if unity_joints else [None, None, None, None]

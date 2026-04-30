@@ -114,9 +114,11 @@ class TeleopNode(Node):
         self.csv_filename = f"teleop_analytics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         self.analytics_logger = None
 
-        # State Tracking
-        self.target_recv_time = 0.0  # T2
-        self.unity_send_time = 0.0   # T1
+        # Cross-layer timestamp contract:
+        # - T1/T2/T3/T4/T5 and CSV log timestamps are ROS-local wall seconds.
+        # - perf_counter is used only for control-loop intervals and stuck logic.
+        self.target_recv_time = 0.0  # T2: ROS receive wall time
+        self.unity_send_time = 0.0   # T1: Unity send time calibrated into ROS wall time
 
         self._tool_query_counter = 0
         self._sample_counter = 0  # For triple-layer logger decimation
@@ -126,7 +128,7 @@ class TeleopNode(Node):
         self.analytics_logger = AsyncEventLogger(
             csv_path=self.csv_filename,
             csv_header=[
-                'Timestamp_ROS', 'Timestamp_Unity',
+                'Timestamp_ROS_Wall', 'Timestamp_Unity_ROS_Wall',
                 'Raw_J1', 'Raw_J2', 'Raw_J3', 'Raw_J4',
                 'Pred_J1', 'Pred_J2', 'Pred_J3', 'Pred_J4',
             ],
@@ -697,11 +699,12 @@ class TeleopNode(Node):
             q_current = self.feedback.get_current_position()
             # Use perf_counter for ultra-precise delta-time calculation in logic
             now = time.perf_counter()
+            now_wall = time.time()
 
             # --- Triple-Layer Log: Robot Layer (periodic, ~10Hz decimated) ---
             if self.triple_logger and self._sample_counter % 5 == 0:
                 robot_joints_deg = tuple(np.degrees(q_current))
-                self.triple_logger.log_robot_feedback(robot_joints_deg, ros_timestamp=now)
+                self.triple_logger.log_robot_feedback(robot_joints_deg, ros_timestamp=now_wall)
 
             # === TEACH & REPEAT GATING ===
             # is_blocked: during playback OR during post-stop homing (5 s window)
@@ -799,11 +802,8 @@ class TeleopNode(Node):
             # Update Analyzer Stats
             self.latency_analyzer.update_tracking(velocity_mag)
 
-            # Use absolute time for Latency Analyzer since T1/T2 are absolute
-            now_abs = time.time()
-
             if velocity_mag > motion_config.MOTION_START_THRESHOLD:
-                if self.latency_analyzer.mark_motion_start(now_abs):
+                if self.latency_analyzer.mark_motion_start(now_wall):
                      self.get_logger().debug(f"Motion started: velocity={velocity_mag:.6f} rad/s")
 
             # T5: Target Reached
@@ -812,7 +812,7 @@ class TeleopNode(Node):
             is_stopped = velocity_mag < 0.005
 
             if dist < 0.01 and is_stopped:
-                if self.latency_analyzer.mark_target_reached(now_abs):
+                if self.latency_analyzer.mark_target_reached(now_wall):
                     # Get Full Report
                     metrics, report = self.latency_analyzer.analyze_arrival(q_current, velocity_mag)
                     if metrics:
@@ -821,7 +821,7 @@ class TeleopNode(Node):
 
                         # CSV Log (Async)
                         self.analytics_logger.put('TELEOP_LATENCY', [
-                            now_abs, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
+                            now_wall, metrics['t1'], metrics['t2'], metrics['t3'], metrics['t4'], metrics['t5'],
                             metrics['network_ms'], metrics['decision_ms'], metrics['command_ms'],
                             metrics['response_ms'], metrics['motion_time_ms'], metrics['execution_ms'],
                             metrics['e2e_ms'],
@@ -906,6 +906,16 @@ class TeleopNode(Node):
                     sent_mono = time.perf_counter()
                     time_since_last = sent_mono - self.controller.last_sent_time
                     velocity_mag = np.max(self.controller.robot_velocity)
+                    network_delay_ms = (
+                        (self.target_recv_time - self.unity_send_time) * 1000.0
+                        if self.target_recv_time > 0 and self.unity_send_time > 0
+                        else 0.0
+                    )
+                    decision_delay_ms = (
+                        (t3_cmd_send - self.target_recv_time) * 1000.0
+                        if self.target_recv_time > 0
+                        else 0.0
+                    )
 
                     robot_status = self.feedback.get_error_status()
 
@@ -930,8 +940,8 @@ class TeleopNode(Node):
                     self.controller.mark_command_sent(q_safe, sent_mono)
 
                     self.analytics_logger.put('TELEOP_PERF', [
-                        now, self.unity_send_time, self.target_recv_time, t3_cmd_send,
-                        0.0, 0.0, # Network delay calculated in analyzer report
+                        t3_cmd_send, self.unity_send_time, self.target_recv_time, t3_cmd_send,
+                        network_delay_ms, decision_delay_ms,
                         q_current, self.latest_target,
                         dist_to_last, send_reason,
                         time_since_last, velocity_mag, self.controller.robot_velocity
