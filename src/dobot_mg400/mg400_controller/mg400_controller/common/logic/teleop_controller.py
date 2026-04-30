@@ -20,7 +20,7 @@ from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import ( PROXIMITY_THRESHOLD,
      STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
     TARGET_CHANGE_THRESHOLD, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC,
-    LIVE_TARGET_FAST_VELOCITY_RAD_S,
+    LIVE_TARGET_FAST_VELOCITY_RAD_S, LIVE_MODEL_GAP_SEND_THRESHOLD_RAD,
 )
 
 class TeleopController:
@@ -150,6 +150,7 @@ class TeleopController:
         # Calculate Distances
         dist_to_last = np.max(np.abs(q_current - self.last_sent_target))
         change_in_target = np.max(np.abs(latest_target - self.last_sent_target))
+        model_gap = np.max(np.abs(latest_target - q_current))
         target_velocity_mag = 0.0
         if target_velocity is not None:
             target_velocity_mag = float(np.max(np.abs(target_velocity)))
@@ -164,6 +165,8 @@ class TeleopController:
         
         if dist_to_last < trigger_distance:
             if change_in_target > SPATIAL_THRESHOLD:
+                if model_gap > LIVE_MODEL_GAP_SEND_THRESHOLD_RAD:
+                    return True, f"ModelGap_Gap{model_gap:.3f}_Dist{dist_to_last:.3f}"
                 if target_velocity_mag > LIVE_TARGET_FAST_VELOCITY_RAD_S:
                     return False, f"TargetMovingFast_Vel{target_velocity_mag:.3f}"
                 return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
