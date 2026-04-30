@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # ==========================================
 # MG400 Tmux Interactive Launcher
@@ -19,6 +20,7 @@ if ! command -v tmux >/dev/null 2>&1; then
     echo "❌ tmux not found. Install with: sudo apt install tmux"
     exit 1
 fi
+TMUX=(tmux -f /dev/null -L mg400_teleop)
 
 if [ ! -f "$ROS_SETUP" ]; then
     echo "❌ ROS setup not found: $ROS_SETUP"
@@ -94,9 +96,9 @@ fi
 
 # 4. สร้าง Tmux
 SESSION="mg400"
-if tmux has-session -t "$SESSION" 2>/dev/null; then
+if "${TMUX[@]}" has-session -t "$SESSION" 2>/dev/null; then
     echo "🗑️  Killing existing session..."
-    tmux kill-session -t "$SESSION"
+    "${TMUX[@]}" kill-session -t "$SESSION"
 fi
 
 echo "🚀 Launching..."
@@ -111,43 +113,48 @@ echo "🚀 Launching..."
 #  └─────────────────────────────┘
 
 # Pane A: Teleop Node
-PANE_A=$(tmux new-session -d -s "$SESSION" -n "teleop" -x 220 -y 55 -P -F '#{pane_id}')
-tmux send-keys -t "$PANE_A" "$CMD_NODE" Enter
+if ! PANE_A=$("${TMUX[@]}" new-session -d -s "$SESSION" -n "teleop" -P -F '#{pane_id}'); then
+    echo "❌ Failed to create tmux session."
+    echo "   tmux version: $(tmux -V 2>/dev/null || echo unknown)"
+    echo "   Try: tmux -f /dev/null -L mg400_teleop new-session -d -s test"
+    exit 1
+fi
+"${TMUX[@]}" send-keys -t "$PANE_A" "$CMD_NODE" Enter
 
 # Pane B: RViz (ขวา)
-PANE_B=$(tmux split-window -h -t "$PANE_A" -P -F '#{pane_id}')
-tmux send-keys -t "$PANE_B" "$CMD_RVIZ" Enter
+PANE_B=$("${TMUX[@]}" split-window -h -t "$PANE_A" -P -F '#{pane_id}')
+"${TMUX[@]}" send-keys -t "$PANE_B" "$CMD_RVIZ" Enter
 
 # Pane C: TCP/Simulator (ขวาล่าง)
-PANE_C=$(tmux split-window -v -t "$PANE_B" -P -F '#{pane_id}')
-tmux send-keys -t "$PANE_C" "$CMD_EXTRA" Enter
+PANE_C=$("${TMUX[@]}" split-window -v -t "$PANE_B" -P -F '#{pane_id}')
+"${TMUX[@]}" send-keys -t "$PANE_C" "$CMD_EXTRA" Enter
 
 # Pane D: Monitor Bridge (ซ้ายล่าง) — UDP telemetry → Mac
-PANE_D=$(tmux split-window -v -t "$PANE_A" -l 12 -P -F '#{pane_id}')
-tmux send-keys -t "$PANE_D" "$CMD_BRIDGE" Enter
+PANE_D=$("${TMUX[@]}" split-window -v -t "$PANE_A" -l 12 -P -F '#{pane_id}')
+"${TMUX[@]}" send-keys -t "$PANE_D" "$CMD_BRIDGE" Enter
 
 # Pane E: Docker Logs (Mock mode เท่านั้น)
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
-    PANE_E=$(tmux split-window -v -t "$PANE_A" -l 8 -P -F '#{pane_id}')
-    tmux send-keys -t "$PANE_E" "docker compose -f \"$MOCK_COMPOSE\" logs -f; exec bash" Enter
+    PANE_E=$("${TMUX[@]}" split-window -v -t "$PANE_A" -l 8 -P -F '#{pane_id}')
+    "${TMUX[@]}" send-keys -t "$PANE_E" "docker compose -f \"$MOCK_COMPOSE\" logs -f; exec bash" Enter
 fi
 
 # 5. Settings
-tmux set -g mouse on
-tmux set -g pane-border-status top
-tmux set -g pane-border-format " #{pane_index}: #{pane_title} "
-tmux select-pane -t "$PANE_A" -T "🤖 Teleop"
-tmux select-pane -t "$PANE_B" -T "📐 RViz"
-tmux select-pane -t "$PANE_C" -T "🔌 TCP/Sim"
-tmux select-pane -t "$PANE_D" -T "🌉 UDP Bridge"
+"${TMUX[@]}" set -g mouse on
+"${TMUX[@]}" set -g pane-border-status top
+"${TMUX[@]}" set -g pane-border-format " #{pane_index}: #{pane_title} "
+"${TMUX[@]}" select-pane -t "$PANE_A" -T "Teleop"
+"${TMUX[@]}" select-pane -t "$PANE_B" -T "RViz"
+"${TMUX[@]}" select-pane -t "$PANE_C" -T "TCP/Sim"
+"${TMUX[@]}" select-pane -t "$PANE_D" -T "UDP Bridge"
 
-tmux set -g status-right " 💡 Ctrl+C=stop | ↑Enter=restart | Shift+drag=copy | Ctrl+D=close pane | kill-server=exit all "
-tmux set -g status-right-length 90
-tmux set -g status-style "bg=#1a1a2e fg=#aaaaaa"
+"${TMUX[@]}" set -g status-right " Ctrl+C=stop | Up+Enter=restart | Ctrl+D=close pane | tmux kill-server=exit "
+"${TMUX[@]}" set -g status-right-length 90
+"${TMUX[@]}" set -g status-style "bg=#1a1a2e fg=#aaaaaa"
 
 # โฟกัส Teleop Node
-tmux select-pane -t "$PANE_A"
-tmux attach -t "$SESSION"
+"${TMUX[@]}" select-pane -t "$PANE_A"
+"${TMUX[@]}" attach -t "$SESSION"
 
 # เมื่อ detach ออก
 if [ "$MODE" = "2" ] || [ "$MODE" = "4" ]; then
