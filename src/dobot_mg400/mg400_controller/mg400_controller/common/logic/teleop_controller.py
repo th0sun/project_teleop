@@ -20,7 +20,7 @@ from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import ( PROXIMITY_THRESHOLD,
      STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
     TARGET_CHANGE_THRESHOLD, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC,
-    LIVE_TARGET_FAST_VELOCITY_RAD_S, LIVE_MODEL_GAP_SEND_THRESHOLD_RAD,
+    LIVE_TARGET_FAST_VELOCITY_RAD_S,
 )
 
 class TeleopController:
@@ -150,10 +150,11 @@ class TeleopController:
         # Calculate Distances
         dist_to_last = np.max(np.abs(q_current - self.last_sent_target))
         change_in_target = np.max(np.abs(latest_target - self.last_sent_target))
-        model_gap = np.max(np.abs(latest_target - q_current))
+        error_to_latest_target = np.max(np.abs(q_current - latest_target))
         target_velocity_mag = 0.0
         if target_velocity is not None:
             target_velocity_mag = float(np.max(np.abs(target_velocity)))
+        fast_defer_reason = None
 
         # ========================================================
         # 🚀 STRATEGY A: VELOCITY-BASED DYNAMIC PROXIMITY
@@ -165,11 +166,10 @@ class TeleopController:
         
         if dist_to_last < trigger_distance:
             if change_in_target > SPATIAL_THRESHOLD:
-                if model_gap > LIVE_MODEL_GAP_SEND_THRESHOLD_RAD:
-                    return True, f"ModelGap_Gap{model_gap:.3f}_Dist{dist_to_last:.3f}"
                 if target_velocity_mag > LIVE_TARGET_FAST_VELOCITY_RAD_S:
-                    return False, f"TargetMovingFast_Vel{target_velocity_mag:.3f}"
-                return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
+                    fast_defer_reason = f"TargetMovingFast_Vel{target_velocity_mag:.3f}"
+                else:
+                    return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
         
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!
@@ -179,14 +179,15 @@ class TeleopController:
             self.last_stuck_check_time = now
             
             error_to_last_target = np.max(np.abs(q_current - self.last_sent_target))
+            stuck_error = max(error_to_last_target, error_to_latest_target)
             
-            if self.check_stuck_condition(velocity_mag, error_to_last_target, now):
+            if self.check_stuck_condition(velocity_mag, stuck_error, now):
                 # Only trigger if user REALLY moved their hand OR if the robot is far from the current target
-                if change_in_target > TARGET_CHANGE_THRESHOLD or error_to_last_target > PROXIMITY_THRESHOLD:
+                if change_in_target > TARGET_CHANGE_THRESHOLD or stuck_error > PROXIMITY_THRESHOLD:
                     self.logger.warn(f"⚠️ Stuck Detected (Vel: {velocity_mag:.4f}) - Retriggering")
                     return True, f"Stuck_Vel{velocity_mag:.4f}_Delta{change_in_target:.3f}"
 
-        return False, "Wait"
+        return False, fast_defer_reason or "Wait"
 
     def mark_command_sent(self, q_target, sent_time):
         """Update controller state only after the motion socket accepts the command."""
