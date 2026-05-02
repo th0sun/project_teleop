@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MG400 Teach-and-Repeat Demo</title>
+  <meta name="description" content="MG400 teach-and-repeat demo video">
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      align-items: center;
+      display: flex;
+      justify-content: center;
+      margin: 0;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    main {
+      max-width: 560px;
+      text-align: center;
+    }
+
+    h1 {
+      font-size: 24px;
+      margin-bottom: 12px;
+    }
+
+    p {
+      color: #666;
+      font-size: 16px;
+      line-height: 1.5;
+    }
+
+    a {
+      color: #2563eb;
+      font-weight: 600;
+    }
+  </style>
+  <script>
+    async function redirectToCurrentVideo() {
+      const status = document.getElementById("status");
+      const link = document.getElementById("video-link");
+
+      try {
+        const response = await fetch("video_url.txt", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`video_url.txt returned ${response.status}`);
+        }
+
+        const videoUrl = (await response.text()).trim();
+        if (!/^https?:\/\//.test(videoUrl)) {
+          throw new Error("video_url.txt must contain one http(s) URL");
+        }
+
+        link.href = videoUrl;
+        link.textContent = "Open latest demo video";
+        status.textContent = "Redirecting to the latest demo video...";
+        window.location.replace(videoUrl);
+      } catch (error) {
+        status.textContent = "Video link is not configured yet.";
+        link.textContent = "Please update video_url.txt";
+      }
+    }
+
+    window.addEventListener("DOMContentLoaded", redirectToCurrentVideo);
+  </script>
+</head>
+<body>
+  <main>
+    <h1>MG400 Teach-and-Repeat Demo</h1>
+    <p id="status">Loading the latest demo video...</p>
+    <p><a id="video-link" href="video_url.txt">Open video link</a></p>
+  </main>
+</body>
+</html>
+
