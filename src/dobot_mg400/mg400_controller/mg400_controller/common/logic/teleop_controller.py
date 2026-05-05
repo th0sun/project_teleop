@@ -20,7 +20,6 @@ from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import ( PROXIMITY_THRESHOLD,
      STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
     TARGET_CHANGE_THRESHOLD, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC,
-    LIVE_TARGET_FAST_VELOCITY_RAD_S,
 )
 
 class TeleopController:
@@ -129,9 +128,11 @@ class TeleopController:
                 pacing intentionally ignores it because real-world tests showed
                 queue-state gating can make live teleop follow old queue tails.
             run_queued_cmd: accepted for wiring compatibility; see above.
-            target_velocity: filtered Unity/VR target velocity in rad/s.  When
-                the operator is sweeping quickly, do not promote that passing
-                point into the MG400 FIFO queue.
+            target_velocity: filtered Unity/VR target velocity in rad/s.  It is
+                accepted for telemetry/wiring compatibility, but it no longer
+                blocks sends.  Dynamic proximity already limits how often points
+                enter the MG400 FIFO; when the robot is ready, send the newest
+                target instead of waiting for the hand to slow down.
         
         Returns:
             (bool, str): (Should Send?, Reason)
@@ -151,11 +152,6 @@ class TeleopController:
         dist_to_last = np.max(np.abs(q_current - self.last_sent_target))
         change_in_target = np.max(np.abs(latest_target - self.last_sent_target))
         error_to_latest_target = np.max(np.abs(q_current - latest_target))
-        target_velocity_mag = 0.0
-        if target_velocity is not None:
-            target_velocity_mag = float(np.max(np.abs(target_velocity)))
-        fast_defer_reason = None
-
         # ========================================================
         # 🚀 STRATEGY A: VELOCITY-BASED DYNAMIC PROXIMITY
         # ========================================================
@@ -166,10 +162,7 @@ class TeleopController:
         
         if dist_to_last < trigger_distance:
             if change_in_target > SPATIAL_THRESHOLD:
-                if target_velocity_mag > LIVE_TARGET_FAST_VELOCITY_RAD_S:
-                    fast_defer_reason = f"TargetMovingFast_Vel{target_velocity_mag:.3f}"
-                else:
-                    return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
+                return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
         
         # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!
@@ -187,7 +180,7 @@ class TeleopController:
                     self.logger.warn(f"⚠️ Stuck Detected (Vel: {velocity_mag:.4f}) - Retriggering")
                     return True, f"Stuck_Vel{velocity_mag:.4f}_Delta{change_in_target:.3f}"
 
-        return False, fast_defer_reason or "Wait"
+        return False, "Wait"
 
     def mark_command_sent(self, q_target, sent_time):
         """Update controller state only after the motion socket accepts the command."""
