@@ -387,28 +387,6 @@ class TeleopNode(Node):
         except Exception as e:
             self.get_logger().error(f"Error in _unity_callback: {e}")
 
-    def _realtime_latest_target(self, now_wall: float):
-        """Return the latest Unity target only.
-
-        Realtime teleop must not enqueue a batch of historical Unity samples:
-        MG400's motion port is FIFO, so any batch sent while the hand is still
-        moving becomes stale tail work.  CP is kept alive by feedback-driven
-        top-up decisions in TeleopController, but each top-up sends only the
-        current latest target.
-        """
-        if self.latest_target is None:
-            return None
-
-        max_age = float(getattr(motion_config, "REALTIME_TARGET_MAX_AGE_SEC", 0.35))
-        latest_q = np.asarray(self.latest_target[:4], dtype=float)
-        target_recv_time = float(self.target_recv_time)
-        unity_send_time = float(self.unity_send_time)
-
-        target_age = now_wall - target_recv_time if target_recv_time > 0 else 0.0
-        if target_age > max_age:
-            return None
-        return latest_q, target_recv_time, unity_send_time
-
     def _suction_callback(self, msg):
         """รับคำสั่งเปิด/ปิดหัวดูด/Gripper จาก Unity (Trigger Button)"""
         requested_state = msg.data
@@ -891,13 +869,8 @@ class TeleopNode(Node):
             )
 
             if should_send:
-                latest_item = self._realtime_latest_target(now_wall)
-                if latest_item is None:
-                    return
-                target_q, target_recv_time, unity_send_time = latest_item
-
                 if motion_config.SCENE_SAFETY_BLOCK_REALTIME:
-                    safety_result = self.scene_safety_guard.check_joints_rad(target_q)
+                    safety_result = self.scene_safety_guard.check_joints_rad(self.latest_target)
                     if safety_result.blocked:
                         if now - self._last_scene_safety_block_log > 0.5:
                             self.get_logger().error(
@@ -912,7 +885,7 @@ class TeleopNode(Node):
                 # force_send=True when stuck: bypass should_skip_motion which silently drops commands
                 is_stuck_recovery = send_reason.startswith("Stuck")
                 cmd_str, q_safe = self.controller.format_command_string(
-                    target_q, q_current=q_current, force_send=is_stuck_recovery)
+                    self.latest_target, q_current=q_current, force_send=is_stuck_recovery)
 
                 if not cmd_str:
                     return
@@ -921,28 +894,28 @@ class TeleopNode(Node):
                 t3_cmd_send = time.time()
                 # 3. Send to Robot
                 if self.sender.send(cmd_str):
-
                     # Start Tracking (T1-T3)
                     self.latency_analyzer.start_tracking(
-                        unity_send_time,
-                        target_recv_time,
+                        self.unity_send_time,
+                        self.target_recv_time,
                         t3_cmd_send,
                         q_safe,
                         current_q=q_current
                     )
 
                     # File Log (CSV)
+                    dist_to_last = np.max(np.abs(q_current - q_safe))
                     sent_mono = time.perf_counter()
                     time_since_last = sent_mono - self.controller.last_sent_time
                     velocity_mag = np.max(self.controller.robot_velocity)
                     network_delay_ms = (
-                        (target_recv_time - unity_send_time) * 1000.0
-                        if target_recv_time > 0 and unity_send_time > 0
+                        (self.target_recv_time - self.unity_send_time) * 1000.0
+                        if self.target_recv_time > 0 and self.unity_send_time > 0
                         else 0.0
                     )
                     decision_delay_ms = (
-                        (t3_cmd_send - target_recv_time) * 1000.0
-                        if target_recv_time > 0
+                        (t3_cmd_send - self.target_recv_time) * 1000.0
+                        if self.target_recv_time > 0
                         else 0.0
                     )
 
@@ -951,10 +924,10 @@ class TeleopNode(Node):
                     if self.triple_logger:
                         self.triple_logger.log_ros_cmd(
                             q_safe,
-                            target_q,
+                            self.latest_target,
                             t3_cmd_send,
-                            t1_unity_send_ros_wall=unity_send_time,
-                            t2_ros_recv_wall=target_recv_time,
+                            t1_unity_send_ros_wall=self.unity_send_time,
+                            t2_ros_recv_wall=self.target_recv_time,
                             network_delay_ms=network_delay_ms,
                             decision_delay_ms=decision_delay_ms,
                             send_reason=send_reason,
@@ -969,7 +942,7 @@ class TeleopNode(Node):
 
                     # CLI Report
                     msg = self.latency_analyzer.format_sent_report(
-                        should_send, send_reason, q_current, target_q,
+                        should_send, send_reason, q_current, self.latest_target,
                         self.controller.last_sent_target, self.controller.last_sent_time,
                         self.controller.robot_velocity,
                         robot_mode=robot_status['robot_mode'],

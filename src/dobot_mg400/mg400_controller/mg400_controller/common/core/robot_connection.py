@@ -222,22 +222,15 @@ class RobotConnection:
                 return False
         try:
             cmd_str = command if isinstance(command, str) else command.decode()
-            commands = [part.strip() for part in cmd_str.split(';') if part.strip()]
-            if not commands:
-                return False
-            for item in commands:
-                if not item.endswith('\n'):
-                    item += '\n'
-                self.cmd_sock.send(item.encode())
+            if not cmd_str.endswith('\n'):
+                cmd_str += '\n'
+            self.cmd_sock.send(cmd_str.encode())
             return True
         except (OSError, socket.error) as e:
             self.logger.warn(f"Motion socket error: {e}. Reconnecting...")
             if self._reconnect_port('cmd'):
                 try:
-                    for item in commands:
-                        if not item.endswith('\n'):
-                            item += '\n'
-                        self.cmd_sock.send(item.encode())
+                    self.cmd_sock.send(cmd_str.encode())
                     return True
                 except Exception as retry_e:
                     self.logger.error(f"Retry motion failed: {retry_e}")
