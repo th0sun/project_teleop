@@ -34,10 +34,7 @@ TARGET_CHANGE_THRESHOLD = 0.005  # rad (~0.3°) - Target ต้องเปล�
 # กำหนดค่าสำหรับ Dynamic Proximity
 DYNAMIC_PROXIMITY_BASE_RAD = 0.005   # rad (~0.3°) - 24/02-style base gate
 DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำหรับคำนวณระยะเพิ่มตามความเร็ว
-REALTIME_CP_QUEUE_DEPTH = 3       # live teleop sends up to N fresh Unity targets per top-up
-REALTIME_TARGET_BUFFER_SIZE = 8   # freshest Unity targets only; sent immediately, not replayed by time
-REALTIME_TARGET_MAX_AGE_SEC = 0.35 # discard stale targets instead of chasing old tails
-REALTIME_TARGET_MIN_DELTA_RAD = 0.003 # skip tiny jitter-only target samples
+REALTIME_TARGET_MAX_AGE_SEC = 0.35 # discard stale latest targets instead of chasing old tails
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection

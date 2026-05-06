@@ -19,7 +19,6 @@ import numpy as np
 import time
 import json
 import os
-from collections import deque
 
 # Import configuration
 from mg400_controller.common.config.robot_config import (
@@ -95,9 +94,6 @@ class TeleopNode(Node):
         self.controller = TeleopController(self.validator, self.planner, self.get_logger())
 
         self.latest_target = None
-        self._realtime_target_buffer = deque(
-            maxlen=int(getattr(motion_config, "REALTIME_TARGET_BUFFER_SIZE", 8))
-        )
 
         # 1. Initialize logic modules
         # Import MotionConfig for thresholds and Analyzer
@@ -387,56 +383,31 @@ class TeleopNode(Node):
             self.latest_target = q_compensated_safe          # Latency-compensated target
             self.target_recv_time = now_ros_sec          # T2: ROS receive time
             self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
-            self._append_realtime_target(q_compensated_safe, now_ros_sec, corrected_unity_time)
 
         except Exception as e:
             self.get_logger().error(f"Error in _unity_callback: {e}")
 
-    def _append_realtime_target(self, q_target, ros_recv_time: float, unity_send_time: float) -> None:
-        """Keep fresh Unity targets available for the next realtime CP top-up."""
-        q_target = np.asarray(q_target[:4], dtype=float)
-        min_delta = float(getattr(motion_config, "REALTIME_TARGET_MIN_DELTA_RAD", 0.003))
-        if self._realtime_target_buffer:
-            last_q = self._realtime_target_buffer[-1][0]
-            if float(np.max(np.abs(q_target - last_q))) < min_delta:
-                return
-        self._realtime_target_buffer.append((q_target.copy(), float(ros_recv_time), float(unity_send_time)))
+    def _realtime_latest_target(self, now_wall: float):
+        """Return the latest Unity target only.
 
-    def _clear_realtime_target_buffer(self) -> None:
-        self._realtime_target_buffer.clear()
-
-    def _realtime_cp_burst_targets(self, now_wall: float, q_current):
-        """Return fresh Unity targets for the next CP top-up.
-
-        This does not generate synthetic 1/3, 2/3 points and does not wait for
-        recorded timestamps.  Unity already streams dense samples, so this just
-        takes the freshest samples currently available, sends them now, and
-        guarantees the last command is the latest target.
+        Realtime teleop must not enqueue a batch of historical Unity samples:
+        MG400's motion port is FIFO, so any batch sent while the hand is still
+        moving becomes stale tail work.  CP is kept alive by feedback-driven
+        top-up decisions in TeleopController, but each top-up sends only the
+        current latest target.
         """
         if self.latest_target is None:
-            return []
+            return None
 
         max_age = float(getattr(motion_config, "REALTIME_TARGET_MAX_AGE_SEC", 0.35))
-        while self._realtime_target_buffer and now_wall - self._realtime_target_buffer[0][1] > max_age:
-            self._realtime_target_buffer.popleft()
-
-        depth = max(1, int(getattr(motion_config, "REALTIME_CP_QUEUE_DEPTH", 3)))
         latest_q = np.asarray(self.latest_target[:4], dtype=float)
         target_recv_time = float(self.target_recv_time)
         unity_send_time = float(self.unity_send_time)
 
         target_age = now_wall - target_recv_time if target_recv_time > 0 else 0.0
         if target_age > max_age:
-            return []
-
-        burst = list(self._realtime_target_buffer)[-depth:]
-        if not burst:
-            return [(latest_q, target_recv_time, unity_send_time)]
-
-        if float(np.max(np.abs(burst[-1][0] - latest_q))) > 1e-9:
-            burst = burst[-max(0, depth - 1):]
-            burst.append((latest_q, target_recv_time, unity_send_time))
-        return burst[-depth:]
+            return None
+        return latest_q, target_recv_time, unity_send_time
 
     def _suction_callback(self, msg):
         """รับคำสั่งเปิด/ปิดหัวดูด/Gripper จาก Unity (Trigger Button)"""
@@ -632,7 +603,6 @@ class TeleopNode(Node):
         now_wall = time.time()
         if q_current is None:
             self.latest_target = None
-            self._clear_realtime_target_buffer()
             self.controller.reset_reference(None, now=now_mono)
             try:
                 self.target_compensator.reset()
@@ -646,7 +616,6 @@ class TeleopNode(Node):
 
         q_current = np.asarray(q_current[:4], dtype=float)
         self.latest_target = q_current.copy()
-        self._clear_realtime_target_buffer()
         self.controller.reset_reference(q_current, now=now_mono)
         try:
             self.target_compensator.reset(q_current, target_time=now_wall)
@@ -922,42 +891,38 @@ class TeleopNode(Node):
             )
 
             if should_send:
-                burst_targets = self._realtime_cp_burst_targets(now_wall, q_current)
-                if not burst_targets:
+                latest_item = self._realtime_latest_target(now_wall)
+                if latest_item is None:
                     return
+                target_q, target_recv_time, unity_send_time = latest_item
 
                 if motion_config.SCENE_SAFETY_BLOCK_REALTIME:
-                    for target_q, _, _ in burst_targets:
-                        safety_result = self.scene_safety_guard.check_joints_rad(target_q)
-                        if safety_result.blocked:
-                            if now - self._last_scene_safety_block_log > 0.5:
-                                self.get_logger().error(
-                                    "🧱 Scene safety blocked realtime target: "
-                                    f"{safety_result.status} {safety_result.detail} "
-                                    f"tcp={np.round(safety_result.point_xyzr[:3], 1).tolist()}"
-                                )
-                                self._last_scene_safety_block_log = now
-                            return
+                    safety_result = self.scene_safety_guard.check_joints_rad(target_q)
+                    if safety_result.blocked:
+                        if now - self._last_scene_safety_block_log > 0.5:
+                            self.get_logger().error(
+                                "🧱 Scene safety blocked realtime target: "
+                                f"{safety_result.status} {safety_result.detail} "
+                                f"tcp={np.round(safety_result.point_xyzr[:3], 1).tolist()}"
+                            )
+                            self._last_scene_safety_block_log = now
+                        return
 
                 # 1. Format Command
                 # force_send=True when stuck: bypass should_skip_motion which silently drops commands
                 is_stuck_recovery = send_reason.startswith("Stuck")
-                sent_count = 0
-                for burst_idx, (target_q, target_recv_time, unity_send_time) in enumerate(burst_targets, start=1):
-                    cmd_str, q_safe = self.controller.format_command_string(
-                        target_q, q_current=q_current, force_send=is_stuck_recovery)
+                cmd_str, q_safe = self.controller.format_command_string(
+                    target_q, q_current=q_current, force_send=is_stuck_recovery)
 
-                    if not cmd_str:
-                        continue
+                if not cmd_str:
+                    return
 
-                    # 2. Timing Stats
-                    t3_cmd_send = time.time()
-                    # 3. Send to Robot
-                    if not self.sender.send(cmd_str):
-                        break
+                # 2. Timing Stats
+                t3_cmd_send = time.time()
+                # 3. Send to Robot
+                if self.sender.send(cmd_str):
 
-                    # Start Tracking (T1-T3).  The newest command in the burst
-                    # will naturally become the active latency target.
+                    # Start Tracking (T1-T3)
                     self.latency_analyzer.start_tracking(
                         unity_send_time,
                         target_recv_time,
@@ -982,7 +947,6 @@ class TeleopNode(Node):
                     )
 
                     robot_status = self.feedback.get_error_status()
-                    burst_reason = f"{send_reason}_CPBurst{burst_idx}/{len(burst_targets)}"
 
                     if self.triple_logger:
                         self.triple_logger.log_ros_cmd(
@@ -993,7 +957,7 @@ class TeleopNode(Node):
                             t2_ros_recv_wall=target_recv_time,
                             network_delay_ms=network_delay_ms,
                             decision_delay_ms=decision_delay_ms,
-                            send_reason=burst_reason,
+                            send_reason=send_reason,
                             robot_mode=robot_status['robot_mode'],
                             error_status=robot_status['error_status'],
                             queue_backlog_rad=queue_backlog_rad,
@@ -1005,7 +969,7 @@ class TeleopNode(Node):
 
                     # CLI Report
                     msg = self.latency_analyzer.format_sent_report(
-                        should_send, burst_reason, q_current, target_q,
+                        should_send, send_reason, q_current, target_q,
                         self.controller.last_sent_target, self.controller.last_sent_time,
                         self.controller.robot_velocity,
                         robot_mode=robot_status['robot_mode'],
@@ -1022,10 +986,6 @@ class TeleopNode(Node):
 
                     # Update State in Controller
                     self.controller.mark_command_sent(q_safe, sent_mono)
-                    sent_count += 1
-
-                if sent_count:
-                    self._clear_realtime_target_buffer()
 
     def shutdown(self):
         """ปิดทุกอย่างอย่างเรียบร้อย"""
