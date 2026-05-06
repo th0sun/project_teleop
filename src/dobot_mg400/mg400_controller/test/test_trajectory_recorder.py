@@ -204,7 +204,7 @@ class TrajectoryRecorderTest(unittest.TestCase):
         self.assertTrue(recorder._flush_motion_queue_after_timeout())
         self.assertEqual(dashboard_commands, ["ResetRobot()", "EnableRobot()"])
 
-    def test_segment_speed_j_scales_with_delta_over_time(self):
+    def test_segment_speed_j_ignores_recorded_timestamp_replay(self):
         recorder = TrajectoryRecorder(
             command_send_fn=lambda cmd: True,
             logger=FakeLogger(),
@@ -220,9 +220,9 @@ class TrajectoryRecorderTest(unittest.TestCase):
         slow_speed = recorder._segment_speed_j(prev_frame, slow_frame)
         fast_speed = recorder._segment_speed_j(prev_frame, fast_frame)
 
-        self.assertGreater(fast_speed, slow_speed)
-        self.assertGreaterEqual(slow_speed, 15)
-        self.assertLessEqual(fast_speed, 100)
+        self.assertEqual(slow_speed, 40)
+        self.assertEqual(fast_speed, 40)
+        self.assertFalse(recorder.playback_tuning()["use_recorded_timing"])
 
     def test_mg400_ik_round_trips_known_joint_pose(self):
         kin = KinematicsCalculator()

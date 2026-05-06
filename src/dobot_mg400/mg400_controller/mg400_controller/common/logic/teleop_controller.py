@@ -124,10 +124,12 @@ class TeleopController:
             latest_target: newest target joint position in radians
             q_current: current robot joint position in radians
             now: monotonic timestamp from the control loop (perf_counter)
-            queue_backlog_rad: accepted for wiring compatibility; realtime
-                pacing intentionally ignores it because real-world tests showed
-                queue-state gating can make live teleop follow old queue tails.
-            run_queued_cmd: accepted for wiring compatibility; see above.
+            queue_backlog_rad: max joint distance between controller QTarget and
+                QActual.  This is used as a proximity signal for topping up CP
+                queue work without replaying old Unity timestamps.
+            run_queued_cmd: MG400 busy flag for the motion queue.  This is not a
+                queue-depth count, but it tells us whether the controller still
+                owns queued motion.
             target_velocity: filtered Unity/VR target velocity in rad/s.  It is
                 accepted for telemetry/wiring compatibility, but it no longer
                 blocks sends.  Dynamic proximity already limits how often points
@@ -163,8 +165,28 @@ class TeleopController:
         if dist_to_last < trigger_distance:
             if change_in_target > SPATIAL_THRESHOLD:
                 return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
+
+        # 2. Strategy B: CP queue top-up using controller feedback, not time.
+        # RunQueuedCmd is a busy flag, not a depth count.  QTarget-QActual tells
+        # us when the robot is reaching the controller's active queued target;
+        # at that point we can append a fresh spatial burst toward the latest
+        # hand target so CP keeps seeing a forward path instead of running dry.
+        if change_in_target > SPATIAL_THRESHOLD and run_queued_cmd is not None:
+            try:
+                queue_running = int(run_queued_cmd) != 0
+            except (TypeError, ValueError):
+                queue_running = True
+
+            if not queue_running:
+                return True, f"CPQueueEmpty_Delta{change_in_target:.3f}"
+
+            if queue_backlog_rad is not None and float(queue_backlog_rad) < trigger_distance:
+                return True, (
+                    f"CPTopUp_Backlog{float(queue_backlog_rad):.3f}"
+                    f"_Thr{trigger_distance:.3f}"
+                )
         
-        # 3. Strategy B: Velocity-Based Stuck Detection (Safety)
+        # 3. Strategy C: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!
         
         # Throttle checks to 10Hz

@@ -34,6 +34,10 @@ TARGET_CHANGE_THRESHOLD = 0.005  # rad (~0.3°) - Target ต้องเปล�
 # กำหนดค่าสำหรับ Dynamic Proximity
 DYNAMIC_PROXIMITY_BASE_RAD = 0.005   # rad (~0.3°) - 24/02-style base gate
 DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำหรับคำนวณระยะเพิ่มตามความเร็ว
+REALTIME_CP_QUEUE_DEPTH = 3       # live teleop sends up to N fresh Unity targets per top-up
+REALTIME_TARGET_BUFFER_SIZE = 8   # freshest Unity targets only; sent immediately, not replayed by time
+REALTIME_TARGET_MAX_AGE_SEC = 0.35 # discard stale targets instead of chasing old tails
+REALTIME_TARGET_MIN_DELTA_RAD = 0.003 # skip tiny jitter-only target samples
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection
@@ -155,17 +159,11 @@ SEGMENT_MIN_SPEED_L = 5                       # Minimum SpeedL percentage
 SEGMENT_MAX_SPEED_L = 100                     # Maximum SpeedL percentage
 SEGMENT_ACC_L = 80                            # Default AccL % for Cartesian commands
 
-# Teach-and-repeat execution profile
-# preserve_timing:
-#   Replay the taught timestamps as closely as possible.  This is useful for
-#   studies that care about human demonstration timing, but it can command low
-#   SpeedL/SpeedJ values when the hand moved slowly.
-# fastest_path_repeat:
-#   Preserve the taught path geometry, but do not preserve the hand timestamps.
-#   The compiled program uses the configured fast speed/acc/CP limits and queues
-#   ahead aggressively so the MG400 can execute as fast as its controller and
-#   mechanical constraints allow.
-PLAYBACK_EXECUTION_PROFILE = "preserve_timing"  # preserve_timing | fastest_path_repeat
+# Teach-and-repeat execution model
+# Preserve waypoint order/path geometry, but never replay the demonstrator's
+# timestamps.  Runtime motion is controlled by operator SpeedJ/AccJ/SpeedL/AccL
+# and CP settings, and the compiled command plan is queued early for blending.
+PLAYBACK_EXECUTION_PROFILE = "operator_tuned_queue"
 FAST_REPEAT_SPEED_J = 100
 FAST_REPEAT_ACC_J = 100
 FAST_REPEAT_SPEED_L = 100

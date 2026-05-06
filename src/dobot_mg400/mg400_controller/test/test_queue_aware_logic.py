@@ -188,7 +188,7 @@ class QueueAwareLogicTest(unittest.TestCase):
         self.assertFalse(should_send)
         self.assertEqual(reason, "Wait")
 
-    def test_queue_feedback_does_not_force_extra_live_sends(self):
+    def test_queue_feedback_refills_cp_when_active_target_is_near(self):
         controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
         controller.last_sent_target = np.zeros(4)
         controller.robot_velocity = np.zeros(4)
@@ -200,13 +200,23 @@ class QueueAwareLogicTest(unittest.TestCase):
             queue_backlog_rad=0.0,
             run_queued_cmd=0,
         )
-        self.assertFalse(should_send)
-        self.assertEqual(reason, "Wait")
+        self.assertTrue(should_send)
+        self.assertTrue(reason.startswith("CPQueueEmpty_"))
 
         should_send, reason = controller.should_send_command(
             np.array([0.08, 0.0, 0.0, 0.0]),
             np.array([0.03, 0.0, 0.0, 0.0]),
             now=10.1,
+            queue_backlog_rad=0.0,
+            run_queued_cmd=1,
+        )
+        self.assertTrue(should_send)
+        self.assertTrue(reason.startswith("CPTopUp_"))
+
+        should_send, reason = controller.should_send_command(
+            np.array([0.08, 0.0, 0.0, 0.0]),
+            np.array([0.03, 0.0, 0.0, 0.0]),
+            now=10.2,
             queue_backlog_rad=1.0,
             run_queued_cmd=1,
         )
