@@ -35,6 +35,7 @@ TARGET_CHANGE_THRESHOLD = 0.005  # rad (~0.3°) - Target ต้องเปล�
 DYNAMIC_PROXIMITY_BASE_RAD = 0.005   # rad (~0.3°) - 24/02-style base gate
 DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำหรับคำนวณระยะเพิ่มตามความเร็ว
 REALTIME_TARGET_MAX_AGE_SEC = 0.35 # discard stale latest targets instead of chasing old tails
+REALTIME_CP_BATCH_STEPS = 3        # keep CP fed with a short current-to-latest burst
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection

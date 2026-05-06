@@ -47,6 +47,9 @@ class DummyPlanner:
     def format_command(self, q_safe, speed_percent):
         return f"CMD:{speed_percent}"
 
+    def plan_batch_motion(self, q_target, q_current, num_steps=3, force_send=False):
+        return ";".join(f"CMD{i}" for i in range(1, int(num_steps) + 1)), 100, 0.1
+
 
 class DummyPublisher:
     def __init__(self):
@@ -188,7 +191,7 @@ class QueueAwareLogicTest(unittest.TestCase):
         self.assertFalse(should_send)
         self.assertEqual(reason, "Wait")
 
-    def test_queue_feedback_refills_cp_when_active_target_is_near(self):
+    def test_queue_feedback_does_not_force_stale_tail_refills(self):
         controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
         controller.last_sent_target = np.zeros(4)
         controller.robot_velocity = np.zeros(4)
@@ -200,8 +203,8 @@ class QueueAwareLogicTest(unittest.TestCase):
             queue_backlog_rad=0.0,
             run_queued_cmd=0,
         )
-        self.assertTrue(should_send)
-        self.assertTrue(reason.startswith("CPQueueEmpty_"))
+        self.assertFalse(should_send)
+        self.assertEqual(reason, "Wait")
 
         should_send, reason = controller.should_send_command(
             np.array([0.08, 0.0, 0.0, 0.0]),
@@ -210,8 +213,8 @@ class QueueAwareLogicTest(unittest.TestCase):
             queue_backlog_rad=0.0,
             run_queued_cmd=1,
         )
-        self.assertTrue(should_send)
-        self.assertTrue(reason.startswith("CPTopUp_"))
+        self.assertFalse(should_send)
+        self.assertEqual(reason, "Wait")
 
         should_send, reason = controller.should_send_command(
             np.array([0.08, 0.0, 0.0, 0.0]),
@@ -222,6 +225,16 @@ class QueueAwareLogicTest(unittest.TestCase):
         )
         self.assertFalse(should_send)
         self.assertEqual(reason, "Wait")
+
+    def test_format_command_string_sends_current_to_latest_micro_batch(self):
+        controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())
+        cmd_str, q_safe = controller.format_command_string(
+            np.array([0.09, 0.0, 0.0, 0.0]),
+            q_current=np.zeros(4),
+        )
+
+        self.assertEqual(cmd_str, "CMD1;CMD2;CMD3")
+        self.assertTrue(np.allclose(q_safe, np.array([0.09, 0.0, 0.0, 0.0])))
 
     def test_stuck_recovery_can_retrigger_when_robot_stops_far_from_last_target(self):
         controller = TeleopController(DummyValidator(), DummyPlanner(), DummyLogger())

@@ -109,13 +109,13 @@ class MotionPlanner:
         
         return command, speed, distance
 
-    def plan_batch_motion(self, q_target, q_current, num_steps=3):
+    def plan_batch_motion(self, q_target, q_current, num_steps=3, force_send=False):
         """
         วางแผนการเคลื่อนที่แบบชุด (Micro-interpolation)
         เพื่อความนิ่งสูงสุดในจังหวะเคลื่อนที่ละเอียด
         """
-        # ข้ามถ้าเคลื่อนที่น้อยเกินไป
-        if self.should_skip_motion(q_target, q_current):
+        # ข้ามถ้าเคลื่อนที่น้อยเกินไป เว้นแต่เป็น recovery/retrigger
+        if not force_send and self.should_skip_motion(q_target, q_current):
             return None, None, None
             
         # 🐛 BUG FIX: Always interpolate from the robot's CURRENT position (q_current)
@@ -129,8 +129,9 @@ class MotionPlanner:
         
         # สร้างชุดคำสั่งจุดย่อย
         commands = []
-        for i in range(1, num_steps + 1):
-            alpha = i / num_steps
+        steps = max(1, int(num_steps))
+        for i in range(1, steps + 1):
+            alpha = i / steps
             q_step = q_start + alpha * (q_target - q_start)
             cmd = self.format_command(q_step, speed)
             commands.append(cmd)
