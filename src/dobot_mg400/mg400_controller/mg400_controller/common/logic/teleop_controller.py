@@ -17,10 +17,9 @@ Extracted from vr_teleop_node.py for Clean Architecture.
 
 import numpy as np
 from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
-from mg400_controller.common.config.motion_config import (
-    PROXIMITY_THRESHOLD, STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
+from mg400_controller.common.config.motion_config import ( PROXIMITY_THRESHOLD,
+     STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
     TARGET_CHANGE_THRESHOLD, DYNAMIC_PROXIMITY_BASE_RAD, DYNAMIC_PROXIMITY_LOOKAHEAD_SEC,
-    REALTIME_CP_BATCH_STEPS,
 )
 
 class TeleopController:
@@ -125,12 +124,12 @@ class TeleopController:
             latest_target: newest target joint position in radians
             q_current: current robot joint position in radians
             now: monotonic timestamp from the control loop (perf_counter)
-            queue_backlog_rad: accepted for telemetry compatibility only.
-                MG400 does not expose queue depth, so realtime send decisions do
-                not use this value.
-            run_queued_cmd: accepted for telemetry compatibility only. This is a
-                busy flag, not queue depth, and must not be used to keep feeding
-                stale FIFO tail work.
+            queue_backlog_rad: max joint distance between controller QTarget and
+                QActual.  This is used as a proximity signal for topping up CP
+                queue work without replaying old Unity timestamps.
+            run_queued_cmd: MG400 busy flag for the motion queue.  This is not a
+                queue-depth count, but it tells us whether the controller still
+                owns queued motion.
             target_velocity: filtered Unity/VR target velocity in rad/s.  It is
                 accepted for telemetry/wiring compatibility, but it no longer
                 blocks sends.  Dynamic proximity already limits how often points
@@ -167,7 +166,27 @@ class TeleopController:
             if change_in_target > SPATIAL_THRESHOLD:
                 return True, f"DynProx_Dist{dist_to_last:.3f}_Thr{trigger_distance:.3f}"
 
-        # 2. Strategy B: Velocity-Based Stuck Detection (Safety)
+        # 2. Strategy B: CP queue top-up using controller feedback, not time.
+        # RunQueuedCmd is a busy flag, not a depth count.  QTarget-QActual tells
+        # us when the robot is reaching the controller's active queued target;
+        # at that point we can append a fresh spatial burst toward the latest
+        # hand target so CP keeps seeing a forward path instead of running dry.
+        if change_in_target > SPATIAL_THRESHOLD and run_queued_cmd is not None:
+            try:
+                queue_running = int(run_queued_cmd) != 0
+            except (TypeError, ValueError):
+                queue_running = True
+
+            if not queue_running:
+                return True, f"CPQueueEmpty_Delta{change_in_target:.3f}"
+
+            if queue_backlog_rad is not None and float(queue_backlog_rad) < trigger_distance:
+                return True, (
+                    f"CPTopUp_Backlog{float(queue_backlog_rad):.3f}"
+                    f"_Thr{trigger_distance:.3f}"
+                )
+        
+        # 3. Strategy C: Velocity-Based Stuck Detection (Safety)
         # Robot stopped moving but hasn't reached target? Retrigger!
         
         # Throttle checks to 10Hz
@@ -203,18 +222,7 @@ class TeleopController:
         # Calculate speed
         speed_percent = 100 
         
-        if q_current is not None:
-            # Realtime must keep the MG400 CP queue fed, but it must not replay
-            # historical Unity samples.  Build a tiny burst from the robot's
-            # actual position now to the latest target now; the last command in
-            # the burst is always the latest target used for pacing.
-            cmd_str, _, _ = self.planner.plan_batch_motion(
-                q_safe,
-                np.asarray(q_current[:4], dtype=float),
-                num_steps=REALTIME_CP_BATCH_STEPS,
-                force_send=force_send,
-            )
-        else:
-            cmd_str = self.planner.format_command(q_safe, speed_percent)
+        # โหมดปกติ (Single Point) เพื่อความลื่นไหลที่สุด
+        cmd_str = self.planner.format_command(q_safe, speed_percent)
         
         return cmd_str, q_safe

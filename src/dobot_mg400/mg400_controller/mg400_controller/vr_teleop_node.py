@@ -391,9 +391,10 @@ class TeleopNode(Node):
         """Return the latest Unity target only.
 
         Realtime teleop must not enqueue a batch of historical Unity samples:
-        MG400's motion port is FIFO, so historical Unity samples become stale
-        tail work.  CP is kept alive when the controller sends: each send is a
-        short current-robot-to-latest-target micro-batch.
+        MG400's motion port is FIFO, so any batch sent while the hand is still
+        moving becomes stale tail work.  CP is kept alive by feedback-driven
+        top-up decisions in TeleopController, but each top-up sends only the
+        current latest target.
         """
         if self.latest_target is None:
             return None
