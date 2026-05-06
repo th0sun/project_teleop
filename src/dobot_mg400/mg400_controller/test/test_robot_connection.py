@@ -44,6 +44,22 @@ class RobotConnectionTest(unittest.TestCase):
             ],
         )
 
+    def test_send_motion_cmd_splits_micro_batch_semicolons(self):
+        logger = FakeLogger()
+        conn = RobotConnection(logger)
+        conn.connected = True
+        conn.cmd_sock = FakeSocket()
+
+        self.assertTrue(conn.send_motion_cmd("JointMovJ(1,0,0,0);JointMovJ(2,0,0,0);"))
+
+        self.assertEqual(
+            conn.cmd_sock.sent,
+            [
+                "JointMovJ(1,0,0,0)\n",
+                "JointMovJ(2,0,0,0)\n",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
