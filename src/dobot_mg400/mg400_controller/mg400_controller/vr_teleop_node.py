@@ -286,11 +286,19 @@ class TeleopNode(Node):
             f"🎓 Teach & Repeat: {self.topics.teach_status} + "
             f"{self.topics.trajectory_data} + {self.topics.unity_trajectory}"
         )
-        self.get_logger().info(f"📊 Control Strategy: Proximity + Velocity-Based Stuck Detection")
-        self.get_logger().info(f"📏 Dyn Proximity Base: {motion_config.DYNAMIC_PROXIMITY_BASE_RAD:.3f} rad ({np.degrees(motion_config.DYNAMIC_PROXIMITY_BASE_RAD):.1f} deg)")
-        self.get_logger().info(f"🎯 Target Change Threshold: {motion_config.TARGET_CHANGE_THRESHOLD:.3f} rad ({np.degrees(motion_config.TARGET_CHANGE_THRESHOLD):.1f} deg)")
-        self.get_logger().info(f"⏱️  Stuck Time Threshold: {motion_config.STUCK_TIME_THRESHOLD:.1f} s")
-        self.get_logger().info(f"🚫 No Timeout - Pure Real-Time Control")
+        self.get_logger().info(f"📊 Control Strategy: Adaptive Δ + Per-Cmd SpeedJ + Stuck Detection")
+        self.get_logger().info(
+            f"📏 Adaptive gate: Δ "
+            f"{np.degrees(motion_config.REALTIME_DELTA_MIN_RAD):.1f}°"
+            f"-{np.degrees(motion_config.REALTIME_DELTA_MAX_RAD):.1f}°"
+            f" | hand_vel "
+            f"{np.degrees(motion_config.REALTIME_HAND_VEL_LOW_RAD_S):.0f}"
+            f"-{np.degrees(motion_config.REALTIME_HAND_VEL_HIGH_RAD_S):.0f}°/s"
+            f" | SpeedJ {motion_config.REALTIME_SPEEDJ_MIN}-{motion_config.REALTIME_SPEEDJ_MAX}%"
+        )
+        self.get_logger().info(
+            f"⏱️  Stuck Time Threshold: {motion_config.STUCK_TIME_THRESHOLD:.1f} s"
+        )
 
     @staticmethod
     def _env_bool(name, default=False):

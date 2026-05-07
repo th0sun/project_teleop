@@ -69,10 +69,9 @@ REALTIME_ACCJ_MIN = 25            # % - matches SpeedJ to keep ramp shape consis
 REALTIME_ACCJ_MAX = 100           # %
 REALTIME_CP = 80                  # CP for live teleop commands (matches CP_VALUE)
 
-# Legacy aliases (DynProx single-strategy fallback).  Kept for callers that
-# still import these names; the new adaptive controller does not use them.
-DYNAMIC_PROXIMITY_BASE_RAD = REALTIME_DELTA_MIN_RAD
-DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.10
+# (DYNAMIC_PROXIMITY_* legacy aliases removed — no remaining consumers after
+# the adaptive controller refactor.  If a downstream tool still imports them,
+# update it to read REALTIME_DELTA_MIN_RAD / REALTIME_HAND_VEL_HIGH_RAD_S.)
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection
