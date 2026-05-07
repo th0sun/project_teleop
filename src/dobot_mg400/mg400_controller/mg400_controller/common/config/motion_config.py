@@ -169,6 +169,15 @@ PATH_SIMPLIFY_TOLERANCE_DEG = 3.0   # was 1.0 — enforce smooth-regime min spac
 # explicitly enables mixed primitives for offline analysis.  The classifier is
 # still available and tested, but recent hardware trials showed Arc/MovL can
 # trigger controller alarms when the fitted path is close to fixture limits.
+# On-hardware verification (mixed_test2.py — Arc + Arc + JointMovJ rectangle
+# path on real MG400): the classifier itself runs fine, the compiled MovL/Arc
+# commands execute correctly, BUT only if PLAYBACK_DEFAULT_SPEED_L is kept
+# ≤ ~30%.  At SpeedL=60 the same path triggered controller alarms 96/98 +
+# servo 34322 (the original bug-report alarm class) because the planner's
+# Cartesian setpoint on Arc segments outruns the J1/J2 servo tracking
+# limit.  USE_MIXED_PRIMITIVES is left False by default so the production
+# path stays on JointMovJ-only; flip to True per session when an operator
+# wants Cartesian primitives and is OK with the slower SpeedL ceiling.
 USE_MIXED_PRIMITIVES = False
 SEGMENT_ENABLE_ARC = True           # Arc(through, end) — 1 cmd per smooth curve vs N JointMovJ
 SEGMENT_LINE_TOLERANCE_MM = 2.0    # max XYZ deviation (mm) from chord for MovL classification

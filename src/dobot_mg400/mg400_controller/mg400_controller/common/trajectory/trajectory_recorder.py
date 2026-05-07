@@ -88,7 +88,15 @@ PREVIEW_FINAL_CP = 0
 # job_request `options` payload.
 PLAYBACK_DEFAULT_SPEED_J = 80   # was 40; raised because Δ ≥ 3° is now guaranteed
 PLAYBACK_DEFAULT_ACC_J = 80
-PLAYBACK_DEFAULT_SPEED_L = 60   # was 40; Cartesian commands stay slightly more conservative
+# Cartesian primitives (MovL, Arc) are kept conservative.  On-robot test of
+# the mixed-primitive compile path (USE_MIXED_PRIMITIVES=True, J1 sweep with
+# 2 Arc + 1 JointMovJ): SpeedL=60 reproduced controller alarms 96/98 +
+# servo 34322 ("Position command too large") — the same alarm class the
+# original bug report flagged.  SpeedL=25-30 ran the same trajectory clean
+# at peak 48°/s with AccL=80.  The 30 default leaves headroom for slightly
+# tighter geometries; operators bump it via job_request options when the
+# path is verified to stay away from workspace boundaries.
+PLAYBACK_DEFAULT_SPEED_L = 30   # was 60; lowered after on-hardware verification
 PLAYBACK_DEFAULT_ACC_L = 80
 PLAYBACK_DEFAULT_CP = 80        # was 30; EXP4 — biggest single contributor to teach jitter
 PLAYBACK_DEFAULT_FINAL_CP = 0
