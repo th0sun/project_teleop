@@ -30,16 +30,20 @@ class LatencyAnalyzer:
         self.t4_motion_start = 0.0
         self.t5_target_reached = 0.0
         self.current_cmd_target = None
+        self.current_cmd_seq = None
+        self.current_cmd_tool_target = None
         self.is_tracking = False
         self.peak_velocity = 0.0
         self.initial_q = None
 
-    def start_tracking(self, t1, t2, t3, target, current_q=None):
+    def start_tracking(self, t1, t2, t3, target, current_q=None, command_seq=None, target_tool=None):
         """Start tracking a new command"""
         self.t1_unity_send = t1
         self.t2_ros_recv = t2
         self.t3_cmd_send = t3
         self.current_cmd_target = target.copy()
+        self.current_cmd_seq = command_seq
+        self.current_cmd_tool_target = None if target_tool is None else np.asarray(target_tool, dtype=float).copy()
         self.t4_motion_start = 0.0
         self.t5_target_reached = 0.0
         self.is_tracking = True
@@ -140,6 +144,8 @@ class LatencyAnalyzer:
             'execution_ms': motion_execution_ms,
             'e2e_ms': true_end_to_end_ms,
             'target': self.current_cmd_target,
+            'control_command_seq': self.current_cmd_seq,
+            'ros_cmd_tool_target': self.current_cmd_tool_target,
             'final_q': q_current,
             'final_error': final_error,
             'max_error': max_joint_error,

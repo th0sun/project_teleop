@@ -63,6 +63,10 @@ class UnifiedTripleLogger:
         self._last_unity_comp_rad: list[float | None] = [None] * JOINT_COUNT
         self._last_ros_cmd_rad: list[float | None] = [None] * JOINT_COUNT
         self._last_robot_rad: list[float | None] = [None] * JOINT_COUNT
+        self._last_ros_command_seq: int | None = None
+        self._last_ros_command_wall: float | None = None
+        self._last_robot_feedback_command_id: int | None = None
+        self._last_ros_cmd_tool_target: list[float | None] = [None] * 6
         self._last_robot_tool_actual: list[float | None] = [None] * 6
         self._last_robot_tool_target: list[float | None] = [None] * 6
 
@@ -81,6 +85,9 @@ class UnifiedTripleLogger:
             "notes",
             "elapsed_sec",
             "ros_wall_timestamp",
+            "control_command_seq",
+            "robot_feedback_command_id",
+            "active_ros_command_age_ms",
             "unity_raw_timestamp",
             "t1_unity_send_ros_wall",
             "t2_ros_recv_wall",
@@ -118,10 +125,21 @@ class UnifiedTripleLogger:
                 for idx in range(1, JOINT_COUNT + 1):
                     joint_groups.append(f"{prefix}_j{idx}_{unit}")
         tool_groups = []
-        for prefix in ("robot_tool_actual", "robot_tool_target"):
+        for prefix in ("ros_cmd_tool_target", "robot_tool_actual", "robot_tool_target"):
             for name in ("x_mm", "y_mm", "z_mm", "r_deg", "aux5", "aux6"):
                 tool_groups.append(f"{prefix}_{name}")
-        return common + joint_groups + tool_groups
+        tool_delta_groups = []
+        for prefix in (
+            "delta_ros_cmd_tool_to_robot_actual",
+            "delta_robot_tool_target_to_actual",
+        ):
+            for name in ("x_mm", "y_mm", "z_mm", "r_deg"):
+                tool_delta_groups.append(f"{prefix}_{name}")
+        tool_metrics = [
+            "error_ros_cmd_tool_to_robot_actual_mm",
+            "error_robot_tool_target_to_actual_mm",
+        ]
+        return common + joint_groups + tool_groups + tool_delta_groups + tool_metrics
 
     @staticmethod
     def _joint4(values: Optional[Iterable[float]]) -> list[float | None]:
@@ -159,6 +177,22 @@ class UnifiedTripleLogger:
         return out
 
     @staticmethod
+    def _tool_delta4(actual: list[float | None], target: list[float | None]) -> list[float | None]:
+        out: list[float | None] = []
+        for left, right in zip(actual[:4], target[:4]):
+            if left is None or right is None:
+                out.append(None)
+            else:
+                out.append(left - right)
+        return out
+
+    @staticmethod
+    def _xyz_error_mm(actual: list[float | None], target: list[float | None]) -> float | None:
+        if any(value is None for value in [*actual[:3], *target[:3]]):
+            return None
+        return float(np.linalg.norm(np.asarray(actual[:3], dtype=float) - np.asarray(target[:3], dtype=float)))
+
+    @staticmethod
     def _fmt(value, digits: int = 6) -> str:
         if value is None:
             return ""
@@ -192,8 +226,26 @@ class UnifiedTripleLogger:
             if robot is not None:
                 self._last_robot_rad = self._joint4(robot)
 
+            control_command_seq = fields.get("control_command_seq")
+            if control_command_seq is not None:
+                self._last_ros_command_seq = int(control_command_seq)
+            elif event_type == "ros_command":
+                # Keep old call sites analyzable even if they do not pass a seq yet.
+                self._last_ros_command_seq = (self._last_ros_command_seq or 0) + 1
+                control_command_seq = self._last_ros_command_seq
+
+            if event_type == "ros_command":
+                self._last_ros_command_wall = ros_ts
+
+            robot_feedback_command_id = fields.get("robot_feedback_command_id")
+            if robot_feedback_command_id is not None:
+                self._last_robot_feedback_command_id = int(robot_feedback_command_id)
+
+            ros_cmd_tool_target = fields.get("ros_cmd_tool_target")
             robot_tool_actual = fields.get("robot_tool_actual")
             robot_tool_target = fields.get("robot_tool_target")
+            if ros_cmd_tool_target is not None:
+                self._last_ros_cmd_tool_target = self._tool6(ros_cmd_tool_target)
             if robot_tool_actual is not None:
                 self._last_robot_tool_actual = self._tool6(robot_tool_actual)
             if robot_tool_target is not None:
@@ -201,6 +253,13 @@ class UnifiedTripleLogger:
 
             delta_unity_cmd = self._delta(self._last_unity_comp_rad, self._last_ros_cmd_rad)
             delta_cmd_robot = self._delta(self._last_ros_cmd_rad, self._last_robot_rad)
+            delta_ros_tool_robot = self._tool_delta4(self._last_robot_tool_actual, self._last_ros_cmd_tool_target)
+            delta_robot_target_actual = self._tool_delta4(self._last_robot_tool_actual, self._last_robot_tool_target)
+            error_ros_tool_robot = self._xyz_error_mm(self._last_robot_tool_actual, self._last_ros_cmd_tool_target)
+            error_robot_target_actual = self._xyz_error_mm(self._last_robot_tool_actual, self._last_robot_tool_target)
+            active_age_ms = None
+            if self._last_ros_command_wall is not None:
+                active_age_ms = (ros_ts - self._last_ros_command_wall) * 1000.0
             source, target, flow = FLOW_LABELS.get(event_type, ("", "", ""))
 
             row = [
@@ -213,6 +272,9 @@ class UnifiedTripleLogger:
                 fields.get("notes") or "",
                 self._fmt(elapsed, 6),
                 self._fmt(ros_ts, 6),
+                self._fmt(control_command_seq if control_command_seq is not None else self._last_ros_command_seq, 0),
+                self._fmt(robot_feedback_command_id, 0),
+                self._fmt(active_age_ms, 3),
                 self._fmt(fields.get("unity_raw_timestamp"), 6),
                 self._fmt(fields.get("t1_unity_send_ros_wall"), 6),
                 self._fmt(fields.get("t2_ros_recv_wall"), 6),
@@ -254,7 +316,7 @@ class UnifiedTripleLogger:
             # For MG400 4-axis logs, the first four values are [X, Y, Z, R].
             # The last two packet values are preserved as aux fields instead
             # of assigning unsupported semantic names.
-            for tool in (self._last_robot_tool_actual, self._last_robot_tool_target):
+            for tool in (self._last_ros_cmd_tool_target, self._last_robot_tool_actual, self._last_robot_tool_target):
                 x, y, z, r, aux5, aux6 = tool
                 row.extend([
                     self._fmt(x, 6),
@@ -264,6 +326,13 @@ class UnifiedTripleLogger:
                     self._fmt(aux5, 6),
                     self._fmt(aux6, 6),
                 ])
+
+            for group in (delta_ros_tool_robot, delta_robot_target_actual):
+                row.extend(self._fmt(v, 6) for v in group)
+            row.extend([
+                self._fmt(error_ros_tool_robot, 6),
+                self._fmt(error_robot_target_actual, 6),
+            ])
 
             self._writer.writerow(row)
             if self._sample_count % 100 == 0:
@@ -314,6 +383,8 @@ class UnifiedTripleLogger:
         run_queued_cmd: int | None = None,
         time_since_last_cmd_ms: float | None = None,
         velocity_mag_rad_s: float | None = None,
+        control_command_seq: int | None = None,
+        ros_cmd_tool_target=None,
         joints_are_degrees: bool = True,
     ) -> None:
         cmd_rad = np.radians(self._joint4(ros_cmd_joints)) if joints_are_degrees else self._joint4(ros_cmd_joints)
@@ -335,8 +406,10 @@ class UnifiedTripleLogger:
             run_queued_cmd=run_queued_cmd,
             time_since_last_cmd_ms=time_since_last_cmd_ms,
             velocity_mag_rad_s=velocity_mag_rad_s,
+            control_command_seq=control_command_seq,
             unity_compensated_rad=unity_comp_rad,
             ros_cmd_rad=cmd_rad,
+            ros_cmd_tool_target=ros_cmd_tool_target,
         )
 
     def log_robot_feedback(
@@ -349,6 +422,7 @@ class UnifiedTripleLogger:
         error_status: int | None = None,
         robot_tool_actual=None,
         robot_tool_target=None,
+        robot_feedback_command_id: int | None = None,
         operation_mode: str | None = None,
         joints_are_degrees: bool = True,
     ) -> None:
@@ -361,6 +435,7 @@ class UnifiedTripleLogger:
             ros_wall_timestamp=ros_timestamp,
             robot_mode=robot_mode,
             error_status=error_status,
+            robot_feedback_command_id=robot_feedback_command_id,
             ros_cmd_rad=cmd_rad,
             robot_rad=robot_rad,
             robot_tool_actual=robot_tool_actual,
@@ -389,8 +464,10 @@ class UnifiedTripleLogger:
             max_joint_error_rad=metrics.get("max_error"),
             is_valid_arrival=metrics.get("is_valid"),
             operation_mode=metrics.get("operation_mode"),
+            control_command_seq=metrics.get("control_command_seq"),
             ros_cmd_rad=metrics.get("target"),
             robot_rad=metrics.get("final_q"),
+            ros_cmd_tool_target=metrics.get("ros_cmd_tool_target"),
             robot_tool_actual=metrics.get("final_tool_actual"),
             robot_tool_target=metrics.get("final_tool_target"),
         )
