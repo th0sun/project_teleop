@@ -183,20 +183,37 @@ PATH_SIMPLIFY_TOLERANCE_DEG = 3.0   # was 1.0 — enforce smooth-regime min spac
 #
 #   SpeedL  CP   alarm
 #   ------  --   -----
-#   60      80   ❌ controller 96/98 + servo 34322 within 0.88s
+#   60      80   ❌ controller 96/98 + servo J1/J2 34322 within 0.88s
 #   60      30   ✅
 #   60       0   ✅
 #   30      80   ✅
 #   25      80   ✅
 #
-# Diagnosis: at the Arc1→Arc2 transition, CP=80 rounds the corner so
-# aggressively that the controller's interpolated Cartesian setpoint moves
-# faster than the servo can track at SpeedL=60 — alarm 34322 ("Position
-# command too large").  Lowering EITHER SpeedL OR CP keeps the setpoint
-# rate under the servo limit; only the high-SpeedL × high-CP combo
-# triggers the trip.  Workspace radius (251mm) was nowhere near the inner
-# 175mm boundary, J2 was at -10.9° (well inside ±25°), CollisionState=0
-# — so the alarm is not a workspace, joint-limit, or collision issue.
+# Alarm decoded via the project's own RobotErrorDecoder against the
+# bundled alarmServo.json:
+#   34322 → "Position is out of range" / 位置给定超限保护
+#           ("Commanded position exceeded limit / protection").
+#           Solution per the table: "Enter the correct parameters".
+# Controller alarms 96 + 98 are not present in alarmController.json
+# (341 entries, range 16-4193); they appear to be drive-bus-level codes
+# the manufacturer does not publish.
+#
+# Mechanism (best-effort interpretation — the alarm description does not
+# distinguish between joint-limit / workspace / velocity / acceleration
+# limits, only that the COMMANDED position fell out of allowed range):
+# at the Arc1→Arc2 transition, CP=80 rounds the corner so aggressively
+# that the controller's blended Cartesian setpoint at some interpolation
+# tick goes out of range — joint limit, workspace boundary, or
+# transient singularity passage — even though every endpoint is well
+# inside the workspace (TCP at the trip was at 251mm radius, J2 at
+# -10.9°, CollisionState=0).  Reducing CP keeps the blended path closer
+# to the original Arc geometry and avoids the excursion; reducing
+# SpeedL gives the controller more time per interpolation tick which
+# also helps but is not the primary driver.
+#
+# This is not a speed-rate-tracking failure as the previous diagnosis
+# suggested — that hypothesis turned out to be wrong once the alarm
+# table was actually consulted.
 #
 # Mitigation in code: SEGMENT_CARTESIAN_CP_MAX caps the CP threaded into
 # MovL/Arc commands during mixed-primitive compile.  JointMovJ segments
