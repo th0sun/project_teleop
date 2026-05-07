@@ -52,10 +52,14 @@ def _lerp(a, b, t):
 
 
 class TeleopController:
-    def __init__(self, validator, planner, logger):
+    def __init__(self, validator, planner, logger, telemetry=None):
         self.validator = validator
         self.planner = planner
         self.logger = logger
+        # Optional adaptive analytics sink — kept separate from the production
+        # logger so post-hoc analysis only sees the new gate's behaviour, not
+        # mixed with triple_logger / latency telemetry.  None = disabled.
+        self.telemetry = telemetry
 
         # Last accepted-by-MG400 command target (4 joints, radians).  Drives
         # both gate "delta-since-last-send" and adaptive SpeedJ scaling.
@@ -218,11 +222,24 @@ class TeleopController:
             self._pending_acc_j = acc_j
             self._pending_cp = REALTIME_CP
             self._pending_delta_rad = delta
-            return True, (
+            reason = (
                 f"Adaptive_d{np.degrees(delta):.2f}deg"
                 f"_v{np.degrees(hand_vel):.0f}dps"
                 f"_S{speed_j}"
             )
+            if self.telemetry is not None:
+                self.telemetry.log_gate(
+                    reason=reason,
+                    delta_rad=delta,
+                    threshold_rad=threshold,
+                    hand_vel_rad_s=hand_vel,
+                    speed_j=speed_j,
+                    acc_j=acc_j,
+                    cp=REALTIME_CP,
+                    q_target=latest_target[:4],
+                    accepted=True,
+                )
+            return True, reason
 
         # Stuck recovery — robot hasn't reached last-sent target and has
         # near-zero velocity for STUCK_TIME_THRESHOLD seconds.  Throttled to
@@ -247,10 +264,42 @@ class TeleopController:
                     self._pending_acc_j = REALTIME_ACCJ_MAX
                     self._pending_cp = REALTIME_CP
                     self._pending_delta_rad = max(delta, REALTIME_DELTA_MAX_RAD)
-                    return True, (
+                    stuck_reason = (
                         f"Stuck_Vel{velocity_mag:.4f}_Delta{change_in_target:.3f}"
                     )
+                    if self.telemetry is not None:
+                        self.telemetry.log_gate(
+                            reason=stuck_reason,
+                            delta_rad=delta,
+                            threshold_rad=threshold,
+                            hand_vel_rad_s=hand_vel,
+                            speed_j=REALTIME_SPEEDJ_MAX,
+                            acc_j=REALTIME_ACCJ_MAX,
+                            cp=REALTIME_CP,
+                            q_target=latest_target[:4],
+                            accepted=True,
+                        )
+                    return True, stuck_reason
 
+        # Below-threshold: log as "gate" event (not accepted) so analysis can
+        # distinguish "didn't fire" from "wasn't called".  Throttle: only log
+        # if either delta or hand_vel is non-trivial, to keep the file small
+        # when the hand is dead-still.
+        if self.telemetry is not None and (
+            delta > REALTIME_DELTA_MIN_RAD * 0.25
+            or hand_vel > REALTIME_HAND_VEL_LOW_RAD_S * 0.5
+        ):
+            self.telemetry.log_gate(
+                reason="Wait",
+                delta_rad=delta,
+                threshold_rad=threshold,
+                hand_vel_rad_s=hand_vel,
+                speed_j=self._pending_speed_j,
+                acc_j=self._pending_acc_j,
+                cp=self._pending_cp,
+                q_target=latest_target[:4],
+                accepted=False,
+            )
         return False, "Wait"
 
     def mark_command_sent(self, q_target, sent_time):

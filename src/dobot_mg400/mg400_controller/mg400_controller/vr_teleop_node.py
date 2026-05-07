@@ -90,8 +90,27 @@ class TeleopNode(Node):
         self.planner = MotionPlanner(cfg.CONTROL_MODE, self.get_logger())
         self.target_compensator = TargetLatencyCompensator(self.validator)
 
+        # Adaptive realtime telemetry — kept separate from triple_logger so
+        # post-hoc analysis of the new gate / per-cmd SpeedJ scheme isn't
+        # mixed in with the production CSV.  Disabled cleanly if the
+        # log dir can't be opened.
+        self.adaptive_telemetry = None
+        try:
+            from mg400_controller.common.utils.adaptive_telemetry import (
+                AdaptiveTelemetry,
+            )
+            self.adaptive_telemetry = AdaptiveTelemetry()
+            self.get_logger().info(
+                f"📊 Adaptive telemetry: {self.adaptive_telemetry.path}"
+            )
+        except Exception as exc:
+            self.get_logger().warn(f"Adaptive telemetry disabled: {exc}")
+
         # Teleop Controller (The Brain)
-        self.controller = TeleopController(self.validator, self.planner, self.get_logger())
+        self.controller = TeleopController(
+            self.validator, self.planner, self.get_logger(),
+            telemetry=self.adaptive_telemetry,
+        )
 
         self.latest_target = None
 
@@ -115,6 +134,7 @@ class TeleopNode(Node):
 
         self._tool_query_counter = 0
         self._sample_counter = 0  # For session logger feedback decimation
+        self._realtime_command_seq = 0
         self._realtime_speed_defaults_pending = False
         self._last_realtime_speed_defaults_attempt = 0.0
 
@@ -726,6 +746,26 @@ class TeleopNode(Node):
             # Delegate velocity tracking to controller
             self.controller.update_robot_state(q_current, now)
 
+            # === ADAPTIVE TELEMETRY: PERIODIC FEEDBACK SNAPSHOT ===
+            # Capture robot-side state at ~5 Hz (every 10th 50 Hz tick) so
+            # post-hoc analysis can correlate gate decisions with what the
+            # joints actually did.  Cheap: enqueue is non-blocking.
+            if self.adaptive_telemetry is not None and (self._sample_counter % 10) == 0:
+                try:
+                    qd = self.controller.robot_velocity
+                    q_target_fb = self.feedback.get_target_position()
+                    backlog = float(np.max(np.abs(np.asarray(q_target_fb) - q_current)))
+                    self.adaptive_telemetry.log_feedback(
+                        q_actual_rad=q_current,
+                        qd_rad_s=qd,
+                        backlog_rad=backlog,
+                        robot_mode=int(self.feedback.get_robot_mode()),
+                        note=operation_mode,
+                    )
+                except Exception:
+                    # Never let telemetry break the control loop.
+                    pass
+
             # === SMART SUCTION TRIGGER ===
             if self.suction_pending and self.suction_target_q is not None:
                 dist = np.max(np.abs(q_current - self.suction_target_q))
@@ -783,6 +823,7 @@ class TeleopNode(Node):
                     error_status=err_info['error_status'],
                     robot_tool_actual=tool_act,
                     robot_tool_target=tool_tgt,
+                    robot_feedback_command_id=self.feedback.get_command_id(),
                     operation_mode=operation_mode,
                     joints_are_degrees=False,
                 )
@@ -894,13 +935,20 @@ class TeleopNode(Node):
                 t3_cmd_send = time.time()
                 # 3. Send to Robot
                 if self.sender.send(cmd_str):
+                    self._realtime_command_seq += 1
+                    control_command_seq = self._realtime_command_seq
+                    ros_cmd_tool_target = self.feedback.kinematics.forward_kinematics(
+                        np.degrees(q_safe)
+                    )
                     # Start Tracking (T1-T3)
                     self.latency_analyzer.start_tracking(
                         self.unity_send_time,
                         self.target_recv_time,
                         t3_cmd_send,
                         q_safe,
-                        current_q=q_current
+                        current_q=q_current,
+                        command_seq=control_command_seq,
+                        target_tool=ros_cmd_tool_target,
                     )
 
                     # File Log (CSV)
@@ -937,6 +985,8 @@ class TeleopNode(Node):
                             run_queued_cmd=run_queued_cmd,
                             time_since_last_cmd_ms=time_since_last * 1000.0,
                             velocity_mag_rad_s=velocity_mag,
+                            control_command_seq=control_command_seq,
+                            ros_cmd_tool_target=ros_cmd_tool_target,
                             joints_are_degrees=False,
                         )
 
@@ -968,6 +1018,15 @@ class TeleopNode(Node):
         if self.triple_logger:
             self.triple_logger.close()
             self.get_logger().info(f"Closed teleop session log: {self.triple_logger.file_path}")
+
+        if self.adaptive_telemetry is not None:
+            try:
+                self.adaptive_telemetry.close()
+                self.get_logger().info(
+                    f"Closed adaptive telemetry: {self.adaptive_telemetry.path}"
+                )
+            except Exception as exc:
+                self.get_logger().warn(f"Adaptive telemetry close failed: {exc}")
 
         self.feedback.stop()
         self.interactive.stop()
