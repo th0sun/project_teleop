@@ -178,6 +178,35 @@ PATH_SIMPLIFY_TOLERANCE_DEG = 3.0   # was 1.0 — enforce smooth-regime min spac
 # limit.  USE_MIXED_PRIMITIVES is left False by default so the production
 # path stays on JointMovJ-only; flip to True per session when an operator
 # wants Cartesian primitives and is OK with the slower SpeedL ceiling.
+# On-hardware verification (mixed_diag2.py — same Arc+Arc+JointMovJ rectangle
+# path on real MG400, full speed×CP matrix):
+#
+#   SpeedL  CP   alarm
+#   ------  --   -----
+#   60      80   ❌ controller 96/98 + servo 34322 within 0.88s
+#   60      30   ✅
+#   60       0   ✅
+#   30      80   ✅
+#   25      80   ✅
+#
+# Diagnosis: at the Arc1→Arc2 transition, CP=80 rounds the corner so
+# aggressively that the controller's interpolated Cartesian setpoint moves
+# faster than the servo can track at SpeedL=60 — alarm 34322 ("Position
+# command too large").  Lowering EITHER SpeedL OR CP keeps the setpoint
+# rate under the servo limit; only the high-SpeedL × high-CP combo
+# triggers the trip.  Workspace radius (251mm) was nowhere near the inner
+# 175mm boundary, J2 was at -10.9° (well inside ±25°), CollisionState=0
+# — so the alarm is not a workspace, joint-limit, or collision issue.
+#
+# Mitigation in code: SEGMENT_CARTESIAN_CP_MAX caps the CP threaded into
+# MovL/Arc commands during mixed-primitive compile.  JointMovJ segments
+# still see the full PLAYBACK_DEFAULT_CP because joint blends do not
+# trigger this Cartesian-setpoint-rate failure.
+#
+# USE_MIXED_PRIMITIVES is left False by default so the production path
+# stays on JointMovJ-only; flip to True per session when an operator
+# wants Cartesian primitives.
+SEGMENT_CARTESIAN_CP_MAX = 30       # cap CP threaded into MovL/Arc — see comment above
 USE_MIXED_PRIMITIVES = False
 SEGMENT_ENABLE_ARC = True           # Arc(through, end) — 1 cmd per smooth curve vs N JointMovJ
 SEGMENT_LINE_TOLERANCE_MM = 2.0    # max XYZ deviation (mm) from chord for MovL classification
