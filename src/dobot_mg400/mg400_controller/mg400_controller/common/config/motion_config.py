@@ -20,18 +20,9 @@
 ACC_VALUE = 100        # Acceleration value (0-100)
 CP_VALUE = 80          # Continuous Path value (smoothness: 0-100)
 
-# 🎮 Adaptive Speed Thresholds (legacy distance-based bands).  The realtime
-# controller now derives SpeedJ from the per-command delta (see
-# REALTIME_SPEEDJ_*), but these constants are still consumed by motion_planner
-# fallbacks and tests.  Keeping them at 100 means any caller that ignores the
-# adaptive path defaults to full speed (matches old behaviour).
-SPEED_FAR_THRESHOLD = 0.1      # > 0.1 rad → use SPEED_FAR
-SPEED_MEDIUM_THRESHOLD = 0.05  # > 0.05 rad → use SPEED_MEDIUM
-# < 0.05 rad → use SPEED_NEAR (ใกล้เป้าหมาย ช้าลง)
-
-SPEED_FAR = 100      # %
-SPEED_MEDIUM = 100   # %
-SPEED_NEAR = 100     # %
+# (SPEED_FAR/MEDIUM/NEAR distance bands removed — they were only consumed by
+# MotionPlanner.calculate_speed() / plan_motion(), neither of which had any
+# external caller after the adaptive teleop controller landed.)
 
 # 🎯 Real-Time Adaptive Control Parameters
 #
