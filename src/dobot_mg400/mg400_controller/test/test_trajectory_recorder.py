@@ -214,7 +214,18 @@ class TrajectoryRecorderTest(unittest.TestCase):
         slow_frame = {"timeStamp": 0.20, "j1": 2.0, "j2": 0.0, "j3": 0.0, "j4": 0.0}
         fast_frame = {"timeStamp": 0.05, "j1": 5.0, "j2": 0.0, "j3": 0.0, "j4": 0.0}
 
-        self.assertEqual(recorder._segment_speed_j(prev_frame, slow_frame), 40)
+        # Default tuning (use_recorded_timing=False) returns the operator-set
+        # speed_j unchanged.  PLAYBACK_DEFAULT_SPEED_J was raised from 40 to 80
+        # post-2026-05 (EXP3/EXP10 — bigger waypoint spacing puts the
+        # controller in the smooth-cruise regime, so default playback now
+        # uses 80% to match the new realtime defaults).
+        from mg400_controller.common.trajectory.trajectory_recorder import (
+            PLAYBACK_DEFAULT_SPEED_J,
+        )
+        self.assertEqual(
+            recorder._segment_speed_j(prev_frame, slow_frame),
+            PLAYBACK_DEFAULT_SPEED_J,
+        )
 
         recorder.set_playback_tuning({"use_recorded_timing": True})
         slow_speed = recorder._segment_speed_j(prev_frame, slow_frame)
@@ -712,13 +723,18 @@ class TrajectoryRecorderTest(unittest.TestCase):
 
         recorder._play_worker()
 
+        from mg400_controller.common.trajectory.trajectory_recorder import (
+            PLAYBACK_DEFAULT_SPEED_J,
+        )
         self.assertEqual(len(sent_commands), 3)
         self.assertIn("SpeedJ=20", sent_commands[0])  # go-to-start
         self.assertIn("JointMovJ(2.0000", sent_commands[1])
-        self.assertIn("SpeedJ=40", sent_commands[1])
+        # Per-segment SpeedJ should equal the operator-tuned default
+        # (PLAYBACK_DEFAULT_SPEED_J — 80 post-2026-05).
+        self.assertIn(f"SpeedJ={PLAYBACK_DEFAULT_SPEED_J}", sent_commands[1])
         self.assertIn("AccJ=80", sent_commands[1])
         self.assertIn("JointMovJ(10.0000", sent_commands[2])
-        self.assertIn("SpeedJ=40", sent_commands[2])
+        self.assertIn(f"SpeedJ={PLAYBACK_DEFAULT_SPEED_J}", sent_commands[2])
         self.assertIn("CP=0", sent_commands[2])  # final command should settle, not blend
         self.assertEqual(events[0][0], "go_to_start_command")
         self.assertEqual(events[1][0], "playback_start")
@@ -791,9 +807,14 @@ class TrajectoryRecorderTest(unittest.TestCase):
 
         recorder._play_worker()
 
+        from mg400_controller.common.trajectory.trajectory_recorder import (
+            PLAYBACK_DEFAULT_SPEED_J,
+        )
         self.assertEqual(len(sent_commands), 2)
         self.assertIn("JointMovJ(30.0000", sent_commands[1])
-        self.assertIn("SpeedJ=40", sent_commands[1])
+        # Per-segment SpeedJ matches the operator-tuned default after the
+        # 2026-05 retune (PLAYBACK_DEFAULT_SPEED_J=80).
+        self.assertIn(f"SpeedJ={PLAYBACK_DEFAULT_SPEED_J}", sent_commands[1])
         self.assertIn("AccJ=80", sent_commands[1])
         playback_start = events[1][1]
         self.assertTrue(playback_start["original_timing_feasible"])

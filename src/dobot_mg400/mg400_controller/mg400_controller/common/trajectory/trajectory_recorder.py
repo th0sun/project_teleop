@@ -73,11 +73,24 @@ PREVIEW_STREAM_SPEEDJ = 100
 PREVIEW_STREAM_MIN_SPEEDJ = 15
 PREVIEW_STREAM_CP = 20
 PREVIEW_FINAL_CP = 0
-PLAYBACK_DEFAULT_SPEED_J = 40
+# Playback tuning defaults — chosen via on-robot benchmark, see EXP3/EXP4/EXP10:
+#
+# CP=30 (the previous default) caused 9 micro-stops per Δ=2° sweep on J1
+# because the blend was too weak to mask the controller decel phase between
+# commands.  CP=80 produced 0 stops in the same scenario (EXP4 5-rep
+# replication) and tied CP=100 on direction-reversal runs.  We pick CP=80.
+#
+# SpeedJ=40 was a conservative pick for unverified trajectories.  With the
+# new RDP simplifier (PATH_SIMPLIFY_TOLERANCE_DEG=3.0) every queued waypoint
+# is ≥ 3° from its neighbour, putting the controller in the smooth-cruise
+# regime even at higher speeds.  We raise SpeedJ default to 80 — operators
+# who need slower playback (path verification, stress test) override via the
+# job_request `options` payload.
+PLAYBACK_DEFAULT_SPEED_J = 80   # was 40; raised because Δ ≥ 3° is now guaranteed
 PLAYBACK_DEFAULT_ACC_J = 80
-PLAYBACK_DEFAULT_SPEED_L = 40
+PLAYBACK_DEFAULT_SPEED_L = 60   # was 40; Cartesian commands stay slightly more conservative
 PLAYBACK_DEFAULT_ACC_L = 80
-PLAYBACK_DEFAULT_CP = 30
+PLAYBACK_DEFAULT_CP = 80        # was 30; EXP4 — biggest single contributor to teach jitter
 PLAYBACK_DEFAULT_FINAL_CP = 0
 PLAYBACK_DEFAULT_COMMAND_INTERVAL_SEC = 0.18
 PLAYBACK_DEFAULT_QUEUE_LOOKAHEAD_COMMANDS = 3

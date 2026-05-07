@@ -12,11 +12,19 @@
 """
 
 # ⚡ Speed & Acceleration Settings
+# CP_VALUE chosen via on-robot benchmark (EXP4, 5 reps × 2 scenarios):
+# CP=80 yields zero micro-stops on monotonic sweeps where CP=100 still produces
+# 1.0 ± 0.0 micro-stops (over-aggressive corner cut at endpoint).  CP=80 also
+# matches CP=100 on direction-reversal scenarios.  ACC_VALUE remains 100 so the
+# controller has full ramp authority when the per-cmd SpeedJ scales below 100.
 ACC_VALUE = 100        # Acceleration value (0-100)
-CP_VALUE = 100         # Continuous Path value (smoothness: 0-100)
+CP_VALUE = 80          # Continuous Path value (smoothness: 0-100)
 
-# 🎮 Adaptive Speed Thresholds
-# กำหนดความเร็วตามระยะห่างจากเป้าหมาย
+# 🎮 Adaptive Speed Thresholds (legacy distance-based bands).  The realtime
+# controller now derives SpeedJ from the per-command delta (see
+# REALTIME_SPEEDJ_*), but these constants are still consumed by motion_planner
+# fallbacks and tests.  Keeping them at 100 means any caller that ignores the
+# adaptive path defaults to full speed (matches old behaviour).
 SPEED_FAR_THRESHOLD = 0.1      # > 0.1 rad → use SPEED_FAR
 SPEED_MEDIUM_THRESHOLD = 0.05  # > 0.05 rad → use SPEED_MEDIUM
 # < 0.05 rad → use SPEED_NEAR (ใกล้เป้าหมาย ช้าลง)
@@ -25,15 +33,46 @@ SPEED_FAR = 100      # %
 SPEED_MEDIUM = 100   # %
 SPEED_NEAR = 100     # %
 
-#  Real-Time Control Parameters (Proximity + Velocity-Based Stuck Detection)
-# ปรับค่านี้เพื่อควบคุมความไวและความเร็วในการตอบสนอง
-PROXIMITY_THRESHOLD = 0.08       # rad (~4.5°) - safety/stuck threshold
+# 🎯 Real-Time Adaptive Control Parameters
+#
+# On-robot benchmarks (EXP3/EXP5/EXP7/EXP8/EXP10) showed that JointMovJ + CP
+# produces 0 micro-stops only when the per-command joint delta is large enough
+# that the controller has time to enter cruise phase before decel.  Boundaries:
+#   J1 (no gravity load):     ≥ 2°  → 0 stops
+#   J2/J3 (gravity loaded):   ≥ 3°  → 0 stops
+#   ALL joints:               < 1°  → 6+ stops per sweep
+# At Δ < 2° the queue-fill state (flood vs paced) makes no difference — the
+# decel happens inside each command, not between commands.  See EXP10.
+#
+# Adaptive gate: hand velocity scales the gate threshold and the per-command
+# SpeedJ together so a slow ("aiming") hand uses fine deltas at low speed (no
+# perceived jitter because peak velocity is small) while a fast hand uses
+# larger deltas at full speed (controller has cruise headroom).  Gate firing
+# always sends "latest_target" — never replays stale queue tails.
+PROXIMITY_THRESHOLD = 0.08       # rad (~4.5°) - safety/stuck threshold (stuck recovery only)
 STUCK_VELOCITY_THRESHOLD = 0.005 # rad/s - ความเร็วต่ำกว่านี้ถือว่า "นิ่ง"
 STUCK_TIME_THRESHOLD = 0.3       # seconds - 24/02-style stuck recovery delay
-TARGET_CHANGE_THRESHOLD = 0.005  # rad (~0.3°) - Target ต้องเปลี่ยนอย่างน้อยเท่านี้
-# กำหนดค่าสำหรับ Dynamic Proximity
-DYNAMIC_PROXIMITY_BASE_RAD = 0.005   # rad (~0.3°) - 24/02-style base gate
-DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.25 # seconds - วินาทีสำหรับคำนวณระยะเพิ่มตามความเร็ว
+TARGET_CHANGE_THRESHOLD = 0.005  # rad (~0.3°) - stuck recovery min target change
+
+# Adaptive gate: threshold is interpolated between MIN (slow hand) and MAX
+# (fast hand) based on max-axis hand velocity.  Hand velocity above HIGH gets
+# the MAX threshold; below LOW gets the MIN threshold; in between is a linear
+# blend.  Per-command SpeedJ is interpolated in the same band, so big cmds run
+# fast and small cmds run slow — keeps the cruise/decel ratio favourable.
+REALTIME_DELTA_MIN_RAD = 0.0087   # rad ≈ 0.5°  - finest tracking (slow hand)
+REALTIME_DELTA_MAX_RAD = 0.052    # rad ≈ 3.0°  - smooth tracking (fast hand)
+REALTIME_HAND_VEL_LOW_RAD_S  = 0.087  # rad/s ≈ 5°/s   - below this: AIM mode
+REALTIME_HAND_VEL_HIGH_RAD_S = 0.524  # rad/s ≈ 30°/s  - above this: NORMAL mode
+REALTIME_SPEEDJ_MIN = 25          # % - cmd Δ at MIN_RAD uses this SpeedJ
+REALTIME_SPEEDJ_MAX = 100         # % - cmd Δ at MAX_RAD uses this SpeedJ
+REALTIME_ACCJ_MIN = 25            # % - matches SpeedJ to keep ramp shape consistent
+REALTIME_ACCJ_MAX = 100           # %
+REALTIME_CP = 80                  # CP for live teleop commands (matches CP_VALUE)
+
+# Legacy aliases (DynProx single-strategy fallback).  Kept for callers that
+# still import these names; the new adaptive controller does not use them.
+DYNAMIC_PROXIMITY_BASE_RAD = REALTIME_DELTA_MIN_RAD
+DYNAMIC_PROXIMITY_LOOKAHEAD_SEC = 0.10
 
 # 🎯 Motion Detection Thresholds (Data-Driven from Log Analysis)
 MOTION_START_THRESHOLD = 0.002   # rad/s - Detect motion start (T4), Target: 95%+ detection
@@ -117,7 +156,13 @@ BLOW_DURATION = 0.4                 # วินาที: ระยะเวล�
 # replayed verbatim).  0.5° matches the recorder's RECORD_MIN_DELTA so the
 # simplifier does not collapse motion that recording considered worth
 # capturing in the first place.
-PATH_SIMPLIFY_TOLERANCE_DEG = 1.0   # was 0.5 — doubled: smoother curves drop more intermediate pts
+# PATH_SIMPLIFY_TOLERANCE_DEG: 3.0 chosen via EXP3/EXP8 — at SpeedJ=80 + CP=80
+# the controller goes from 1.25 stops/run @ Δ=2° to 0.0 stops/run @ Δ=3° on
+# J2/J3 (gravity-loaded joints).  Setting RDP tolerance ≥ 3° guarantees every
+# kept waypoint is at least 3° from its neighbour, so the compiled JointMovJ
+# chain runs in the smooth regime end-to-end.  Cost: < 3° corners get rounded
+# off — operators teaching tight contours should explicitly mark waypoints.
+PATH_SIMPLIFY_TOLERANCE_DEG = 3.0   # was 1.0 — enforce smooth-regime min spacing
 
 # 🔀 Mixed-primitive segment classification
 # After RDP simplifies the waypoint count, the segment classifier groups
