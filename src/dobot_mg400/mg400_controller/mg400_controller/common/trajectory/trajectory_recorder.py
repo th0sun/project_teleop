@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Callable, Tuple, Any
 
 from mg400_controller.common.config import motion_config
+from mg400_controller.common.trajectory import trajectory_io
 from mg400_protocol.commands import arc, do_execute, joint_mov_j, mov_l_cartesian
 from mg400_protocol.dashboard import enable_robot, reset_robot
 from mg400_controller.common.utils.kinematics import KinematicsCalculator
@@ -467,58 +468,48 @@ class TrajectoryRecorder:
     # ═════════════════════════════════════════════════════════════════════════
     #  SAVE / LOAD
     # ═════════════════════════════════════════════════════════════════════════
+    # The save / load / list methods are thin facades over
+    # ``common.trajectory.trajectory_io`` — see that module for the
+    # actual file shape and parser behaviour.  This wrapper keeps the
+    # recorder's existing public API stable for callers that import
+    # ``TrajectoryRecorder`` directly (Unity adapters, monitor GUI,
+    # tests).  Behaviour is identical to the pre-extraction code.
     def save_temp(self) -> str:
         """Save last recording to temp_trajectory.json and return the path."""
         path = os.path.join(self._traj_dir, "temp_trajectory.json")
-        return self._save_json(path, self._frames)
+        return trajectory_io.save_trajectory(path, self._frames, self._events, self._log)
 
     def save_as(self, name: str) -> str:
         """Save last recording with a user-supplied name."""
-        if not name.endswith(".json"):
-            name += ".json"
-        path = os.path.join(self._traj_dir, name)
-        return self._save_json(path, self._frames)
+        path = trajectory_io.resolve_trajectory_path(self._traj_dir, name)
+        return trajectory_io.save_trajectory(path, self._frames, self._events, self._log)
 
     def save_from_unity_json(self, json_str: str) -> str:
         """Receive raw JSON from Unity /unity/trajectory_data and save."""
-        try:
-            data = json.loads(json_str)
-            frames = data if isinstance(data, list) else data.get("frames", [])
-            events = [] if isinstance(data, list) else data.get("events", [])
-            filename = data.get("filename", "unity_trajectory.json") if isinstance(data, dict) else "unity_trajectory.json"
-            
-            self._frames = frames
-            self._events = events if isinstance(events, list) else []
-            return self.save_as(filename)
-        except Exception as e:
-            self._log.error(f"Failed to parse Unity trajectory JSON: {e}")
+        frames, events, filename = trajectory_io.parse_unity_trajectory_json(
+            json_str, self._log,
+        )
+        if not frames:
             return ""
+        self._frames = frames
+        self._events = events
+        return self.save_as(filename)
 
     def load(self, name: str) -> bool:
         """Load a trajectory file by name from TRAJ_DIR."""
-        if not name.endswith(".json"):
-            name += ".json"
-        path = os.path.join(self._traj_dir, name)
-        if not os.path.isfile(path):
-            self._log.error(f"Trajectory file not found: {path}")
+        path = trajectory_io.resolve_trajectory_path(self._traj_dir, name)
+        frames, events = trajectory_io.load_trajectory(path, self._log)
+        if frames is None:
             return False
-        try:
-            with open(path, "r") as f:
-                data = json.load(f)
-            frames = data if isinstance(data, list) else data.get("frames", [])
-            events = [] if isinstance(data, list) else data.get("events", [])
-            if not frames:
-                self._log.error("Trajectory file is empty")
-                return False
-            self.loaded_frames = frames
-            self.loaded_events = events if isinstance(events, list) else []
-            self.loaded_name = name
-            dur = frames[-1]["timeStamp"] - frames[0]["timeStamp"]
-            self._log.info(f"📂 Loaded {name}: {len(frames)} frames, {dur:.1f}s")
-            return True
-        except Exception as e:
-            self._log.error(f"Failed to load trajectory: {e}")
-            return False
+        # Preserve recorder's prior bookkeeping: store with the resolved
+        # ``.json`` suffix so loaded_name matches what's on disk.
+        loaded_name = name if name.endswith(".json") else f"{name}.json"
+        self.loaded_frames = frames
+        self.loaded_events = events or []
+        self.loaded_name = loaded_name
+        dur = frames[-1]["timeStamp"] - frames[0]["timeStamp"]
+        self._log.info(f"📂 Loaded {loaded_name}: {len(frames)} frames, {dur:.1f}s")
+        return True
 
     def load_frames(
         self,
@@ -539,10 +530,7 @@ class TrajectoryRecorder:
 
     def list_files(self) -> List[str]:
         """Return list of .json trajectory files."""
-        try:
-            return sorted(f for f in os.listdir(self._traj_dir) if f.endswith(".json"))
-        except Exception:
-            return []
+        return trajectory_io.list_trajectory_files(self._traj_dir)
 
     # ═════════════════════════════════════════════════════════════════════════
     #  PREVIEW (Temporal Sequencer — NO decimation, uses frames directly)
@@ -1787,15 +1775,11 @@ class TrajectoryRecorder:
     # ═════════════════════════════════════════════════════════════════════════
     #  INTERNAL
     # ═════════════════════════════════════════════════════════════════════════
+    # ``_save_json`` was previously the private helper backing
+    # ``save_temp`` / ``save_as``.  It has been replaced by
+    # ``common.trajectory.trajectory_io.save_trajectory`` (a pure
+    # function with the same wire shape); this stub remains as a
+    # compatibility shim in case external tooling reached into the
+    # recorder for it.  Behaviour is identical.
     def _save_json(self, path: str, frames: List[Dict]) -> str:
-        if not frames:
-            self._log.error("No frames to save")
-            return ""
-        try:
-            with open(path, "w") as f:
-                json.dump({"frames": frames, "events": self._events}, f, indent=4)
-            self._log.info(f"💾 Saved {len(frames)} frames, {len(self._events)} events → {path}")
-            return path
-        except Exception as e:
-            self._log.error(f"Save failed: {e}")
-            return ""
+        return trajectory_io.save_trajectory(path, frames, self._events, self._log)
