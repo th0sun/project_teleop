@@ -624,6 +624,16 @@ class TrajectoryRecorder:
         return PLAYBACK_PROFILE_PRESERVE_TIMING
 
     def _fastest_path_repeat_enabled(self) -> bool:
+        """LEGACY (2026-05) gate for the dormant ``fastest_path_repeat`` profile.
+
+        Returns True only when the operator explicitly opts in via the
+        module-level ``motion_config.PLAYBACK_EXECUTION_PROFILE = "fastest_path_repeat"``
+        (or the aliases ``"fast"`` / ``"fastest"``).  The default
+        ``"preserve_timing"`` profile never reaches this branch, so the
+        FAST_REPEAT_* constants stay dormant in production.
+        See AGENTS.md §4.3 — proof-of-death checklist required before the
+        FAST_REPEAT_* constants and this branch can be removed.
+        """
         return self._playback_execution_profile() == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT
 
     def _use_recorded_timing(self) -> bool:
