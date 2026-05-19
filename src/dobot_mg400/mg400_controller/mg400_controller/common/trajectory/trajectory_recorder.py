@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Callable, Tuple, Any
 
 from mg400_controller.common.config import motion_config
-from mg400_controller.common.trajectory import trajectory_io
+from mg400_controller.common.trajectory import playback_compiler, trajectory_io
 from mg400_protocol.commands import arc, do_execute, joint_mov_j, mov_l_cartesian
 from mg400_protocol.dashboard import enable_robot, reset_robot
 from mg400_controller.common.utils.kinematics import KinematicsCalculator
@@ -591,13 +591,14 @@ class TrajectoryRecorder:
             return None
         return np.degrees(np.asarray(pos[:4], dtype=float))
 
+    # The compile-helper methods below now delegate to
+    # ``common.trajectory.playback_compiler`` — see that module for the
+    # actual geometry / IK logic.  These wrappers keep the recorder's
+    # private API stable for callers (tests, monitor GUI hooks) that
+    # reach in for ``_frame_q_deg`` / ``_line_primitive_reachable`` /
+    # etc.  Behaviour is identical to the pre-extraction code.
     def _frame_q_deg(self, frame):
-        return (
-            float(frame["j1"]),
-            float(frame["j2"]),
-            float(frame["j3"]),
-            float(frame["j4"]),
-        )
+        return playback_compiler.frame_q_deg(frame)
 
     def _playback_execution_profile(self) -> str:
         profile = str(
@@ -819,74 +820,27 @@ class TrajectoryRecorder:
         return int(max(min_l, min(max_l, speed_l)))
 
     def _tool_pose_reachable(self, xyzr) -> bool:
-        return KinematicsCalculator().is_tool_pose_reachable(xyzr)
+        return playback_compiler.tool_pose_reachable(xyzr)
 
     def _line_primitive_reachable(self, seg, samples: int = 12) -> bool:
-        start = np.array(seg.start_xyzr, dtype=float)
-        end = np.array(seg.end_xyzr, dtype=float)
-        for fraction in np.linspace(0.0, 1.0, max(2, samples)):
-            pose = start + (end - start) * float(fraction)
-            if not self._tool_pose_reachable(pose[:4]):
-                return False
-        return True
+        return playback_compiler.line_primitive_reachable(seg, samples=samples)
 
     def _arc_primitive_points(self, seg, samples: int = 16):
-        through_xyzr = seg.through_xyzr
-        if through_xyzr is None:
-            return []
-        return sample_command_arc_xyzr(seg.start_xyzr, through_xyzr, seg.end_xyzr, samples)
+        return playback_compiler.arc_primitive_points(seg, samples=samples)
 
     def _arc_primitive_reachable(self, seg, samples: int = 16) -> bool:
-        points = self._arc_primitive_points(seg, samples=samples)
-        if not points:
-            return False
-        return all(self._tool_pose_reachable(point) for point in points)
+        return playback_compiler.arc_primitive_reachable(seg, samples=samples)
 
     def _frame_xyzr(self, frame) -> Tuple[float, float, float, float]:
         """Return MG400 tool pose for one frame in controller coordinates."""
-        return tuple(float(v) for v in self._fk_for_classifier(*self._frame_q_deg(frame)))
+        return playback_compiler.frame_xyzr(frame)
 
     @staticmethod
     def _point_to_polyline_distance(point_xyz, polyline_xyz) -> float:
-        point = np.asarray(point_xyz, dtype=float)
-        polyline = np.asarray(polyline_xyz, dtype=float)
-        if len(polyline) == 0:
-            return 0.0
-        if len(polyline) == 1:
-            return float(np.linalg.norm(point - polyline[0]))
-
-        best = float("inf")
-        for start, end in zip(polyline[:-1], polyline[1:]):
-            segment = end - start
-            denom = float(np.dot(segment, segment))
-            if denom <= 1e-12:
-                dist = float(np.linalg.norm(point - start))
-            else:
-                t = float(np.dot(point - start, segment) / denom)
-                t = max(0.0, min(1.0, t))
-                closest = start + t * segment
-                dist = float(np.linalg.norm(point - closest))
-            best = min(best, dist)
-        return best
+        return playback_compiler.point_to_polyline_distance(point_xyz, polyline_xyz)
 
     def _primitive_path_xyz(self, seg, primitive_type: SegmentType):
-        if primitive_type == SegmentType.LINE:
-            return np.asarray(
-                [
-                    np.asarray(seg.start_xyzr[:3], dtype=float),
-                    np.asarray(seg.end_xyzr[:3], dtype=float),
-                ],
-                dtype=float,
-            )
-        if primitive_type == SegmentType.ARC and seg.through_xyzr is not None:
-            samples = sample_command_arc_xyzr(
-                seg.start_xyzr,
-                seg.through_xyzr,
-                seg.end_xyzr,
-                samples=48,
-            )
-            return np.asarray([np.asarray(p[:3], dtype=float) for p in samples], dtype=float)
-        return np.asarray([], dtype=float)
+        return playback_compiler.primitive_path_xyz(seg, primitive_type)
 
     def _raw_fit_error_mm(
         self,
@@ -897,39 +851,14 @@ class TrajectoryRecorder:
     ) -> float:
         """Max XYZ distance from raw Unity path to the emitted primitive path.
 
-        Classification happens after RDP simplification.  This guard checks the
-        command-shaped primitive against the original dense capture so a sparse
-        set of kept waypoints cannot accidentally approve an Arc/MovL that cuts
-        too far away from what the user taught.
+        Classification happens after RDP simplification.  This guard checks
+        the command-shaped primitive against the original dense capture so
+        a sparse set of kept waypoints cannot accidentally approve an
+        Arc / MovL that cuts too far away from what the user taught.
         """
-        if not source_frames or not raw_frames:
-            return 0.0
-        if primitive_type not in {SegmentType.LINE, SegmentType.ARC}:
-            return 0.0
-
-        primitive_path = self._primitive_path_xyz(seg, primitive_type)
-        if len(primitive_path) < 2:
-            return float("inf")
-
-        start_t = float(source_frames[seg.start_idx]["timeStamp"])
-        end_t = float(source_frames[seg.end_idx]["timeStamp"])
-        if start_t > end_t:
-            start_t, end_t = end_t, start_t
-
-        eps = 1e-6
-        raw_slice = [
-            frame for frame in raw_frames
-            if start_t - eps <= float(frame["timeStamp"]) <= end_t + eps
-        ]
-        if not raw_slice:
-            raw_slice = [source_frames[seg.start_idx], source_frames[seg.end_idx]]
-
-        max_error = 0.0
-        for frame in raw_slice:
-            raw_xyz = np.asarray(self._frame_xyzr(frame)[:3], dtype=float)
-            error = self._point_to_polyline_distance(raw_xyz, primitive_path)
-            max_error = max(max_error, error)
-        return float(max_error)
+        return playback_compiler.raw_fit_error_mm(
+            seg, primitive_type, source_frames, raw_frames,
+        )
 
     def _lookahead_seconds(self, target_t):
         tuning = self.playback_tuning()
@@ -1387,10 +1316,7 @@ class TrajectoryRecorder:
     @staticmethod
     def _fk_for_classifier(j1, j2, j3, j4):
         """FK adapter for segment classifier: (j1,j2,j3,j4) → (x,y,z,r)."""
-        kin = KinematicsCalculator()
-        result = kin.forward_kinematics([j1, j2, j3, j4])
-        # result is [x, y, z, rx, ry, rz]
-        return (float(result[0]), float(result[1]), float(result[2]), float(result[3]))
+        return playback_compiler.fk_for_classifier(j1, j2, j3, j4)
 
     def export_loaded_plan(self, path: str) -> str:
         """Compile + export the current playback job as a JSON artifact."""
