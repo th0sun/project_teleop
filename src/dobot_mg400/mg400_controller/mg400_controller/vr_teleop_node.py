@@ -146,6 +146,15 @@ class TeleopNode(Node):
         else:
             self.get_logger().info("Teleop session logging disabled")
 
+        # Mixed-primitive opt-in via ROS param.  Default stays False
+        # (matches motion_config) so the production teach-and-repeat
+        # path keeps using JointMovJ-only.  Operators flip it per
+        # launch via `--ros-args -p use_mixed_primitives:=true`.  See
+        # AGENTS.md §4.4 — the Cartesian compile path is verified on
+        # real hardware but kept opt-in until more demo paths are swept
+        # through the classifier.
+        self._apply_mixed_primitives_param()
+
         # 2. Setup ROS Interfaces
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -325,6 +334,30 @@ class TeleopNode(Node):
         msg = Int64()
         msg.data = int(self.get_clock().now().nanoseconds)
         self.ros_publishers.heartbeat.publish(msg)
+
+    def _apply_mixed_primitives_param(self):
+        """Read the ``use_mixed_primitives`` ROS param and apply it.
+
+        Default value comes from ``motion_config.USE_MIXED_PRIMITIVES`` so
+        a missing param keeps shipping behaviour.  The resolved value is
+        written back to the module attribute because
+        ``TrajectoryRecorder.compile_loaded_plan`` reads it via
+        ``getattr(motion_config, "USE_MIXED_PRIMITIVES", False)``.
+
+        Logged at INFO so the operator console makes the opt-in visible.
+        """
+        default = bool(getattr(motion_config, "USE_MIXED_PRIMITIVES", False))
+        param = self.declare_parameter("use_mixed_primitives", default)
+        value = bool(getattr(param, "value", default))
+        motion_config.USE_MIXED_PRIMITIVES = value
+        if value != default:
+            self.get_logger().info(
+                f"🔀 use_mixed_primitives overridden via ROS param: {value}"
+            )
+        else:
+            self.get_logger().info(
+                f"🔀 use_mixed_primitives = {value} (motion_config default)"
+            )
 
     def _register_ros_subscriptions(self):
         """Group every ROS subscription into one factory call.
