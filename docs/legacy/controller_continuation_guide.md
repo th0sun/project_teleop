@@ -1,4 +1,11 @@
-# MG400 Controller Continuation Guide
+# MG400 Controller Continuation Guide  *(legacy — superseded)*
+
+> **Status (2026-05)**: superseded by `AGENTS.md` at the repository root.
+> This file is preserved unmodified under `docs/legacy/` because earlier
+> notes reference it. **New contributors should read `AGENTS.md` first;
+> only fall back here for historical context.**
+
+---
 
 This guide is for maintainers, teammates, or AI agents continuing work on the
 MG400 teleoperation runtime.

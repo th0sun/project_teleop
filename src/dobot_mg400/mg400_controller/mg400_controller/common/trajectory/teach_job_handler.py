@@ -63,14 +63,19 @@ from mg400_controller.common.trajectory.trajectory_recorder import (
 
 
 # ── Action constants (string-typed enum) ─────────────────────────────────────
+# LEGACY (2026-05): ``preview_sim``, ``record_start`` and ``record_stop``
+# are kept wired and tested but the operator-facing flow on Unity now uses
+# ``compile`` + ``execute`` only.  See AGENTS.md §4.2 for the proof-of-
+# death checklist.  Do NOT remove these constants in a refactor pass — a
+# future ADR ("Removal Pass v1") owns that decision.
 ACTION_COMPILE = "compile"
-ACTION_PREVIEW_SIM = "preview_sim"
+ACTION_PREVIEW_SIM = "preview_sim"        # LEGACY 4.2
 ACTION_EXECUTE = "execute"
 ACTION_TUNE = "tune"
 ACTION_EXPORT = "export"
 ACTION_STOP = "stop"
-ACTION_RECORD_START = "record_start"
-ACTION_RECORD_STOP = "record_stop"
+ACTION_RECORD_START = "record_start"      # LEGACY 4.2
+ACTION_RECORD_STOP = "record_stop"        # LEGACY 4.2
 
 VALID_ACTIONS = frozenset({
     ACTION_COMPILE,

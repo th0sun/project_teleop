@@ -255,13 +255,20 @@ SEGMENT_ACC_L = 80                            # Default AccL % for Cartesian com
 #   The compiled program uses the configured fast speed/acc/CP limits and queues
 #   ahead aggressively so the MG400 can execute as fast as its controller and
 #   mechanical constraints allow.
+#
+# LEGACY (2026-05): the ``fastest_path_repeat`` branch and its
+# FAST_REPEAT_* constants below are currently dormant — the default
+# profile is ``preserve_timing`` and no /teach/job_request payload from
+# Unity sets the alternative.  Kept enabled so that operators with a
+# saved launch override (or a planned demo recording mode) do not break.
+# See AGENTS.md §4.3 for the proof-of-death checklist before removal.
 PLAYBACK_EXECUTION_PROFILE = "preserve_timing"  # preserve_timing | fastest_path_repeat
-FAST_REPEAT_SPEED_J = 100
-FAST_REPEAT_ACC_J = 100
-FAST_REPEAT_SPEED_L = 100
-FAST_REPEAT_ACC_L = 100
-FAST_REPEAT_CP = 100
-FAST_REPEAT_FINAL_CP = 0
-FAST_REPEAT_LOOKAHEAD_SEC = 10.0
-FAST_REPEAT_TIMEOUT_PER_COMMAND_SEC = 1.0
-FAST_REPEAT_MAX_COMMANDS_PER_CYCLE = 1
+FAST_REPEAT_SPEED_J = 100            # LEGACY 4.3 — dormant profile constants
+FAST_REPEAT_ACC_J = 100              # LEGACY 4.3
+FAST_REPEAT_SPEED_L = 100            # LEGACY 4.3
+FAST_REPEAT_ACC_L = 100              # LEGACY 4.3
+FAST_REPEAT_CP = 100                 # LEGACY 4.3
+FAST_REPEAT_FINAL_CP = 0             # LEGACY 4.3
+FAST_REPEAT_LOOKAHEAD_SEC = 10.0     # LEGACY 4.3
+FAST_REPEAT_TIMEOUT_PER_COMMAND_SEC = 1.0  # LEGACY 4.3
+FAST_REPEAT_MAX_COMMANDS_PER_CYCLE = 1     # LEGACY 4.3
