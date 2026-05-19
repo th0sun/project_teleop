@@ -43,7 +43,7 @@ the existing triple-logger).
 
 ## 3. What's done — commit chronology
 
-Diverged from `feat/multi-robot-teaching-architecture` at `0ecdd35`. Eight
+Diverged from `feat/multi-robot-teaching-architecture` at `0ecdd35`. 20
 commits on top, oldest first:
 
 | Commit | Why |
@@ -56,6 +56,18 @@ commits on top, oldest first:
 | `3ad7e1b` | fix(mixed-primitive): real fix — cap CP for Cartesian primitives, restore SpeedL=60 |
 | `d3706c6` | docs(mixed-primitive): correct the alarm 34322 interpretation in code comments (it is "position out of range", not "command too large") |
 | `49533ca` | feat(logging): wire control_command_seq + tool_target through latency / triple logger so post-hoc analysis can correlate cmd → motion |
+| `4c664ee` | docs: AGENTS.md handoff + repo-local progress-report skill + LEGACY markers |
+| `ecda77e` | test(B1): tripwire for adaptive gate tuning constants |
+| `aa857fd` | test(B2): tripwire for legacy teach actions in /teach/job_request |
+| `08dc5bb` | test(B3): tripwire for the three LEGACY Unity teach topics |
+| `39a237d` | test(B4): golden fixture for mixed-primitive Cartesian compile |
+| `6d60746` | test(B5): tripwire for the dormant fastest_path_repeat profile |
+| `089822f` | refactor(C1): extract trajectory_io module behind TrajectoryRecorder facade |
+| `4d89d81` | refactor(C2): extract playback_compiler geometry/IK helpers behind recorder facade |
+| `82e58c5` | refactor(C3): extract playback_executor leaf helpers behind recorder facade |
+| `b5b48a1` | refactor(D1): group ROS subscription wiring into _register_ros_subscriptions helper |
+| `6c7c34c` | feat(E1): expose USE_MIXED_PRIMITIVES as a ROS param (default unchanged) |
+| `d0e070f` | docs: complete Phase A LEGACY markers (config + teach handler + legacy guide header) |
 
 ## 4. What's deferred — known smells (do NOT delete yet)
 
@@ -271,22 +283,35 @@ refactor commits (see §10 next-steps queue). Merge back to
 `feat/multi-robot-teaching-architecture` once handoff doc + skill +
 characterisation tests land. Removal Pass v1 (§11) is a separate branch.
 
-## 10. Next-steps queue (refactor in progress)
+## 10. Next-steps queue (refactor)
 
-Phase A handoff doc → this commit.
-
-- [x] **A** docs + .claude-handoff + LEGACY markers (this commit)
-- [ ] **B1** characterisation: adaptive gate test
-- [ ] **B2** characterisation: teach legacy actions test
-- [ ] **B3** characterisation: ROS wiring tripwire test
-- [ ] **B4** characterisation: mixed-primitive golden fixture
-- [ ] **B5** characterisation: fastest_path_repeat dormant profile test
-- [ ] **C1** refactor: extract `trajectory_io.py`
-- [ ] **C2** refactor: extract `playback_compiler.py`
-- [ ] **C3** refactor: extract `playback_executor.py`
-- [ ] **D1** refactor: group vr_teleop_node wiring into helper
-- [ ] **E1** feat: expose `USE_MIXED_PRIMITIVES` as ROS param
-- [ ] **F1** chore: organise `tools/log_replay/`
+- [x] **A** docs + .claude-handoff + LEGACY markers (commits 4c664ee, d0e070f)
+- [x] **B1** characterisation: adaptive gate tuning constants (ecda77e)
+- [x] **B2** characterisation: teach legacy actions tripwire (aa857fd)
+- [x] **B3** characterisation: ROS wiring legacy topics tripwire (08dc5bb)
+- [x] **B4** characterisation: mixed-primitive Cartesian golden fixture (39a237d)
+- [x] **B5** characterisation: fastest_path_repeat dormant profile (6d60746)
+- [x] **C1** refactor: extract `trajectory_io.py` (089822f)
+- [x] **C2** refactor: extract `playback_compiler.py` (4d89d81)
+- [x] **C3** refactor: extract `playback_executor.py` (82e58c5) — leaf helpers only;
+      `start_preview` / `_play_worker` orchestrator stays on recorder
+- [x] **D1** refactor: group vr_teleop_node wiring (`_register_ros_subscriptions`) (b5b48a1)
+- [x] **E1** feat: expose `USE_MIXED_PRIMITIVES` as ROS param (6c7c34c)
+- [ ] **F1** chore: organise `tools/log_replay/` — deferred; the
+      `build_three_layer_review.py` / `build_trim_review.py` /
+      `build_validation_analysis_dashboard.py` /
+      `export_clean_three_layer_csv.py` / `validation_analysis_gui.py`
+      scripts referenced by the analyser docs are **not present** on
+      this branch.  Land them under `tools/log_replay/` when they
+      arrive (sibling-branch import).
+- [ ] **C4 (follow-up)** finish the executor extraction: move
+      `start_preview` / `_play_worker` / `_send_go_to_start` /
+      `_wait_until_near_target` / `_dispatch_event_command` /
+      `_schedule_delayed_event_command` / `_playback_complete` from
+      recorder into `playback_executor.PlaybackExecutor` class once
+      the recorder's state-holder surface is isolated.  Blocked on a
+      design pass — recorder owns the stop flag, timer list, kinematics
+      feedback fn, and a half-dozen callbacks.
 
 ## 11. Removal Pass v1 (deferred — separate plan)
 
