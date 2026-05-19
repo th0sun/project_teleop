@@ -153,21 +153,27 @@ class TeleopNode(Node):
             depth=1
         )
 
-        # Subscriptions (Delayed UNITY to avoid race condition)
-        self.ros_subscriptions = create_subscriptions(
-            self,
-            unity_pong_callback=self._unity_pong_callback,
-            suction_callback=self._suction_callback,
-            light_callback=self._light_callback,
-            scene_safety_callback=self._scene_safety_callback,
-            dashboard_cmd_callback=self._dashboard_cmd_callback,
-            teach_status_callback=self._teach_status_callback,
-            traj_data_callback=self._traj_data_callback,
-            joint_trajectory_callback=self._joint_trajectory_callback,
-            speed_factor_callback=self._speed_factor_callback,
-            teach_job_request_callback=self._teach_job_request_callback,
-            topics=self.topics,
-        )
+        # Subscriptions (Delayed UNITY to avoid race condition).
+        # The factory groups all Unity / monitor / teach inputs in one
+        # place; the per-callback wiring below is read top-to-bottom by
+        # `create_subscriptions` in `common/ros/teleop_interfaces.py`.
+        #
+        # Active inputs:
+        #   unity_pong_callback        — Unity RTT heartbeat
+        #   suction_callback           — Unity → vacuum gripper bool
+        #   light_callback             — Unity → signal-light DO
+        #   scene_safety_callback      — Unity → workspace-guard toggle
+        #   dashboard_cmd_callback     — Unity → dashboard passthrough
+        #   speed_factor_callback      — Unity → global SpeedFactor slider
+        #   teach_job_request_callback — Unity → typed teach job request
+        #
+        # LEGACY (2026-05) — see AGENTS.md §4.1 for the proof-of-death
+        # checklist.  Older Unity builds publish to these topics, so the
+        # callbacks stay wired by default:
+        #   teach_status_callback        — /unity/teach_status
+        #   traj_data_callback           — /unity/trajectory_data
+        #   joint_trajectory_callback    — /mg400/joint_trajectory_controller/command
+        self.ros_subscriptions = self._register_ros_subscriptions()
 
         # Suction Cup Control (Smart Trigger)
         self.suction_state = False
@@ -319,6 +325,35 @@ class TeleopNode(Node):
         msg = Int64()
         msg.data = int(self.get_clock().now().nanoseconds)
         self.ros_publishers.heartbeat.publish(msg)
+
+    def _register_ros_subscriptions(self):
+        """Group every ROS subscription into one factory call.
+
+        Single source of truth for which Unity / monitor topics the node
+        listens to.  Behaviour-identical wrapper around
+        ``common.ros.teleop_interfaces.create_subscriptions``.  Reading
+        this method tells you exactly which callbacks are wired without
+        scrolling through the __init__ body.
+
+        Three callbacks are LEGACY (see AGENTS.md §4.1):
+        ``_teach_status_callback``, ``_traj_data_callback``,
+        ``_joint_trajectory_callback``.  They stay enabled so older
+        Unity builds keep working.
+        """
+        return create_subscriptions(
+            self,
+            unity_pong_callback=self._unity_pong_callback,
+            suction_callback=self._suction_callback,
+            light_callback=self._light_callback,
+            scene_safety_callback=self._scene_safety_callback,
+            dashboard_cmd_callback=self._dashboard_cmd_callback,
+            teach_status_callback=self._teach_status_callback,        # LEGACY 4.1
+            traj_data_callback=self._traj_data_callback,              # LEGACY 4.1
+            joint_trajectory_callback=self._joint_trajectory_callback,  # LEGACY 4.1
+            speed_factor_callback=self._speed_factor_callback,
+            teach_job_request_callback=self._teach_job_request_callback,
+            topics=self.topics,
+        )
 
     def _unity_pong_callback(self, msg):
         """
@@ -502,11 +537,20 @@ class TeleopNode(Node):
             self.get_logger().warn(f"⚠️ Cannot set SpeedFactor({value}); Robot disconnected.")
 
     # ── Teach & Repeat callbacks ──────────────────────────────────────────────
+    # LEGACY (2026-05): the three callbacks below subscribe to teach topics
+    # that pre-date /teach/job_request.  Unity's modern code path uses the
+    # job_request channel, but older Unity builds and bench fixtures still
+    # publish to these topics, so they remain wired by default.  See
+    # AGENTS.md §4.1 for the proof-of-death checklist before removal.
     def _teach_status_callback(self, msg):
         """Handle /unity/teach_status: Record | Stop | Save | Load:<name> | Preview.
 
         DEPRECATED in favour of /teach/job_request.  Retained because the
         ``Save`` semantics overlap with the host-side recorder pipeline.
+
+        See AGENTS.md §4.1 — removal blocked on Unity team sign-off and a
+        bag-recording sweep showing this topic stays empty for a full
+        release cycle.
         """
         self.get_logger().warn(
             f"⚠️  Legacy /unity/teach_status used. Prefer /teach/job_request "
@@ -545,7 +589,11 @@ class TeleopNode(Node):
             self.get_logger().warn(f"⚠️ Unknown teach status: {status}")
 
     def _traj_data_callback(self, msg):
-        """Handle /unity/trajectory_data: raw JSON from Unity Save button."""
+        """Handle /unity/trajectory_data: raw JSON from Unity Save button.
+
+        LEGACY (2026-05): see AGENTS.md §4.1 — superseded by
+        ``action=record_stop`` / ``action=compile`` on /teach/job_request.
+        """
         json_str = msg.data.strip()
         if json_str:
             path = self.trajectory_recorder.save_from_unity_json(json_str)
