@@ -34,7 +34,11 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Callable, Tuple, Any
 
 from mg400_controller.common.config import motion_config
-from mg400_controller.common.trajectory import playback_compiler, trajectory_io
+from mg400_controller.common.trajectory import (
+    playback_compiler,
+    playback_executor,
+    trajectory_io,
+)
 from mg400_protocol.commands import arc, do_execute, joint_mov_j, mov_l_cartesian
 from mg400_protocol.dashboard import enable_robot, reset_robot
 from mg400_controller.common.utils.kinematics import KinematicsCalculator
@@ -1382,29 +1386,25 @@ class TrajectoryRecorder:
             timeout_sec=PREVIEW_START_TIMEOUT_SEC,
         )
 
+    # The four leaf helpers below now delegate to
+    # ``common.trajectory.playback_executor``.  The recorder keeps its
+    # private method names so existing callers (tests + monitor GUI)
+    # do not break.  Behaviour is identical to the pre-extraction code.
     def _flush_motion_queue_after_timeout(self):
-        if self._send_dash is None:
-            return False
-        try:
-            self._send_dash(reset_robot().render())
-            self._sleep_fn(0.2)
-            self._send_dash(enable_robot().render())
-            return True
-        except Exception:
-            return False
+        return playback_executor.flush_motion_queue_after_timeout(
+            self._send_dash, self._sleep_fn,
+        )
 
     def _send_playback_event_command(self, command: str) -> bool:
-        if self._send_dash is None:
-            self._log.warn(f"⚠️  Cannot send playback IO event without dashboard channel: {command}")
-            return False
-        return bool(self._send_dash(command))
+        return playback_executor.send_playback_event_command(
+            command, self._send_dash, self._log,
+        )
 
     def _cancel_pending_timers(self) -> None:
         """Cancel all outstanding delayed IO command timers (called from stop_all)."""
-        with self._pending_timers_lock:
-            for timer in self._pending_timers:
-                timer.cancel()
-            self._pending_timers.clear()
+        playback_executor.cancel_pending_timers(
+            self._pending_timers, self._pending_timers_lock,
+        )
 
     def _schedule_delayed_event_command(self, delay_s: float, command: str) -> None:
         def _send_later():
@@ -1464,13 +1464,22 @@ class TrajectoryRecorder:
         return elapsed >= total_dur + PREVIEW_FINAL_EXTRA_TIMEOUT_SEC
 
     def _playback_timeout_margin(self, command_count: Optional[int] = None) -> float:
-        margin = PREVIEW_ABSOLUTE_TIMEOUT_SEC
-        if command_count is not None:
-            margin = max(margin, float(command_count) * PREVIEW_TIMEOUT_PER_COMMAND_SEC)
-        return min(margin, PREVIEW_MAX_TIMEOUT_MARGIN_SEC)
+        return playback_executor.playback_timeout_margin(
+            command_count,
+            absolute_sec=PREVIEW_ABSOLUTE_TIMEOUT_SEC,
+            per_command_sec=PREVIEW_TIMEOUT_PER_COMMAND_SEC,
+            max_margin_sec=PREVIEW_MAX_TIMEOUT_MARGIN_SEC,
+        )
 
     def _playback_timed_out(self, elapsed, total_dur, command_count: Optional[int] = None):
-        return elapsed >= total_dur + self._playback_timeout_margin(command_count)
+        return playback_executor.playback_timed_out(
+            elapsed,
+            total_dur,
+            command_count,
+            absolute_sec=PREVIEW_ABSOLUTE_TIMEOUT_SEC,
+            per_command_sec=PREVIEW_TIMEOUT_PER_COMMAND_SEC,
+            max_margin_sec=PREVIEW_MAX_TIMEOUT_MARGIN_SEC,
+        )
 
     def _play_worker(self):
         """Execute a precompiled playback job while publishing monitoring data."""
