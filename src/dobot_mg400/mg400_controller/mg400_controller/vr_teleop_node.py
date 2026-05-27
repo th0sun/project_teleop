@@ -1422,6 +1422,146 @@ class TeleopNode(Node):
         )
         return should_send, send_reason, queue_backlog_rad, run_queued_cmd
 
+    def _track_motion_t4_t5(self, ctx):
+        """Drive the latency analyzer's T4 (motion start) and T5
+        (target reached) markers, and on T5 emit the latency-event +
+        command-result rows to the triple logger.
+
+        T5 is where most of the post-hoc analysis hangs off: it picks
+        the best pending command by joint-norm match, falls back to
+        the active command snapshot when no match was found, and
+        decorates the analyzer's metrics dict with command identity,
+        match metadata, and the operation mode the tick was in.
+        """
+        # T4: motion start
+        self.latency_analyzer.update_tracking(ctx.velocity_mag)
+        if ctx.velocity_mag > motion_config.MOTION_START_THRESHOLD:
+            if self.latency_analyzer.mark_motion_start(ctx.now_wall):
+                self.get_logger().debug(
+                    f"Motion started: velocity={ctx.velocity_mag:.6f} rad/s"
+                )
+
+        # T5: target reached — only when the robot is both near the
+        # last commanded target and effectively at rest.
+        cmd_target = self.latency_analyzer.current_cmd_target
+        dist = np.linalg.norm(ctx.q_current - cmd_target) if cmd_target is not None else 999
+        is_stopped = ctx.velocity_mag < 0.005
+        if not (dist < 0.01 and is_stopped):
+            return
+        if not self.latency_analyzer.mark_target_reached(ctx.now_wall):
+            return
+
+        metrics, report = self.latency_analyzer.analyze_arrival(
+            ctx.q_current, ctx.velocity_mag
+        )
+        if not metrics:
+            return
+
+        self.get_logger().info(report)
+
+        if not (self.triple_logger and ctx.session_logging_active):
+            return
+
+        match_result = self.pending_command_registry.match(
+            ctx.q_current,
+            feedback_command_id=ctx.feedback_command_id,
+            now_wall=ctx.now_wall,
+            norm_tolerance_rad=0.01,
+            per_joint_tolerance_rad=motion_config.VALID_PER_JOINT_LIMIT,
+        )
+        matched_command = match_result.command
+        if matched_command is not None:
+            matched_seq = matched_command.control_command_seq
+            matched_uid = matched_command.ros_command_uid
+            matched_dobot_id = matched_command.dobot_command_id
+            matched_command_text = matched_command.command_text
+            matched_unity_sample = matched_command.unity_sample
+            matched_target_rad = matched_command.target_rad
+            matched_target_tool = matched_command.target_tool
+            feedback_before_send = matched_command.feedback_command_id_before_send
+        else:
+            matched_seq = metrics.get("control_command_seq")
+            matched_uid = self.active_command_uid
+            matched_dobot_id = self.active_command_dobot_id
+            matched_command_text = self.active_command_text
+            matched_unity_sample = self.active_command_unity_sample
+            matched_target_rad = metrics.get("target")
+            matched_target_tool = metrics.get("ros_cmd_tool_target")
+            feedback_before_send = self.active_feedback_command_id_before_send
+
+        feedback_id_changed = (
+            None
+            if feedback_before_send is None
+            else ctx.feedback_command_id != feedback_before_send
+        )
+        command_id_match = match_result.command_id_match
+        command_result_status = match_result.status
+        settle_match_method = match_result.method
+        tracking_source = match_result.method
+        tracking_confidence = match_result.confidence
+
+        metrics["final_tool_actual"] = ctx.tool_act
+        metrics["final_tool_target"] = ctx.tool_tgt
+        metrics["operation_mode"] = ctx.operation_mode
+        metrics["unity_sample"] = matched_unity_sample
+        metrics["control_command_seq"] = matched_seq
+        metrics["ros_command_uid"] = matched_uid
+        metrics["dobot_command_id"] = matched_dobot_id
+        metrics["robot_feedback_command_id"] = ctx.feedback_command_id
+        metrics["command_id_match"] = command_id_match
+        metrics["command_result_status"] = command_result_status
+        metrics["dobot_command_text"] = matched_command_text
+        metrics["command_tracking_source"] = tracking_source
+        metrics["command_tracking_confidence"] = tracking_confidence
+        metrics["feedback_command_id_before_send"] = feedback_before_send
+        metrics["feedback_command_id_at_result"] = ctx.feedback_command_id
+        metrics["feedback_command_id_changed"] = feedback_id_changed
+        metrics["settle_match_method"] = settle_match_method
+        metrics["settle_match_ambiguous"] = match_result.ambiguous
+        metrics["settle_candidate_count"] = match_result.candidate_count
+        metrics["settle_match_error_rad"] = match_result.match_error_rad
+        metrics["settle_second_best_error_rad"] = match_result.second_best_error_rad
+        metrics["settle_match_age_ms"] = match_result.match_age_ms
+        metrics["pending_command_count"] = match_result.pending_count
+        metrics["target"] = matched_target_rad
+        metrics["ros_cmd_tool_target"] = matched_target_tool
+
+        self.triple_logger.log_latency_event(metrics)
+        self.triple_logger.log_command_result(
+            control_command_seq=matched_seq,
+            ros_command_uid=matched_uid,
+            dobot_command_id=matched_dobot_id,
+            robot_feedback_command_id=ctx.feedback_command_id,
+            status=command_result_status,
+            command_id_match=command_id_match,
+            dobot_command_text=matched_command_text,
+            command_tracking_source=tracking_source,
+            command_tracking_confidence=tracking_confidence,
+            feedback_command_id_before_send=feedback_before_send,
+            feedback_command_id_at_result=ctx.feedback_command_id,
+            feedback_command_id_changed=feedback_id_changed,
+            settle_match_method=settle_match_method,
+            settle_match_ambiguous=match_result.ambiguous,
+            settle_candidate_count=match_result.candidate_count,
+            settle_match_error_rad=match_result.match_error_rad,
+            settle_second_best_error_rad=match_result.second_best_error_rad,
+            settle_match_age_ms=match_result.match_age_ms,
+            pending_command_count=match_result.pending_count,
+            ros_timestamp=ctx.now_wall,
+            ros_cmd_joints=matched_target_rad,
+            robot_joints=ctx.q_current,
+            ros_cmd_tool_target=matched_target_tool,
+            robot_tool_actual=ctx.tool_act,
+            robot_tool_target=ctx.tool_tgt,
+            final_error_rad=metrics.get("final_error"),
+            max_joint_error_rad=metrics.get("max_error"),
+            robot_mode=ctx.current_mode,
+            error_status=ctx.err_info['error_status'],
+            operation_mode=ctx.operation_mode,
+            unity_sample=matched_unity_sample,
+        )
+        self.pending_command_registry.mark_logged(match_result)
+
     def _control_loop_step(self):
         """
         Main Control Logic (50Hz) - Called by high-precision thread
@@ -1455,126 +1595,7 @@ class TeleopNode(Node):
         self._periodic_tool_index_query()
         self._auto_recover_from_error_mode(ctx)
 
-        # === MOTION TRACKING (Latency Analyzer) ===
-        # T4: Motion Start
-        # Update Analyzer Stats
-        self.latency_analyzer.update_tracking(ctx.velocity_mag)
-
-        if ctx.velocity_mag > motion_config.MOTION_START_THRESHOLD:
-            if self.latency_analyzer.mark_motion_start(ctx.now_wall):
-                 self.get_logger().debug(f"Motion started: velocity={ctx.velocity_mag:.6f} rad/s")
-
-        # T5: Target Reached
-        # Using basic check here to trigger detailed analysis
-        dist = np.linalg.norm(ctx.q_current - self.latency_analyzer.current_cmd_target) if self.latency_analyzer.current_cmd_target is not None else 999
-        is_stopped = ctx.velocity_mag < 0.005
-
-        if dist < 0.01 and is_stopped:
-            if self.latency_analyzer.mark_target_reached(ctx.now_wall):
-                # Get Full Report
-                metrics, report = self.latency_analyzer.analyze_arrival(ctx.q_current, ctx.velocity_mag)
-                if metrics:
-                    # CLI Log
-                    self.get_logger().info(report)
-
-                    if self.triple_logger and ctx.session_logging_active:
-                        match_result = self.pending_command_registry.match(
-                            ctx.q_current,
-                            feedback_command_id=ctx.feedback_command_id,
-                            now_wall=ctx.now_wall,
-                            norm_tolerance_rad=0.01,
-                            per_joint_tolerance_rad=motion_config.VALID_PER_JOINT_LIMIT,
-                        )
-                        matched_command = match_result.command
-                        if matched_command is not None:
-                            matched_seq = matched_command.control_command_seq
-                            matched_uid = matched_command.ros_command_uid
-                            matched_dobot_id = matched_command.dobot_command_id
-                            matched_command_text = matched_command.command_text
-                            matched_unity_sample = matched_command.unity_sample
-                            matched_target_rad = matched_command.target_rad
-                            matched_target_tool = matched_command.target_tool
-                            feedback_before_send = matched_command.feedback_command_id_before_send
-                        else:
-                            matched_seq = metrics.get("control_command_seq")
-                            matched_uid = self.active_command_uid
-                            matched_dobot_id = self.active_command_dobot_id
-                            matched_command_text = self.active_command_text
-                            matched_unity_sample = self.active_command_unity_sample
-                            matched_target_rad = metrics.get("target")
-                            matched_target_tool = metrics.get("ros_cmd_tool_target")
-                            feedback_before_send = self.active_feedback_command_id_before_send
-
-                        feedback_id_changed = (
-                            None
-                            if feedback_before_send is None
-                            else ctx.feedback_command_id != feedback_before_send
-                        )
-                        command_id_match = match_result.command_id_match
-                        command_result_status = match_result.status
-                        settle_match_method = match_result.method
-                        tracking_source = match_result.method
-                        tracking_confidence = match_result.confidence
-                        metrics["final_tool_actual"] = ctx.tool_act
-                        metrics["final_tool_target"] = ctx.tool_tgt
-                        metrics["operation_mode"] = ctx.operation_mode
-                        metrics["unity_sample"] = matched_unity_sample
-                        metrics["control_command_seq"] = matched_seq
-                        metrics["ros_command_uid"] = matched_uid
-                        metrics["dobot_command_id"] = matched_dobot_id
-                        metrics["robot_feedback_command_id"] = ctx.feedback_command_id
-                        metrics["command_id_match"] = command_id_match
-                        metrics["command_result_status"] = command_result_status
-                        metrics["dobot_command_text"] = matched_command_text
-                        metrics["command_tracking_source"] = tracking_source
-                        metrics["command_tracking_confidence"] = tracking_confidence
-                        metrics["feedback_command_id_before_send"] = feedback_before_send
-                        metrics["feedback_command_id_at_result"] = ctx.feedback_command_id
-                        metrics["feedback_command_id_changed"] = feedback_id_changed
-                        metrics["settle_match_method"] = settle_match_method
-                        metrics["settle_match_ambiguous"] = match_result.ambiguous
-                        metrics["settle_candidate_count"] = match_result.candidate_count
-                        metrics["settle_match_error_rad"] = match_result.match_error_rad
-                        metrics["settle_second_best_error_rad"] = match_result.second_best_error_rad
-                        metrics["settle_match_age_ms"] = match_result.match_age_ms
-                        metrics["pending_command_count"] = match_result.pending_count
-                        metrics["target"] = matched_target_rad
-                        metrics["ros_cmd_tool_target"] = matched_target_tool
-                        self.triple_logger.log_latency_event(metrics)
-                        self.triple_logger.log_command_result(
-                            control_command_seq=matched_seq,
-                            ros_command_uid=matched_uid,
-                            dobot_command_id=matched_dobot_id,
-                            robot_feedback_command_id=ctx.feedback_command_id,
-                            status=command_result_status,
-                            command_id_match=command_id_match,
-                            dobot_command_text=matched_command_text,
-                            command_tracking_source=tracking_source,
-                            command_tracking_confidence=tracking_confidence,
-                            feedback_command_id_before_send=feedback_before_send,
-                            feedback_command_id_at_result=ctx.feedback_command_id,
-                            feedback_command_id_changed=feedback_id_changed,
-                            settle_match_method=settle_match_method,
-                            settle_match_ambiguous=match_result.ambiguous,
-                            settle_candidate_count=match_result.candidate_count,
-                            settle_match_error_rad=match_result.match_error_rad,
-                            settle_second_best_error_rad=match_result.second_best_error_rad,
-                            settle_match_age_ms=match_result.match_age_ms,
-                            pending_command_count=match_result.pending_count,
-                            ros_timestamp=ctx.now_wall,
-                            ros_cmd_joints=matched_target_rad,
-                            robot_joints=ctx.q_current,
-                            ros_cmd_tool_target=matched_target_tool,
-                            robot_tool_actual=ctx.tool_act,
-                            robot_tool_target=ctx.tool_tgt,
-                            final_error_rad=metrics.get("final_error"),
-                            max_joint_error_rad=metrics.get("max_error"),
-                            robot_mode=ctx.current_mode,
-                            error_status=ctx.err_info['error_status'],
-                            operation_mode=ctx.operation_mode,
-                            unity_sample=matched_unity_sample,
-                        )
-                        self.pending_command_registry.mark_logged(match_result)
+        self._track_motion_t4_t5(ctx)
 
         # === SKIP TELEOP COMMANDS DURING PLAYBACK / POST-STOP HOMING ===
         if ctx.is_blocked:
@@ -1592,153 +1613,174 @@ class TeleopNode(Node):
         )
 
         if should_send:
-            if motion_config.SCENE_SAFETY_BLOCK_REALTIME:
-                safety_result = self.scene_safety_guard.check_joints_rad(ctx.target_snapshot)
-                if safety_result.blocked:
-                    if ctx.now - self._last_scene_safety_block_log > 0.5:
-                        self.get_logger().error(
-                            "🧱 Scene safety blocked realtime target: "
-                            f"{safety_result.status} {safety_result.detail} "
-                            f"tcp={np.round(safety_result.point_xyzr[:3], 1).tolist()}"
-                        )
-                        self._last_scene_safety_block_log = ctx.now
-                    return
-
-            # 1. Format Command
-            # force_send=True when stuck: bypass should_skip_motion which silently drops commands
-            is_stuck_recovery = send_reason.startswith("Stuck")
-            cmd_str, q_safe = self.controller.format_command_string(
-                ctx.target_snapshot,
-                q_current=ctx.q_current,
-                force_send=is_stuck_recovery,
+            self._build_and_send_command(
+                ctx, send_reason, queue_backlog_rad, run_queued_cmd
             )
 
-            if not cmd_str:
+    def _build_and_send_command(self, ctx, send_reason, queue_backlog_rad, run_queued_cmd):
+        """Final phase of the 50 Hz tick when the controller has decided
+        a new command should go out.
+
+        Sequence:
+          1. Scene-safety guard (rate-limited error log on block, return).
+          2. Format the wire command via the controller (force_send when
+             we're recovering from a stuck condition so the queue-skip
+             logic doesn't silently drop it).
+          3. Send through the command_id-aware sender; on success,
+             a) start latency tracking T1-T3,
+             b) update active_command_* + pending_command_registry,
+             c) write the ros_cmd row in the triple logger,
+             d) emit CLI 'sent' report + JointState for the GUI graph,
+             e) tell the controller this command went out so the next
+                should_send call has the right baseline.
+        """
+        if motion_config.SCENE_SAFETY_BLOCK_REALTIME:
+            safety_result = self.scene_safety_guard.check_joints_rad(ctx.target_snapshot)
+            if safety_result.blocked:
+                if ctx.now - self._last_scene_safety_block_log > 0.5:
+                    self.get_logger().error(
+                        "🧱 Scene safety blocked realtime target: "
+                        f"{safety_result.status} {safety_result.detail} "
+                        f"tcp={np.round(safety_result.point_xyzr[:3], 1).tolist()}"
+                    )
+                    self._last_scene_safety_block_log = ctx.now
                 return
 
-            # 2. Timing Stats
-            t3_cmd_send = time.time()
-            # 3. Send to Robot
-            send_result = self.sender.send_with_command_id(
-                cmd_str,
-                response_timeout=motion_config.REALTIME_COMMAND_ID_RESPONSE_TIMEOUT_SEC,
+        # 1. Format Command
+        # force_send=True when stuck: bypass should_skip_motion which silently drops commands
+        is_stuck_recovery = send_reason.startswith("Stuck")
+        cmd_str, q_safe = self.controller.format_command_string(
+            ctx.target_snapshot,
+            q_current=ctx.q_current,
+            force_send=is_stuck_recovery,
+        )
+        if not cmd_str:
+            return
+
+        # 2. Timing Stats
+        t3_cmd_send = time.time()
+        # 3. Send to Robot
+        send_result = self.sender.send_with_command_id(
+            cmd_str,
+            response_timeout=motion_config.REALTIME_COMMAND_ID_RESPONSE_TIMEOUT_SEC,
+        )
+        if not send_result.success:
+            return
+
+        self._realtime_command_seq += 1
+        control_command_seq = self._realtime_command_seq
+        ros_command_uid = f"ros_cmd_{control_command_seq:06d}"
+        dobot_command_id = send_result.command_id
+        feedback_command_id_before_send = ctx.feedback_command_id
+        tracking_source = (
+            "dobot_ack_id"
+            if dobot_command_id is not None
+            else "ros_sequence_pose_target"
+        )
+        tracking_confidence = "medium" if dobot_command_id is not None else "low"
+        ros_cmd_tool_target = self.feedback.kinematics.forward_kinematics(
+            np.degrees(q_safe)
+        )
+        # Start Tracking (T1-T3)
+        self.latency_analyzer.start_tracking(
+            ctx.unity_send_time_snapshot,
+            ctx.target_recv_time_snapshot,
+            t3_cmd_send,
+            q_safe,
+            current_q=ctx.q_current,
+            command_seq=control_command_seq,
+            target_tool=ros_cmd_tool_target,
+        )
+        self.active_command_unity_sample = ctx.unity_sample_snapshot
+        self.active_command_uid = ros_command_uid
+        self.active_command_dobot_id = dobot_command_id
+        self.active_command_response = send_result.response
+        self.active_command_text = cmd_str
+        self.active_feedback_command_id_before_send = feedback_command_id_before_send
+        self.active_command_tracking_source = tracking_source
+        self.active_command_tracking_confidence = tracking_confidence
+        self.pending_command_registry.register(
+            PendingCommand(
+                control_command_seq=control_command_seq,
+                ros_command_uid=ros_command_uid,
+                target_rad=q_safe.copy(),
+                target_tool=np.asarray(ros_cmd_tool_target, dtype=float).copy(),
+                dobot_command_id=dobot_command_id,
+                command_text=cmd_str,
+                unity_sample=ctx.unity_sample_snapshot,
+                sent_wall_timestamp=t3_cmd_send,
+                feedback_command_id_before_send=feedback_command_id_before_send,
             )
-            if send_result.success:
-                self._realtime_command_seq += 1
-                control_command_seq = self._realtime_command_seq
-                ros_command_uid = f"ros_cmd_{control_command_seq:06d}"
-                dobot_command_id = send_result.command_id
-                feedback_command_id_before_send = ctx.feedback_command_id
-                tracking_source = (
-                    "dobot_ack_id"
-                    if dobot_command_id is not None
-                    else "ros_sequence_pose_target"
-                )
-                tracking_confidence = (
-                    "medium"
-                    if dobot_command_id is not None
-                    else "low"
-                )
-                ros_cmd_tool_target = self.feedback.kinematics.forward_kinematics(
-                    np.degrees(q_safe)
-                )
-                # Start Tracking (T1-T3)
-                self.latency_analyzer.start_tracking(
-                    ctx.unity_send_time_snapshot,
-                    ctx.target_recv_time_snapshot,
-                    t3_cmd_send,
-                    q_safe,
-                    current_q=ctx.q_current,
-                    command_seq=control_command_seq,
-                    target_tool=ros_cmd_tool_target,
-                )
-                self.active_command_unity_sample = ctx.unity_sample_snapshot
-                self.active_command_uid = ros_command_uid
-                self.active_command_dobot_id = dobot_command_id
-                self.active_command_response = send_result.response
-                self.active_command_text = cmd_str
-                self.active_feedback_command_id_before_send = feedback_command_id_before_send
-                self.active_command_tracking_source = tracking_source
-                self.active_command_tracking_confidence = tracking_confidence
-                self.pending_command_registry.register(
-                    PendingCommand(
-                        control_command_seq=control_command_seq,
-                        ros_command_uid=ros_command_uid,
-                        target_rad=q_safe.copy(),
-                        target_tool=np.asarray(ros_cmd_tool_target, dtype=float).copy(),
-                        dobot_command_id=dobot_command_id,
-                        command_text=cmd_str,
-                        unity_sample=ctx.unity_sample_snapshot,
-                        sent_wall_timestamp=t3_cmd_send,
-                        feedback_command_id_before_send=feedback_command_id_before_send,
-                    )
-                )
+        )
 
-                # File Log (CSV)
-                sent_mono = time.perf_counter()
-                time_since_last = sent_mono - self.controller.last_sent_time
-                ctx.velocity_mag = np.max(self.controller.robot_velocity)
-                network_delay_ms = (
-                    (ctx.target_recv_time_snapshot - ctx.unity_send_time_snapshot) * 1000.0
-                    if ctx.target_recv_time_snapshot > 0 and ctx.unity_send_time_snapshot > 0
-                    else 0.0
-                )
-                decision_delay_ms = (
-                    (t3_cmd_send - ctx.target_recv_time_snapshot) * 1000.0
-                    if ctx.target_recv_time_snapshot > 0
-                    else 0.0
-                )
+        # File Log (CSV)
+        sent_mono = time.perf_counter()
+        time_since_last = sent_mono - self.controller.last_sent_time
+        # Phase 13 uses a different velocity formula than phase 7 (no
+        # abs around max) — preserve that behaviour by reading the raw
+        # velocity again rather than reusing ctx.velocity_mag.
+        velocity_mag = float(np.max(self.controller.robot_velocity))
+        network_delay_ms = (
+            (ctx.target_recv_time_snapshot - ctx.unity_send_time_snapshot) * 1000.0
+            if ctx.target_recv_time_snapshot > 0 and ctx.unity_send_time_snapshot > 0
+            else 0.0
+        )
+        decision_delay_ms = (
+            (t3_cmd_send - ctx.target_recv_time_snapshot) * 1000.0
+            if ctx.target_recv_time_snapshot > 0
+            else 0.0
+        )
 
-                robot_status = self.feedback.get_error_status()
+        robot_status = self.feedback.get_error_status()
 
-                if self.triple_logger:
-                    self.triple_logger.log_ros_cmd(
-                        q_safe,
-                        ctx.target_snapshot,
-                        t3_cmd_send,
-                        t1_unity_send_ros_wall=ctx.unity_send_time_snapshot,
-                        t2_ros_recv_wall=ctx.target_recv_time_snapshot,
-                        network_delay_ms=network_delay_ms,
-                        decision_delay_ms=decision_delay_ms,
-                        send_reason=send_reason,
-                        robot_mode=robot_status['robot_mode'],
-                        error_status=robot_status['error_status'],
-                        queue_backlog_rad=queue_backlog_rad,
-                        run_queued_cmd=run_queued_cmd,
-                        time_since_last_cmd_ms=time_since_last * 1000.0,
-                        velocity_mag_rad_s=ctx.velocity_mag,
-                        control_command_seq=control_command_seq,
-                        ros_command_uid=ros_command_uid,
-                        dobot_command_id=dobot_command_id,
-                        dobot_command_response=send_result.response,
-                        dobot_command_text=cmd_str,
-                        command_tracking_source=tracking_source,
-                        command_tracking_confidence=tracking_confidence,
-                        feedback_command_id_before_send=feedback_command_id_before_send,
-                        ros_cmd_tool_target=ros_cmd_tool_target,
-                        unity_sample=ctx.unity_sample_snapshot,
-                        joints_are_degrees=False,
-                    )
+        if self.triple_logger:
+            self.triple_logger.log_ros_cmd(
+                q_safe,
+                ctx.target_snapshot,
+                t3_cmd_send,
+                t1_unity_send_ros_wall=ctx.unity_send_time_snapshot,
+                t2_ros_recv_wall=ctx.target_recv_time_snapshot,
+                network_delay_ms=network_delay_ms,
+                decision_delay_ms=decision_delay_ms,
+                send_reason=send_reason,
+                robot_mode=robot_status['robot_mode'],
+                error_status=robot_status['error_status'],
+                queue_backlog_rad=queue_backlog_rad,
+                run_queued_cmd=run_queued_cmd,
+                time_since_last_cmd_ms=time_since_last * 1000.0,
+                velocity_mag_rad_s=velocity_mag,
+                control_command_seq=control_command_seq,
+                ros_command_uid=ros_command_uid,
+                dobot_command_id=dobot_command_id,
+                dobot_command_response=send_result.response,
+                dobot_command_text=cmd_str,
+                command_tracking_source=tracking_source,
+                command_tracking_confidence=tracking_confidence,
+                feedback_command_id_before_send=feedback_command_id_before_send,
+                ros_cmd_tool_target=ros_cmd_tool_target,
+                unity_sample=ctx.unity_sample_snapshot,
+                joints_are_degrees=False,
+            )
 
-                # CLI Report
-                msg = self.latency_analyzer.format_sent_report(
-                    should_send, send_reason, ctx.q_current, ctx.target_snapshot,
-                    self.controller.last_sent_target, self.controller.last_sent_time,
-                    self.controller.robot_velocity,
-                    robot_mode=robot_status['robot_mode'],
-                    error_status=robot_status['error_status'],
-                    time_since_last=time_since_last,
-                )
-                self.get_logger().info(msg)
+        # CLI Report
+        msg = self.latency_analyzer.format_sent_report(
+            True, send_reason, ctx.q_current, ctx.target_snapshot,
+            self.controller.last_sent_target, self.controller.last_sent_time,
+            self.controller.robot_velocity,
+            robot_mode=robot_status['robot_mode'],
+            error_status=robot_status['error_status'],
+            time_since_last=time_since_last,
+        )
+        self.get_logger().info(msg)
 
-                # 📊 Publish Sent Command for GUI graph
-                sent_msg = JointState()
-                sent_msg.header.stamp = self.get_clock().ctx.now().to_msg()
-                sent_msg.position = q_safe.tolist()
-                self.ros_publishers.sent_command.publish(sent_msg)
+        # 📊 Publish Sent Command for GUI graph
+        sent_msg = JointState()
+        sent_msg.header.stamp = self.get_clock().now().to_msg()
+        sent_msg.position = q_safe.tolist()
+        self.ros_publishers.sent_command.publish(sent_msg)
 
-                # Update State in Controller
-                self.controller.mark_command_sent(q_safe, sent_mono)
+        # Update State in Controller
+        self.controller.mark_command_sent(q_safe, sent_mono)
 
     def shutdown(self):
         """ปิดทุกอย่างอย่างเรียบร้อย"""
