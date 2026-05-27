@@ -921,32 +921,6 @@ def prompt_enable_triple_logging() -> bool:
     return response in ("", "y", "yes")
 
 
-def analyze_triple_log(file_path: str) -> dict:
-    """Analyze a teleop session CSV and return simple delta statistics."""
-    with open(file_path, newline="") as fh:
-        rows = list(csv.DictReader(fh))
-    results = {
-        "total_samples": len(rows),
-        "duration_sec": max((float(r.get("elapsed_sec") or 0.0) for r in rows), default=0.0),
-    }
-    for i in range(1, JOINT_COUNT + 1):
-        for name in ("delta_unity_comp_to_ros_cmd", "delta_ros_cmd_to_robot"):
-            col = f"{name}_j{i}_rad"
-            valid = []
-            for row in rows:
-                value = row.get(col)
-                if value:
-                    try:
-                        valid.append(float(value))
-                    except ValueError:
-                        pass
-            if valid:
-                arr = np.asarray(valid, dtype=float)
-                results[f"j{i}_{name}_mean_rad"] = float(np.mean(arr))
-                results[f"j{i}_{name}_max_rad"] = float(np.max(np.abs(arr)))
-    return results
-
-
 if __name__ == "__main__":
     if prompt_enable_triple_logging():
         logger = UnifiedTripleLogger()

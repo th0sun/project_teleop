@@ -84,34 +84,6 @@ def load_trajectory(
     return list(frames), list(events)
 
 
-def parse_unity_trajectory_json(
-    json_str: str,
-    logger,
-) -> Tuple[List[Dict], List[Dict], str]:
-    """Parse an imported Unity trajectory JSON payload.
-
-    Returns ``(frames, events, filename)``.  ``filename`` defaults to
-    ``unity_trajectory.json`` if the payload does not specify one.
-
-    On parse failure all three return values are empty / default; the
-    recorder layer treats that as "do nothing".
-    """
-    try:
-        data = json.loads(json_str)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(f"Failed to parse Unity trajectory JSON: {exc}")
-        return [], [], "unity_trajectory.json"
-
-    if isinstance(data, list):
-        return list(data), [], "unity_trajectory.json"
-
-    frames = list(data.get("frames", []))
-    events_raw = data.get("events", [])
-    events = list(events_raw) if isinstance(events_raw, list) else []
-    filename = data.get("filename", "unity_trajectory.json")
-    return frames, events, filename
-
-
 def list_trajectory_files(traj_dir: str) -> List[str]:
     """Return sorted ``*.json`` files in ``traj_dir`` (silent on missing dir)."""
     try:
