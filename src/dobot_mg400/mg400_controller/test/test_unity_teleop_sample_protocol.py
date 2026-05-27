@@ -15,7 +15,7 @@ from mg400_controller.common.ros.unity_teleop_sample import (
     parse_unity_joint_frame_id,
     parse_unity_teleop_sample,
 )
-from mg400_controller.common.utils.unified_triple_logger import UnifiedTripleLogger
+from mg400_controller.common.utils.loggers.unified_triple_logger import UnifiedTripleLogger
 
 
 class UnityTeleopSampleProtocolTest(unittest.TestCase):

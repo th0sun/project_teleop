@@ -27,8 +27,9 @@ class RobotErrorDecoder:
                 pass
 
             # Source-tree fallback for tests/dev runs without installed package data.
+            # File is at common/utils/error/error_decoder.py → parents[2] = common/.
             if config_path is None:
-                config_path = Path(__file__).resolve().parents[1] / 'config'
+                config_path = Path(__file__).resolve().parents[2] / 'config'
             
             controller_file = config_path / 'alarmController.json'
             servo_file = config_path / 'alarmServo.json'

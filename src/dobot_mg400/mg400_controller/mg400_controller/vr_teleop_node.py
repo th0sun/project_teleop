@@ -46,18 +46,18 @@ from mg400_controller.common.logic.motion_planner import MotionPlanner
 from mg400_controller.common.logic.target_compensator import TargetLatencyCompensator
 
 # Import utilities
-from mg400_controller.common.utils.interactive_cmd import InteractiveCommandHandler
-from mg400_controller.common.utils.error_handler import ErrorHandler
+from mg400_controller.common.utils.cli.interactive_cmd import InteractiveCommandHandler
+from mg400_controller.common.utils.error.error_handler import ErrorHandler
 from mg400_controller.common.utils.collision_haptic import CollisionHaptic
 from mg400_controller.common.trajectory.trajectory_recorder import TrajectoryRecorder
 from mg400_controller.common.trajectory.teach_job_handler import TeachJobHandler
 from mg400_controller.common.logic.safety_monitor import SafetyMonitor
 from mg400_controller.common.logic.scene_safety_guard import SceneSafetyGuard
 from mg400_controller.common.logic.teleop_controller import TeleopController
-from mg400_controller.common.utils.latency_analyzer import LatencyAnalyzer
+from mg400_controller.common.utils.telemetry.latency_analyzer import LatencyAnalyzer
 from mg400_controller.common.utils.clock_calibrator import ClockCalibrator
-from mg400_controller.common.utils.mode_selection import select_control_mode
-from mg400_controller.common.utils.unified_triple_logger import (
+from mg400_controller.common.utils.cli.mode_selection import select_control_mode
+from mg400_controller.common.utils.loggers.unified_triple_logger import (
     UnifiedTripleLogger,
     prompt_enable_triple_logging,
 )
@@ -107,7 +107,7 @@ class TeleopNode(Node):
         # log dir can't be opened.
         self.adaptive_telemetry = None
         try:
-            from mg400_controller.common.utils.adaptive_telemetry import (
+            from mg400_controller.common.utils.telemetry.adaptive_telemetry import (
                 AdaptiveTelemetry,
             )
             self.adaptive_telemetry = AdaptiveTelemetry()

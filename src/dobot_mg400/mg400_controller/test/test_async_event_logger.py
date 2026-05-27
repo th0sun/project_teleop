@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mg400_controller.common.utils.async_event_logger import AsyncEventLogger
+from mg400_controller.common.utils.loggers.async_event_logger import AsyncEventLogger
 
 
 class AsyncEventLoggerTest(unittest.TestCase):

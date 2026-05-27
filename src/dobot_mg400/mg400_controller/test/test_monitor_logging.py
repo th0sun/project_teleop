@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mg400_controller.common.utils.monitor_logging import (
+from mg400_controller.common.utils.loggers.monitor_logging import (
     ManualMonitorLogger,
     SessionLogger,
 )

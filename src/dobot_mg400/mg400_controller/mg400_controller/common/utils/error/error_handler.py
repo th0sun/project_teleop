@@ -72,7 +72,7 @@ class ErrorHandler:
                     return []
                 
                 # We have errors. Use RobotErrorDecoder to get descriptions
-                from mg400_controller.common.utils.error_decoder import RobotErrorDecoder
+                from mg400_controller.common.utils.error.error_decoder import RobotErrorDecoder
                 decoder = RobotErrorDecoder()
                 
                 parsed_errors = []

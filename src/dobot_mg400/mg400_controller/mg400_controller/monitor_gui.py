@@ -25,8 +25,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.animation as animation
 
 from std_msgs.msg import Bool, Int32MultiArray
-from mg400_controller.common.utils.error_decoder import RobotErrorDecoder
-from mg400_controller.common.utils.monitor_logging import (
+from mg400_controller.common.utils.error.error_decoder import RobotErrorDecoder
+from mg400_controller.common.utils.loggers.monitor_logging import (
     SessionLogger,
     ManualMonitorLogger,
 )

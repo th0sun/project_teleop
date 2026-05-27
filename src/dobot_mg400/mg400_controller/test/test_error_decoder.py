@@ -1,7 +1,7 @@
 import unittest
 
-from mg400_controller.common.utils.error_decoder import RobotErrorDecoder
-from mg400_controller.common.utils.error_handler import ErrorHandler
+from mg400_controller.common.utils.error.error_decoder import RobotErrorDecoder
+from mg400_controller.common.utils.error.error_handler import ErrorHandler
 
 
 class DummyLogger:

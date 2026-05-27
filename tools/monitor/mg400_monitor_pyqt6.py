@@ -62,7 +62,7 @@ try:
         SUCTION_TOPIC, LIGHT_TOPIC, DO_STATUS_TOPIC,
         ROBOT_MODE_TOPIC, ERROR_STATUS_TOPIC,
     )
-    from mg400_controller.common.utils.error_decoder import RobotErrorDecoder
+    from mg400_controller.common.utils.error.error_decoder import RobotErrorDecoder
 except ImportError:
     UNITY_TOPIC          = "/unity/joint_cmd"
     VACUUM_DO_PORT       = 1

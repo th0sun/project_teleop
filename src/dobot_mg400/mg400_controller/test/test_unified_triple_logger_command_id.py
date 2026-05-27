@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mg400_controller.common.utils.unified_triple_logger import UnifiedTripleLogger
+from mg400_controller.common.utils.loggers.unified_triple_logger import UnifiedTripleLogger
 
 
 class UnifiedTripleLoggerCommandIdTest(unittest.TestCase):
