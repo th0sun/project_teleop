@@ -132,22 +132,46 @@ class _ControlLoopContext:
 class TeleopNode(Node):
     def __init__(self):
         super().__init__('mg400_vr_teleop')
-
-        # 1. Initialize Modules
         self.stop_event = threading.Event()
-
         self.connection = RobotConnection(self.get_logger())
-        import mg400_controller.common.config.robot_config as cfg
 
-        # 1. Initialize logic modules
+        self._init_logic_modules()
+        self._init_command_tracking_state()
+        self._init_publishers_and_clock()
+        self._declare_runtime_params()
+        self._init_sample_worker()
+        self._init_triple_logger()
+        self._apply_mixed_primitives_param()
+        self._register_subscriptions_with_qos()
+        self._init_tool_state()
+
+        if not self._connect_and_enable_robot():
+            return
+
+        self._init_robot_handlers()
+        self._start_runtime()
+        self._log_ready_banner()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # __init__ phase helpers — see __init__ for the order they run in.
+    # Each one is purely setup; the connect step is the one early-return
+    # boundary and lives directly in __init__.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _init_logic_modules(self):
+        """JointValidator, MotionPlanner, target compensator, optional
+        adaptive telemetry, and the TeleopController that consumes them
+        all.
+        """
+        import mg400_controller.common.config.robot_config as cfg
         self.validator = JointValidator(JOINT_LIMITS, ELBOW_ANGLE_LIMIT, self.get_logger())
         self.planner = MotionPlanner(cfg.CONTROL_MODE, self.get_logger())
         self.target_compensator = TargetLatencyCompensator(self.validator)
 
-        # Adaptive realtime telemetry — kept separate from triple_logger so
-        # post-hoc analysis of the new gate / per-cmd SpeedJ scheme isn't
-        # mixed in with the production CSV.  Disabled cleanly if the
-        # log dir can't be opened.
+        # Adaptive realtime telemetry — kept separate from triple_logger
+        # so post-hoc analysis of the new gate / per-cmd SpeedJ scheme
+        # isn't mixed in with the production CSV.  Disabled cleanly if
+        # the log dir can't be opened.
         self.adaptive_telemetry = None
         try:
             from mg400_controller.common.utils.telemetry.adaptive_telemetry import (
@@ -166,6 +190,12 @@ class TeleopNode(Node):
             telemetry=self.adaptive_telemetry,
         )
 
+    def _init_command_tracking_state(self):
+        """All per-tick / per-command bookkeeping the loop reads from
+        self.* — Unity sample maps, the pending-command registry, the
+        active-command snapshot fields, and the ROS-side sequence
+        counters.
+        """
         self.latest_target = None
         self.latest_unity_sample = None
         self.latest_unity_sample_recv_time = 0.0
@@ -189,18 +219,28 @@ class TeleopNode(Node):
         self.unity_joint_cmd_rx_session_id = f"ros_joint_cmd_rx_{int(time.time() * 1000)}"
         self._unity_joint_cmd_rx_seq = 0
 
-        # 1. Initialize logic modules
-        # Import MotionConfig for thresholds and Analyzer
+    def _init_publishers_and_clock(self):
+        """LatencyAnalyzer, ClockCalibrator, declared ROS topic names,
+        the publisher bundle, and the 1 Hz RTT-heartbeat timer.
+        """
         self.latency_analyzer = LatencyAnalyzer(motion_config)
+        # Clock Synchronization (Triple-Lock) — drift estimated automatically.
+        self.clock_calibrator = ClockCalibrator(window_size=50)
 
-        # --- Clock Synchronization (Triple-Lock) ---
-        self.clock_calibrator = ClockCalibrator(window_size=50) # Now estimates drift automatically
-
-        # Level 3: RTT Heartbeat (ROS-side ping)
         self.topics = declare_topic_parameters(self)
         self.ros_publishers = create_publishers(self, topics=self.topics)
-        self.create_timer(1.0, self._publish_heartbeat) # 1Hz Ping
+        # Level 3: RTT Heartbeat (ROS-side ping)
+        self.create_timer(1.0, self._publish_heartbeat)
 
+    def _declare_runtime_params(self):
+        """Declare ROS params that influence behaviour at runtime.
+
+        Today this is just ``use_unity_teleop_sample_for_control``, kept
+        as a tripwire — the parameter is exposed so existing launch
+        files don't fail, but turning it on logs a loud warning and is
+        forced off: /unity/joint_cmd is the only live robot-control
+        path. /unity/teleop_sample is log/sync only.
+        """
         requested_sample_control = bool(
             self.declare_parameter("use_unity_teleop_sample_for_control", False).value
         )
@@ -212,9 +252,17 @@ class TeleopNode(Node):
             )
         self.use_unity_teleop_sample_for_control = False
 
-        # Cross-layer timestamp contract:
-        # - T1/T2/T3/T4/T5 and CSV log timestamps are ROS-local wall seconds.
-        # - perf_counter is used only for control-loop intervals and stuck logic.
+    def _init_sample_worker(self):
+        """Timestamp contracts, per-loop counters, the Unity teleop-sample
+        queue + control snapshot lock, and the worker thread that
+        drains the queue on its own cadence.
+
+        Cross-layer timestamp contract:
+          - T1/T2/T3/T4/T5 and CSV log timestamps are ROS-local wall
+            seconds.
+          - perf_counter is used only for control-loop intervals and
+            stuck logic.
+        """
         self.target_recv_time = 0.0  # T2: ROS receive wall time
         self.unity_send_time = 0.0   # T1: Unity send time calibrated into ROS wall time
 
@@ -237,61 +285,71 @@ class TeleopNode(Node):
         self._unity_control_worker_thread = None
         self._unity_sample_worker_thread.start()
 
-        # --- One-file Teleop Session Logger (Unity → ROS2 → Robot) ---
+    def _init_triple_logger(self):
+        """Ask the operator whether to enable the unified Unity→ROS2→Robot
+        session log; create the logger if yes.
+        """
         self.triple_logger = None
         if prompt_enable_triple_logging():
             self.triple_logger = UnifiedTripleLogger()
-            self.get_logger().info(f"Teleop session logging enabled: {self.triple_logger.file_path}")
+            self.get_logger().info(
+                f"Teleop session logging enabled: {self.triple_logger.file_path}"
+            )
         else:
             self.get_logger().info("Teleop session logging disabled")
 
-        # Mixed-primitive opt-in via ROS param.  Default stays False
-        # (matches motion_config) so the production teach-and-repeat
-        # path keeps using JointMovJ-only.  Operators flip it per
-        # launch via `--ros-args -p use_mixed_primitives:=true`.  See
-        # AGENTS.md §4.4 — the Cartesian compile path is verified on
-        # real hardware but kept opt-in until more demo paths are swept
-        # through the classifier.
-        self._apply_mixed_primitives_param()
+    def _register_subscriptions_with_qos(self):
+        """Declare the BEST_EFFORT QoS used for Unity inputs and wire up
+        every subscription except the Unity firehose itself (that one is
+        attached late, after handlers are ready, to avoid a race).
 
-        # 2. Setup ROS Interfaces
-        qos_profile = QoSProfile(
+        Active inputs (full list of callback wiring lives in
+        ``common/ros/teleop_interfaces.py:create_subscriptions``):
+          unity_pong_callback        — Unity RTT heartbeat
+          unity_teleop_sample        — Unity JSON trace protocol v1
+          suction_callback           — Unity → vacuum gripper bool
+          light_callback             — Unity → signal-light DO
+          scene_safety_callback      — Unity → workspace-guard toggle
+          dashboard_cmd_callback     — Unity → dashboard passthrough
+          speed_factor_callback      — Unity → global SpeedFactor slider
+          teach_job_request_callback — Unity → typed teach job request
+        """
+        self._unity_qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=1,
         )
-
-        # Subscriptions (Delayed UNITY to avoid race condition).
-        # The factory groups all Unity / monitor / teach inputs in one
-        # place; the per-callback wiring below is read top-to-bottom by
-        # `create_subscriptions` in `common/ros/teleop_interfaces.py`.
-        #
-        # Active inputs:
-        #   unity_pong_callback        — Unity RTT heartbeat
-        #   unity_teleop_sample        — Unity JSON trace protocol v1
-        #   suction_callback           — Unity → vacuum gripper bool
-        #   light_callback             — Unity → signal-light DO
-        #   scene_safety_callback      — Unity → workspace-guard toggle
-        #   dashboard_cmd_callback     — Unity → dashboard passthrough
-        #   speed_factor_callback      — Unity → global SpeedFactor slider
-        #   teach_job_request_callback — Unity → typed teach job request
-        #
         self.ros_subscriptions = self._register_ros_subscriptions()
 
-        # Suction Cup Control (Smart Trigger)
+    def _init_tool_state(self):
+        """Suction-cup state machine + last-known DO bitmask. Initialised
+        before the robot connect step so callbacks that fire mid-connect
+        can read them safely.
+        """
         self.suction_state = False
         self.suction_pending = False
         self.suction_requested_state = False
         self.suction_target_q = None
-        self.last_do_status = 0 # For debugging changes
-        # 3. Connect to Robot
+        self.last_do_status = 0
+
+    def _connect_and_enable_robot(self) -> bool:
+        """Open the TCP connection and ENABLE the robot. Return True on
+        success so __init__ can early-exit cleanly when there is no
+        hardware reachable.
+        """
         if not self.connection.connect():
             self.get_logger().error("Failed to connect to robot")
-            return
-
+            return False
         self.connection.enable_robot()
+        return True
 
-        # 4. Initialize Handlers
+    def _init_robot_handlers(self):
+        """Everything that needs an open robot connection: feedback
+        thread, command sender, optional GetError handler, haptic
+        publisher, trajectory recorder, scene-safety guard, teach-job
+        dispatcher, interactive CLI handler, and the 1 Hz safety
+        monitor.
+        """
         # PASS FEEDBACK HANDLER TO SENDER FOR SYNC
         self.feedback = FeedbackHandler(
             self.connection,
@@ -301,21 +359,24 @@ class TeleopNode(Node):
             self.stop_event,
             feedback_callback=self._raw_feedback_packet_callback,
         )
-
         self.sender = CommandSender(self.connection, self.feedback, self.get_logger())
 
-        # ErrorHandler (GetError API) - optional, disabled for simulator
+        # ErrorHandler (GetError API) — optional, disabled for simulator.
         self.error_handler = None
         if ENABLE_GET_ERROR:
             self.error_handler = ErrorHandler(self.connection, self.get_logger())
             self.get_logger().info("✅ ErrorHandler enabled (GetError API)")
         else:
-            self.get_logger().info("⚠️  ErrorHandler disabled (set ENABLE_GET_ERROR=True for real robot)")
+            self.get_logger().info(
+                "⚠️  ErrorHandler disabled (set ENABLE_GET_ERROR=True for real robot)"
+            )
 
-        # Collision-based Haptic Feedback for Quest 3 VR
-        self.collision_haptic = CollisionHaptic(self.ros_publishers.haptic, self.get_logger())
+        # Collision-based Haptic Feedback for Quest 3 VR.
+        self.collision_haptic = CollisionHaptic(
+            self.ros_publishers.haptic, self.get_logger()
+        )
 
-        # Trajectory Recorder (teach-and-repeat sequencer)
+        # Trajectory Recorder (teach-and-repeat sequencer).
         self.trajectory_recorder = TrajectoryRecorder(
             command_send_fn=self.sender.send,
             logger=self.get_logger(),
@@ -330,7 +391,9 @@ class TeleopNode(Node):
         )
 
         self.scene_safety_guard = SceneSafetyGuard(
-            model_path=os.environ.get("MG400_SCENE_SAFETY_MODEL", motion_config.SCENE_SAFETY_MODEL_PATH),
+            model_path=os.environ.get(
+                "MG400_SCENE_SAFETY_MODEL", motion_config.SCENE_SAFETY_MODEL_PATH
+            ),
             enabled=self._env_bool(
                 "MG400_SCENE_SAFETY_ENABLED",
                 motion_config.SCENE_SAFETY_ENABLED_DEFAULT,
@@ -340,8 +403,9 @@ class TeleopNode(Node):
         )
         self._last_scene_safety_block_log = 0.0
 
-        # Job-request dispatcher for the production teach-repeat path. Status
-        # / artifact replies go to /teach/job_status and /teach/job_artifact.
+        # Job-request dispatcher for the production teach-repeat path.
+        # Status / artifact replies go to /teach/job_status and
+        # /teach/job_artifact.
         self.teach_job_handler = TeachJobHandler(
             recorder=self.trajectory_recorder,
             publish_status_fn=lambda payload: self.ros_publishers.teach_job_status.publish(
@@ -358,40 +422,55 @@ class TeleopNode(Node):
         self.interactive = InteractiveCommandHandler(
             self.connection,
             self.get_logger(),
-            self.stop_event
+            self.stop_event,
         )
 
+        self.safety_monitor = SafetyMonitor(
+            self.ros_publishers.safety, self.get_logger(), self.error_handler
+        )
 
-        # 5. Initialize Helpers
-        self.safety_monitor = SafetyMonitor(self.ros_publishers.safety, self.get_logger(), self.error_handler)
-
-        # 6. Start Threads
+    def _start_runtime(self):
+        """Launch threads + timers that drive the live system: the
+        feedback reader, the late Unity subscription (attached last on
+        purpose to avoid racing with handler creation), the interactive
+        CLI, the 50 Hz control-loop thread, and the 1 Hz / 20 Hz timers
+        for safety and haptic publishing.
+        """
         self.feedback.start()
 
-        # 5. Start Unity Subscriber (End of init to prevent race condition)
+        # Unity subscriber is attached last so the handlers above are
+        # all ready when the firehose starts firing.
         self.ros_subscriptions.unity = attach_unity_subscription(
             self,
             self._unity_callback,
-            qos_profile,
+            self._unity_qos_profile,
             topics=self.topics,
         )
 
         self.get_logger().info("✅ Teleop Node fully initialized and listening.")
         self.interactive.start()
 
-        # 6. Start Control Loop in a Dedicated High-Precision Thread (Isolates from ROS jitter/CPU load)
-        self.control_loop_thread = threading.Thread(target=self._high_precision_control_loop, daemon=True)
+        # Control loop in its own high-precision thread (isolates from
+        # ROS jitter / CPU load on the executor).
+        self.control_loop_thread = threading.Thread(
+            target=self._high_precision_control_loop, daemon=True
+        )
         self.control_loop_thread.start()
 
-        # 7. Start Safety Monitor (1Hz)
-        self.create_timer(1.0, self.check_safety_status)
+        # Periodic timers
+        self.create_timer(1.0, self.check_safety_status)        # safety monitor 1 Hz
+        self.create_timer(0.05, self._publish_haptic_feedback)  # haptic 20 Hz
 
-        # 8. Start Collision Haptic Publisher (20Hz) for Quest 3 VR
-        self.create_timer(0.05, self._publish_haptic_feedback)
-
+    def _log_ready_banner(self):
+        """One-shot startup banner so the operator can confirm at a
+        glance which gates, speed ranges, and stuck-time thresholds are
+        live this session.
+        """
         self.get_logger().info("✅ Teleop Node Ready")
         self.get_logger().info(f"🎓 Teach & Repeat: {self.topics.teach_job_request}")
-        self.get_logger().info("📊 Control Strategy: Adaptive Δ + Per-Cmd SpeedJ + Stuck Detection")
+        self.get_logger().info(
+            "📊 Control Strategy: Adaptive Δ + Per-Cmd SpeedJ + Stuck Detection"
+        )
         self.get_logger().info(
             f"📏 Adaptive gate: Δ "
             f"{np.degrees(motion_config.REALTIME_DELTA_MIN_RAD):.1f}°"
