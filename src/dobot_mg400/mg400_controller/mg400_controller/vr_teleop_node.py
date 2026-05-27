@@ -19,7 +19,6 @@ import numpy as np
 import time
 import json
 import os
-import queue
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -67,6 +66,7 @@ from mg400_controller.common.utils.pending_command_registry import (
 )
 from mg400_controller.common.teleop.tool_handlers import ToolCommandHandlers
 from mg400_controller.common.teleop.sample_matcher import UnitySampleMatcher
+from mg400_controller.common.teleop.unity_session import UnitySessionHandler
 from mg400_controller.common.ros.teleop_interfaces import (
     create_publishers,
     create_subscriptions,
@@ -74,9 +74,7 @@ from mg400_controller.common.ros.teleop_interfaces import (
 )
 from mg400_controller.common.ros.topic_config import declare_topic_parameters
 from mg400_controller.common.ros.unity_teleop_sample import (
-    UnityTeleopSampleError,
     build_ros_joint_cmd_rx_sample,
-    parse_unity_teleop_sample,
 )
 
 # =========================
@@ -191,9 +189,15 @@ class TeleopNode(Node):
         """
         self.latest_target = None
         self.sample_matcher = UnitySampleMatcher()
+        self.unity_session = UnitySessionHandler(
+            logger=self.get_logger(),
+            stop_event=self.stop_event,
+            sample_matcher=self.sample_matcher,
+            get_triple_logger=lambda: self.triple_logger,
+            on_session_changed=self._reset_pending_command_registry,
+        )
         self.latest_target_unity_sample = None
         self.latest_target_recv_wall = 0.0
-        self.current_unity_session_id = None
         self.active_command_unity_sample = None
         self.active_command_uid = None
         self.active_command_dobot_id = None
@@ -203,8 +207,7 @@ class TeleopNode(Node):
         self.active_command_tracking_source = None
         self.active_command_tracking_confidence = None
         self.pending_command_registry = PendingCommandRegistry(max_size=100)
-        self._last_unity_sample_warning = 0.0
-        self._last_unity_stale_warning = 0.0
+        self._last_unity_stale_warning = 0.0  # /unity/joint_cmd stale-drop rate-limit
         self.unity_joint_cmd_rx_session_id = f"ros_joint_cmd_rx_{int(time.time() * 1000)}"
         self._unity_joint_cmd_rx_seq = 0
 
@@ -241,9 +244,8 @@ class TeleopNode(Node):
             )
 
     def _init_sample_worker(self):
-        """Timestamp contracts, per-loop counters, the Unity teleop-sample
-        queue + control snapshot lock, and the worker thread that
-        drains the queue on its own cadence.
+        """Per-loop timestamp contracts + counters, then start the
+        Unity-session sample worker thread.
 
         Cross-layer timestamp contract:
           - T1/T2/T3/T4/T5 and CSV log timestamps are ROS-local wall
@@ -259,19 +261,16 @@ class TeleopNode(Node):
         self._realtime_command_seq = 0
         self._realtime_speed_defaults_pending = False
         self._last_realtime_speed_defaults_attempt = 0.0
-        self._unity_sample_queue = queue.SimpleQueue()
-        self._unity_control_latest = None
-        self._unity_control_latest_lock = threading.Lock()
-        self._unity_control_latest_event = threading.Event()
-        self._unity_sample_enqueued_count = 0
-        self._unity_sample_processed_count = 0
-        self._unity_control_processed_count = 0
-        self._unity_sample_worker_thread = threading.Thread(
-            target=self._unity_teleop_sample_worker_loop,
-            daemon=True,
-        )
-        self._unity_control_worker_thread = None
-        self._unity_sample_worker_thread.start()
+
+        # The sample queue + worker thread live on self.unity_session.
+        self.unity_session.start_worker()
+
+    def _reset_pending_command_registry(self):
+        """Called by UnitySessionHandler when a new Unity session_id
+        arrives. Reassigning is fine — older readers keep their
+        reference until the next tick.
+        """
+        self.pending_command_registry = PendingCommandRegistry(max_size=100)
 
     def _init_triple_logger(self):
         """Ask the operator whether to enable the unified Unity→ROS2→Robot
@@ -540,8 +539,8 @@ class TeleopNode(Node):
         """
         return create_subscriptions(
             self,
-            unity_pong_callback=self._unity_pong_callback,
-            unity_teleop_sample_callback=self._unity_teleop_sample_callback,
+            unity_pong_callback=self.unity_session.pong_callback,
+            unity_teleop_sample_callback=self.unity_session.sample_callback,
             # self.tool_handlers is created later (post-connect, inside
             # _init_robot_handlers because it needs the sender); use
             # lambdas to defer the attribute lookup until a message
@@ -555,113 +554,13 @@ class TeleopNode(Node):
             topics=self.topics,
         )
 
-    def _unity_pong_callback(self, msg):
-        """Level 3 pong handler — currently a no-op.
-
-        Format: "ros_ping_ns,unity_timestamp_sec"
-
-        Earlier we estimated unity_offset = unity_ts - (ros_ping + rtt/2),
-        but ClockCalibrator's min-window method proved more robust against
-        jitter and is the active offset source. This subscription is kept
-        so Unity's pong publishes don't error out, and so future work can
-        plug an estimator back in here.
-        """
-        return
 
 
-    def _unity_teleop_sample_callback(self, msg):
-        """Fast ROS callback: capture raw Unity JSON and return immediately."""
-        recv_time = time.time()
-        payload = msg.data
-        self._unity_sample_enqueued_count += 1
-        self._unity_sample_queue.put((recv_time, payload))
-
-    def _unity_teleop_sample_worker_loop(self):
-        """Log every Unity JSON sample off the ROS executor thread."""
-        while not self.stop_event.is_set() or not self._unity_sample_queue.empty():
-            try:
-                recv_time, payload = self._unity_sample_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
-            try:
-                self._process_unity_teleop_sample_payload(
-                    payload,
-                    recv_time,
-                    drive_control=False,
-                    log_sample=True,
-                    remember_sample=True,
-                    handle_session=True,
-                )
-                self._unity_sample_processed_count += 1
-            except Exception as exc:
-                self.get_logger().error(f"Unity teleop sample worker error: {exc}")
 
 
-    def _process_unity_teleop_sample_payload(
-        self,
-        payload: str,
-        now_ros_sec: float,
-        *,
-        drive_control: bool = True,
-        log_sample: bool = True,
-        remember_sample: bool = True,
-        handle_session: bool = True,
-    ):
-        """Receive Unity JSON trace protocol samples.
 
-        This never drives the robot directly.  `/unity/joint_cmd` is the live
-        robot-control topic; this JSON sample is only for logging and matching
-        that joint command to Unity-side controller/IK context.
-        """
-        try:
-            sample = parse_unity_teleop_sample(payload)
-        except UnityTeleopSampleError as exc:
-            if now_ros_sec - self._last_unity_sample_warning > 1.0:
-                self.get_logger().warn(f"Invalid /unity/teleop_sample ignored: {exc}")
-                self._last_unity_sample_warning = now_ros_sec
-            return
 
-        if handle_session:
-            self._handle_unity_session_transition(sample, now_ros_sec)
-        if remember_sample:
-            self.sample_matcher.remember(sample, now_ros_sec)
 
-        if log_sample and self.triple_logger:
-            self.triple_logger.log_unity_sample(sample, now_ros_sec)
-
-        if drive_control and now_ros_sec - self._last_unity_sample_warning > 1.0:
-            self.get_logger().warn(
-                "/unity/teleop_sample direct control is disabled; "
-                "publish live joint targets on /unity/joint_cmd."
-            )
-            self._last_unity_sample_warning = now_ros_sec
-
-    def _handle_unity_session_transition(self, sample, now_ros_sec):
-        """When Unity sends a sample with a new session_id, drop the
-        identity-keyed sample cache and the pending-command registry so
-        old-session keys can't collide with new ones.
-        """
-        session_id = sample.session_id
-        if self.current_unity_session_id is None:
-            self.current_unity_session_id = session_id
-            return
-        if session_id == self.current_unity_session_id:
-            return
-
-        self.current_unity_session_id = session_id
-        self.sample_matcher.clear_identity_cache()
-        self.pending_command_registry = PendingCommandRegistry(max_size=100)
-
-    def _teleop_session_logging_active(self, now_wall: float) -> bool:
-        """Session logging is unconditionally active in this build.
-
-        Kept as a method so the control loop's call site reads as a
-        guarded check (and so future "log only when a fresh Unity
-        sample exists" gating has a single place to attach without
-        touching the loop body).
-        """
-        return True
 
 
 
@@ -951,7 +850,7 @@ class TeleopNode(Node):
             return
 
         feedback_wall = float(sample["timestamp"])
-        if not self._teleop_session_logging_active(feedback_wall):
+        if not self.unity_session.session_logging_active(feedback_wall):
             return
 
         tr = getattr(self, "trajectory_recorder", None)
@@ -1099,7 +998,7 @@ class TeleopNode(Node):
         err_msg.data = int(ctx.err_info['error_status'])
         self.ros_publishers.error_status.publish(err_msg)
         ctx.velocity_mag = float(np.max(np.abs(self.controller.robot_velocity)))
-        ctx.session_logging_active = self._teleop_session_logging_active(ctx.now_wall)
+        ctx.session_logging_active = self.unity_session.session_logging_active(ctx.now_wall)
 
     def _log_command_pass_samples(self, ctx):
         """Drain pending_command_registry pass-near samples into the
@@ -1575,28 +1474,13 @@ class TeleopNode(Node):
         self.get_logger().info("Shutting down...")
         self.stop_event.set()
 
-        unity_worker = getattr(self, "_unity_sample_worker_thread", None)
-        if unity_worker is not None:
-            unity_worker.join(timeout=5.0)
-        unity_control_worker = getattr(self, "_unity_control_worker_thread", None)
-        if unity_control_worker is not None:
-            self._unity_control_latest_event.set()
-            unity_control_worker.join(timeout=5.0)
-
-        if unity_worker is not None or unity_control_worker is not None:
-            pending = 0
-            unity_queue = getattr(self, "_unity_sample_queue", None)
-            if unity_queue is not None:
-                try:
-                    pending = unity_queue.qsize()
-                except NotImplementedError:
-                    pending = -1
+        unity_session = getattr(self, "unity_session", None)
+        if unity_session is not None and unity_session._worker_thread is not None:
+            unity_session._worker_thread.join(timeout=5.0)
             self.get_logger().info(
-                "Unity teleop workers stopped: "
-                f"enqueued={getattr(self, '_unity_sample_enqueued_count', 0)} "
-                f"logged={getattr(self, '_unity_sample_processed_count', 0)} "
-                f"controlled={getattr(self, '_unity_control_processed_count', 0)} "
-                f"pending={pending}"
+                "Unity teleop sample worker stopped: "
+                f"enqueued={unity_session.enqueued_count} "
+                f"logged={unity_session.processed_count}"
             )
 
         if self.triple_logger:
