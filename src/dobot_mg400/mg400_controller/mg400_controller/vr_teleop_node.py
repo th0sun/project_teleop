@@ -78,17 +78,12 @@ from mg400_controller.common.ros.unity_teleop_sample import (
     UnityTeleopSample,
     UnityTeleopSampleError,
     build_ros_joint_cmd_rx_sample,
-    parse_unity_joint_frame_id,
     parse_unity_teleop_sample,
 )
 
 # =========================
 # ===== MAIN NODE ========
 # =========================
-
-LEGACY_HOME_JOINT_TOL_RAD = 1e-4
-LEGACY_HOME_COMMAND_MIN_INTERVAL_SEC = 1.0
-
 
 @dataclass
 class _ControlLoopContext:
@@ -200,7 +195,6 @@ class TeleopNode(Node):
         self.latest_unity_sample = None
         self.latest_unity_sample_recv_time = 0.0
         self.unity_samples_by_identity = {}
-        self.pending_joint_msgs_by_identity = {}
         self.latest_target_unity_sample = None
         self.latest_target_recv_wall = 0.0
         self.current_unity_session_id = None
@@ -215,7 +209,6 @@ class TeleopNode(Node):
         self.pending_command_registry = PendingCommandRegistry(max_size=100)
         self._last_unity_sample_warning = 0.0
         self._last_unity_stale_warning = 0.0
-        self._last_legacy_home_command_wall = 0.0
         self.unity_joint_cmd_rx_session_id = f"ros_joint_cmd_rx_{int(time.time() * 1000)}"
         self._unity_joint_cmd_rx_seq = 0
 
@@ -591,7 +584,6 @@ class TeleopNode(Node):
                     log_sample=True,
                     remember_sample=True,
                     handle_session=True,
-                    accept_legacy=True,
                 )
                 self._unity_sample_processed_count += 1
             except Exception as exc:
@@ -610,7 +602,6 @@ class TeleopNode(Node):
         log_sample: bool = True,
         remember_sample: bool = True,
         handle_session: bool = True,
-        accept_legacy: bool = True,
     ):
         """Receive Unity JSON trace protocol samples.
 
@@ -634,9 +625,6 @@ class TeleopNode(Node):
         if log_sample and self.triple_logger:
             self.triple_logger.log_unity_sample(sample, now_ros_sec)
 
-        if accept_legacy and not self.use_unity_teleop_sample_for_control:
-            self._accept_pending_joint_for_sample(sample, now_ros_sec)
-
         if drive_control and now_ros_sec - self._last_unity_sample_warning > 1.0:
             self.get_logger().warn(
                 "/unity/teleop_sample direct control is disabled; "
@@ -655,7 +643,6 @@ class TeleopNode(Node):
         previous_session_id = self.current_unity_session_id
         self.current_unity_session_id = session_id
         self.unity_samples_by_identity.clear()
-        self.pending_joint_msgs_by_identity.clear()
         self.pending_command_registry = PendingCommandRegistry(max_size=100)
         if not self.use_unity_teleop_sample_for_control:
             return
@@ -751,41 +738,7 @@ class TeleopNode(Node):
         )
         self.unity_samples_by_identity.pop(oldest_key, None)
 
-    def _remember_pending_joint_msg(self, identity, msg, recv_time):
-        self.pending_joint_msgs_by_identity[identity] = (msg, recv_time)
 
-        if len(self.pending_joint_msgs_by_identity) <= 512:
-            return
-        oldest_key = min(
-            self.pending_joint_msgs_by_identity,
-            key=lambda key: self.pending_joint_msgs_by_identity[key][1],
-        )
-        self.pending_joint_msgs_by_identity.pop(oldest_key, None)
-        if recv_time - self._last_unity_sample_warning > 1.0:
-            session_id, unity_seq_id = oldest_key
-            self.get_logger().warn(
-                "Dropped pending /unity/joint_cmd because matching "
-                "/unity/teleop_sample did not arrive before cache limit: "
-                f"session_id={session_id} unity_seq_id={unity_seq_id}"
-            )
-            self._last_unity_sample_warning = recv_time
-
-    def _accept_pending_joint_for_sample(self, sample, now_ros_sec):
-        identity = (sample.session_id, sample.unity_seq_id)
-        pending = self.pending_joint_msgs_by_identity.pop(identity, None)
-        if pending is None:
-            return
-
-        joint_msg, joint_recv_time = pending
-        self._accept_joint_msg(
-            joint_msg,
-            joint_recv_time,
-            unity_sample=self._sample_with_match_context(
-                sample,
-                "exact_joint_header_identity_deferred",
-                max(0.0, (now_ros_sec - joint_recv_time) * 1000.0),
-            ),
-        )
 
     def _recent_unity_sample(self, now_ros_sec, max_age_sec=0.25):
         if self.latest_unity_sample is None:
@@ -810,54 +763,9 @@ class TeleopNode(Node):
             unity_seq_id=sample.unity_seq_id,
         )
 
-    def _joint_msg_identity(self, msg):
-        return parse_unity_joint_frame_id(
-            getattr(getattr(msg, "header", None), "frame_id", "")
-        )
 
-    def _sample_for_joint_msg(self, msg, now_ros_sec):
-        identity = parse_unity_joint_frame_id(
-            getattr(getattr(msg, "header", None), "frame_id", "")
-        )
-        if identity is None:
-            return self._recent_unity_sample(now_ros_sec)
 
-        sample_pair = self.unity_samples_by_identity.get(identity)
-        if sample_pair is not None:
-            sample, recv_time = sample_pair
-            return self._sample_with_match_context(
-                sample,
-                "exact_joint_header_identity",
-                max(0.0, (time.time() - recv_time) * 1000.0),
-            )
 
-        return None
-
-    def _is_legacy_home_joint_cmd(self, msg) -> bool:
-        try:
-            q_target = np.asarray(msg.position[:4], dtype=float)
-        except Exception:
-            return False
-        if q_target.shape[0] < 4 or not np.all(np.isfinite(q_target)):
-            return False
-        return bool(np.all(np.abs(q_target[:4]) <= LEGACY_HOME_JOINT_TOL_RAD))
-
-    def _accept_legacy_home_joint_cmd(self, now_ros_sec: float) -> None:
-        if now_ros_sec - self._last_legacy_home_command_wall < LEGACY_HOME_COMMAND_MIN_INTERVAL_SEC:
-            return
-        self._last_legacy_home_command_wall = now_ros_sec
-
-        self._clear_direct_unity_target("legacy_home_joint_cmd")
-        self.pending_command_registry = PendingCommandRegistry(max_size=100)
-        try:
-            self.target_compensator.reset()
-        except AttributeError:
-            pass
-        self.controller.reset_reference(None, now=time.perf_counter())
-        self.get_logger().info(
-            "🏠 Legacy /unity/joint_cmd Home accepted during direct Unity sample control"
-        )
-        self.trajectory_recorder.stop_all(go_home=True)
 
     def _unity_callback(self, msg):
         """รับคำสั่งจาก Unity/VR - Store latest target only"""
