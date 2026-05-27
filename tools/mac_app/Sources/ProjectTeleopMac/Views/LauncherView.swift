@@ -55,7 +55,7 @@ struct LauncherView: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Launcher").font(.largeTitle.weight(.semibold))
-                Text("Run the same ROS2 stack as `./startup` without Terminal panes.")
+                Text("Run the same ROS2 stack as `./startup.sh` without Terminal panes.")
                     .foregroundStyle(.secondary)
             }
             Spacer()

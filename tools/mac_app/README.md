@@ -1,7 +1,7 @@
 # Project Teleop — macOS App
 
 SwiftUI macOS control panel for the Project Teleop ROS2 stack. Replaces
-the `./startup` tmux flow with a graphical launcher, live robot monitor,
+the `./startup.sh` tmux flow with a graphical launcher, live robot monitor,
 3D MG400 view, and a session log viewer.
 
 ## Architecture

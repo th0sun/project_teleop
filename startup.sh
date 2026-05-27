@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# ==========================================
+# Project Teleop — Docker ROS2 Jazzy Launcher (macOS dev)
+# ==========================================
+# Spins up the project_teleop ROS2 stack inside a docker container plus
+# a tmux session of panes. For a native (host-side) tmux launcher on a
+# Linux box with ROS2 already sourced, use ./start_teleop.sh instead.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

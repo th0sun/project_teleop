@@ -2,8 +2,10 @@
 set -euo pipefail
 
 # ==========================================
-# MG400 Tmux Interactive Launcher
+# MG400 Tmux Interactive Launcher (native, no docker)
 # ==========================================
+# Use this on a host with ROS2 already sourced (Linux dev box).
+# For macOS / docker-based dev, use ./startup.sh instead.
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$REPO_DIR/install/setup.bash" ]; then
