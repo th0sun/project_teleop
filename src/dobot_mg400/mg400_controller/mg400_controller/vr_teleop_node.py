@@ -17,7 +17,6 @@ from std_msgs.msg import String, Float64MultiArray, Int64, Int32, Bool
 import threading
 import numpy as np
 import time
-import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -67,6 +66,7 @@ from mg400_controller.common.utils.pending_command_registry import (
 from mg400_controller.common.teleop.tool_handlers import ToolCommandHandlers
 from mg400_controller.common.teleop.sample_matcher import UnitySampleMatcher
 from mg400_controller.common.teleop.unity_session import UnitySessionHandler
+from mg400_controller.common.teleop import teach_job_bridge
 from mg400_controller.common.ros.teleop_interfaces import (
     create_publishers,
     create_subscriptions,
@@ -373,17 +373,21 @@ class TeleopNode(Node):
         )
 
         # Trajectory Recorder (teach-and-repeat sequencer).
+        # Callbacks live in common/teleop/teach_job_bridge.py — lambdas
+        # bind self into each module-level helper.
         self.trajectory_recorder = TrajectoryRecorder(
             command_send_fn=self.sender.send,
             logger=self.get_logger(),
             dashboard_send_fn=self.connection.send_dashboard_cmd,
             get_position_fn=self.feedback.get_current_position,
             get_robot_mode_fn=self.feedback.get_robot_mode,
-            waypoint_callback=self._playback_waypoint_callback,
-            target_callback=self._playback_target_callback,
+            waypoint_callback=lambda q: teach_job_bridge.playback_waypoint_callback(self, q),
+            target_callback=lambda q: teach_job_bridge.playback_target_callback(self, q),
         )
         self.trajectory_recorder.add_playback_event_callback(
-            self._playback_lifecycle_callback
+            lambda event_name, payload: teach_job_bridge.playback_lifecycle_callback(
+                self, event_name, payload
+            )
         )
 
         self.scene_safety_guard = SceneSafetyGuard(
@@ -550,7 +554,7 @@ class TeleopNode(Node):
             scene_safety_callback=self._scene_safety_callback,
             dashboard_cmd_callback=lambda msg: self.tool_handlers.dashboard_cmd_callback(msg),
             speed_factor_callback=lambda msg: self.tool_handlers.speed_factor_callback(msg),
-            teach_job_request_callback=self._teach_job_request_callback,
+            teach_job_request_callback=lambda msg: teach_job_bridge.teach_job_request_callback(self, msg),
             topics=self.topics,
         )
 
@@ -667,7 +671,9 @@ class TeleopNode(Node):
             tr = self.trajectory_recorder
             playback_blocked = tr.is_playing or (time.perf_counter() < tr._block_until)
             if not playback_blocked:
-                self._restore_realtime_speed_defaults("first_realtime_target")
+                teach_job_bridge.restore_realtime_speed_defaults(
+                    self, "first_realtime_target"
+                )
 
         self.latest_target = q_compensated_safe      # Latency-compensated target
         self.latest_target_unity_sample = unity_sample
@@ -675,147 +681,11 @@ class TeleopNode(Node):
         self.target_recv_time = now_ros_sec          # T2: ROS receive time
         self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
 
-    def _teach_job_request_callback(self, msg):
-        """Dispatch a structured /teach/job_request payload via TeachJobHandler.
 
-        The handler emits status updates on /teach/job_status and (for compile
-        actions) the compiled artifact on /teach/job_artifact.  See
-        ``teach_job_handler.py`` for the full schema.
-        """
-        try:
-            payload = msg.data if isinstance(msg.data, str) else str(msg.data)
-        except Exception:
-            self.get_logger().error("teach_job_request: cannot read .data field")
-            return
 
-        payload_len = len(payload)
-        action = None
-        job_id = None
-        try:
-            envelope = json.loads(payload)
-            if isinstance(envelope, dict):
-                action = envelope.get("action")
-                job_id = envelope.get("job_id")
-        except Exception:
-            pass
 
-        if action:
-            self.get_logger().info(
-                f"teach_job_request received action={action!r} "
-                f"job_id={job_id or ''!r} bytes={payload_len}"
-            )
-        else:
-            snippet = payload[:160].replace("\n", " ")
-            self.get_logger().warn(
-                f"teach_job_request received unparsable envelope "
-                f"bytes={payload_len} head={snippet!r}"
-            )
 
-        status = self.teach_job_handler.handle(payload)
-        self.get_logger().info(
-            f"teach_job_request handled stage={getattr(status, 'stage', '?')!r} "
-            f"action={getattr(status, 'action', None)!r} "
-            f"job_id={getattr(status, 'job_id', '')!r} "
-            f"error={getattr(status, 'error_code', None)!r}"
-        )
 
-    def _reset_live_teleop_reference(self, reason: str):
-        """Anchor live teleop at the robot's current pose after playback."""
-        try:
-            q_current = self.feedback.get_current_position()
-        except Exception:
-            q_current = None
-
-        now_mono = time.perf_counter()
-        now_wall = time.time()
-        if q_current is None:
-            self.latest_target = None
-            self.controller.reset_reference(None, now=now_mono)
-            try:
-                self.target_compensator.reset()
-            except AttributeError:
-                pass
-            self.get_logger().warn(
-                f"⚠️  Live teleop reference cleared after {reason}; "
-                "waiting for next Unity target"
-            )
-            return
-
-        q_current = np.asarray(q_current[:4], dtype=float)
-        self.latest_target = q_current.copy()
-        self.controller.reset_reference(q_current, now=now_mono)
-        try:
-            self.target_compensator.reset(q_current, target_time=now_wall)
-        except AttributeError:
-            pass
-        self.target_recv_time = now_wall
-        self.unity_send_time = now_wall
-        self.get_logger().info(
-            f"🔁 Live teleop reference reset after {reason}: "
-            f"{np.degrees(q_current).round(2).tolist()} deg"
-        )
-
-    def _playback_lifecycle_callback(self, event_name, payload):
-        if event_name in {"playback_start", "playback_complete"}:
-            self._reset_live_teleop_reference(event_name)
-        if event_name == "playback_start":
-            # Teach/repeat owns SpeedFactor while it is executing.  Do not let
-            # a previously armed realtime reset overwrite a new teach run.
-            self._realtime_speed_defaults_pending = False
-        elif event_name == "playback_complete":
-            # Keep the teach/repeat speed profile available for repeated runs.
-            # Realtime speed is restored only when the next live Unity target
-            # arrives, so the two speed domains stay explicit.
-            self._realtime_speed_defaults_pending = True
-            self.get_logger().info(
-                "🏁 Teach/repeat playback complete; realtime SpeedFactor(100) "
-                "is armed for the next /unity/joint_cmd target"
-            )
-
-    def _restore_realtime_speed_defaults(self, reason: str):
-        """Make live teleop fast again after teach/repeat changed SpeedFactor."""
-        if not self.connection.connected:
-            self._realtime_speed_defaults_pending = True
-            self.get_logger().warn(
-                f"⚠️ Cannot restore realtime SpeedFactor after {reason}; robot disconnected"
-            )
-            return False
-        ok = self.connection.set_realtime_speed_defaults()
-        self._realtime_speed_defaults_pending = not ok
-        if ok:
-            self.get_logger().info(
-                f"🏃 Realtime mode speed restored after {reason}: "
-                "SpeedFactor/SpeedJ/AccJ = 100"
-            )
-        return ok
-
-    def _playback_waypoint_callback(self, q_rad):
-        """Called by TrajectoryRecorder when a waypoint is queued (sent to robot).
-        Publishes ONLY to /teleop/sent_command.
-        """
-        js = JointState()
-        js.header.stamp = self.get_clock().now().to_msg()
-        js.position = list(q_rad)
-        self.ros_publishers.sent_command.publish(js)
-
-    def _playback_target_callback(self, q_rad):
-        """Called by TrajectoryRecorder at ~100Hz with the perfectly interpolated
-        real-time target (equivalent to race.py's target line).
-        Publishes to /teleop/playback_unity so the monitor draws the yellow target
-        line accurately in real-time.
-        """
-        js = JointState()
-        js.header.stamp = self.get_clock().now().to_msg()
-        js.position = list(q_rad)
-        self.ros_publishers.playback_unity.publish(js)
-
-        try:
-            xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_rad))
-            xyz_msg = Float64MultiArray()
-            xyz_msg.data = xyz.tolist()
-            self.ros_publishers.unity_xyz.publish(xyz_msg)
-        except Exception:
-            pass
 
     def _high_precision_control_loop(self):
         """
