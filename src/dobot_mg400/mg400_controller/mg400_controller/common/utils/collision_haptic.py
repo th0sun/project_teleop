@@ -57,7 +57,7 @@ class CollisionHaptic:
         if collision_state > 0 and self.last_collision_state == 0:
             # Collision just started
             self.collision_start_time = time.time()
-            self.logger.warn(f"💥 Collision detected! Sending haptic feedback to VR")
+            self.logger.warn("💥 Collision detected! Sending haptic feedback to VR")
         
         # Calculate haptic intensity
         haptic_intensity = self.get_haptic_intensity(collision_state)

@@ -13,7 +13,7 @@ Schema can be added once a real validator is on the path.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 from teaching_core.calibration.types import CalibrationMethod, SourceSpace
 from teaching_core.program.types import (

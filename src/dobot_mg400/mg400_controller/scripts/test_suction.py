@@ -7,7 +7,6 @@
 """
 
 import socket
-import time
 
 ROBOT_IP = "192.168.1.6"  # หรือ 192.168.2.6 ขึ้นอยู่กับการตั้งค่า LAN ของหุ่น
 ROBOT_PORT = 29999

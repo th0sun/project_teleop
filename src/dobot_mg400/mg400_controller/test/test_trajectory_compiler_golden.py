@@ -24,8 +24,6 @@ See AGENTS.md §4.4 / §10 / §12.1.
 import tempfile
 import unittest
 
-import numpy as np
-
 from mg400_controller.common.config import motion_config
 from mg400_controller.common.trajectory.trajectory_recorder import (
     TrajectoryRecorder,

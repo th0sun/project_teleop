@@ -456,7 +456,7 @@ class MonitorGUI:
         self.var_tool_index.set(cartesian_state["tool_index_text"])
 
         # --- Execution Monitor ---
-        status = self.monitor.update(total_diff)
+        self.monitor.update(total_diff)
         if self.monitor.state == "MOVING":
             self.var_status.set("MOVING...")
             self.lbl_status.configure(foreground="red")

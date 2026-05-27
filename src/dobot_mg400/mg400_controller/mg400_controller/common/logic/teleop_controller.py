@@ -31,7 +31,6 @@ cases (singularity-near-axis, momentum-into-wall, etc.).
 """
 
 import numpy as np
-from mg400_controller.common.config.robot_config import SPATIAL_THRESHOLD
 from mg400_controller.common.config.motion_config import (
     PROXIMITY_THRESHOLD, STUCK_VELOCITY_THRESHOLD, STUCK_TIME_THRESHOLD,
     TARGET_CHANGE_THRESHOLD,

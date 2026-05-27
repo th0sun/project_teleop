@@ -28,10 +28,7 @@ from mg400_controller.common.config.robot_config import (
     ELBOW_ANGLE_LIMIT
 )
 from mg400_controller.common.config.motion_config import (
-    VACUUM_DO_PORT,
-    BLOW_DO_PORT,
     SUCTION_ACTIVATION_THRESHOLD,
-    SMART_SUCTION_ENABLED,
 )
 import mg400_controller.common.config.motion_config as motion_config
 
@@ -349,9 +346,9 @@ class TeleopNode(Node):
         # 8. Start Collision Haptic Publisher (20Hz) for Quest 3 VR
         self.create_timer(0.05, self._publish_haptic_feedback)
 
-        self.get_logger().info(f"✅ Teleop Node Ready")
+        self.get_logger().info("✅ Teleop Node Ready")
         self.get_logger().info(f"🎓 Teach & Repeat: {self.topics.teach_job_request}")
-        self.get_logger().info(f"📊 Control Strategy: Adaptive Δ + Per-Cmd SpeedJ + Stuck Detection")
+        self.get_logger().info("📊 Control Strategy: Adaptive Δ + Per-Cmd SpeedJ + Stuck Detection")
         self.get_logger().info(
             f"📏 Adaptive gate: Δ "
             f"{np.degrees(motion_config.REALTIME_DELTA_MIN_RAD):.1f}°"
@@ -436,32 +433,17 @@ class TeleopNode(Node):
         )
 
     def _unity_pong_callback(self, msg):
+        """Level 3 pong handler — currently a no-op.
+
+        Format: "ros_ping_ns,unity_timestamp_sec"
+
+        Earlier we estimated unity_offset = unity_ts - (ros_ping + rtt/2),
+        but ClockCalibrator's min-window method proved more robust against
+        jitter and is the active offset source. This subscription is kept
+        so Unity's pong publishes don't error out, and so future work can
+        plug an estimator back in here.
         """
-        Level 3: Receive Pong from Unity
-        msg.data format: "ros_ping_ns,unity_timestamp_sec"
-        """
-        try:
-            parts = msg.data.split(',')
-            if len(parts) < 2: return
-
-            ros_ping_ns = int(parts[0])
-            unity_ts = float(parts[1])
-            now_ns = self.get_clock().now().nanoseconds
-
-            # Calculate RTT
-            rtt_sec = (now_ns - ros_ping_ns) * 1e-9
-
-            # Level 3 Estimation: Unity_Time = ROS_Time + Offset
-            # So Offset = Unity_Time - (ROS_Time_at_Unity)
-            # ROS_Time_at_Unity approx = ros_ping_ns + RTT/2
-            ros_at_unity = (ros_ping_ns * 1e-9) + (rtt_sec / 2.0)
-            true_offset = unity_ts - ros_at_unity
-
-            # We can use this to 'nudged' the calibrator or just log it
-            # For now, ClockCalibrator's min-window is more robust against jitter
-            pass
-        except Exception:
-            pass
+        return
 
 
     def _unity_teleop_sample_callback(self, msg):
@@ -878,7 +860,7 @@ class TeleopNode(Node):
             if requested_state and motion_config.SMART_SUCTION_ENABLED and self.latest_target is not None:
                 self.suction_target_q = self.latest_target.copy()
                 self.suction_pending = True
-                self.get_logger().info(f"🔘 Smart Suction queued: ON (Waiting for robot to reach target)")
+                self.get_logger().info("🔘 Smart Suction queued: ON (Waiting for robot to reach target)")
             else:
                 # สั่งทันที (Immediate Mode) สำหรับการปิด/ปล่อย หรือเมื่อไม่ได้เปิด Smart Suction
                 self._handle_suction_cmd(requested_state)
@@ -1584,7 +1566,6 @@ class TeleopNode(Node):
                     )
 
                     # File Log (CSV)
-                    dist_to_last = np.max(np.abs(q_current - q_safe))
                     sent_mono = time.perf_counter()
                     time_since_last = sent_mono - self.controller.last_sent_time
                     velocity_mag = np.max(self.controller.robot_velocity)

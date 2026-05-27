@@ -25,7 +25,6 @@ Topic integration (managed by vr_teleop_node.py):
 import os
 import time
 import json
-import math
 import re
 import threading
 import numpy as np
@@ -41,7 +40,6 @@ from mg400_controller.common.trajectory import (
 )
 from mg400_protocol.commands import arc, do_execute, joint_mov_j, mov_l_cartesian
 from mg400_protocol.dashboard import enable_robot, reset_robot
-from mg400_controller.common.utils.kinematics import KinematicsCalculator
 from teaching_core.trajectory import (
     JointTimingLimits,
     TimedJointPoint,
@@ -52,7 +50,6 @@ from teaching_core.trajectory import (
 from teaching_core.trajectory.segment_classifier import (
     SegmentType,
     classify_segments,
-    sample_command_arc_xyzr,
     segment_summary,
 )
 
@@ -1454,9 +1451,6 @@ class TrajectoryRecorder:
         )
 
         target_t = np.array([float(f["timeStamp"]) - float(frames[0]["timeStamp"]) for f in frames])
-        source_target_t = np.array(
-            [0.0, *[cmd.original_target_time_s for cmd in plan.queued_commands]]
-        )
         target_q = np.array([[f["j1"], f["j2"], f["j3"], f["j4"]] for f in frames])
 
         # ── 0. Move to trajectory start position before playing ────────────────

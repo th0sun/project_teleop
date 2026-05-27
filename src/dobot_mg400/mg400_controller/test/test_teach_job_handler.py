@@ -19,7 +19,6 @@ from mg400_controller.common.trajectory.teach_job_handler import (  # noqa: E402
     ERR_SCENE_SAFETY,
     ERR_TARGET_MISMATCH,
     ERR_UNKNOWN_ACTION,
-    JobRequest,
     JobStatus,
     STAGE_COMPILED,
     STAGE_DONE,

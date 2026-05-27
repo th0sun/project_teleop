@@ -14,7 +14,6 @@ Based on: Dobot_TCP_IP_Python_V4/dobot_api.py GetError() function
 """
 
 import time
-import json
 from typing import List, Dict, Optional
 
 

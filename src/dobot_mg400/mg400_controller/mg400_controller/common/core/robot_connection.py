@@ -14,7 +14,13 @@
 import socket
 import time
 import threading
-from mg400_controller.common.config.network_config import *
+from mg400_controller.common.config.network_config import (
+    CMD_PORT,
+    DASHBOARD_PORT,
+    FEEDBACK_PORT,
+    ROBOT_IP,
+    SOCKET_TIMEOUT,
+)
 from mg400_protocol.dashboard import (
     acc_j,
     clear_error,

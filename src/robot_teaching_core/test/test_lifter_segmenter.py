@@ -10,7 +10,6 @@ Verifies that:
 
 from __future__ import annotations
 
-import math
 import unittest
 from typing import Optional, Sequence
 

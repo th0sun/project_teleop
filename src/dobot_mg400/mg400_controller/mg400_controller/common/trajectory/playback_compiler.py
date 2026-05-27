@@ -23,7 +23,7 @@ remains on the recorder for now; see AGENTS.md §10 for the C3 plan
 
 from __future__ import annotations
 
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import numpy as np
 

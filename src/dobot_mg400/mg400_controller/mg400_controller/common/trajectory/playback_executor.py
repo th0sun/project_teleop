@@ -25,7 +25,7 @@ private method names remain as thin facades for back-compat.
 from __future__ import annotations
 
 import threading
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, List, Optional
 
 
 # Re-exported here to keep the recorder facade able to default the

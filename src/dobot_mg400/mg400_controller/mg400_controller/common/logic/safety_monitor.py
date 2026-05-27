@@ -93,10 +93,10 @@ class SafetyMonitor:
             else:
                  # CASE: Error Detected (Mode 9) but API returns NO INFO (Silent Error)
                  self.logger.error(f"🔴 Robot Error Detected! (Mode: {robot_mode})")
-                 self.logger.error(f"⚠️  No Error Code received from Robot. Possible Causes:")
-                 self.logger.error(f"   1. Joint Limit Reached (Check J1-J4)")
-                 self.logger.error(f"   2. Singularity Point (Arm too stretched/folded)")
-                 self.logger.error(f"   3. Workspace Violation")
+                 self.logger.error("⚠️  No Error Code received from Robot. Possible Causes:")
+                 self.logger.error("   1. Joint Limit Reached (Check J1-J4)")
+                 self.logger.error("   2. Singularity Point (Arm too stretched/folded)")
+                 self.logger.error("   3. Workspace Violation")
 
         formatted_errors = (
             [self.error_handler.format_error_message(e) for e in advanced_errors]

@@ -22,9 +22,8 @@ only seam used to compute Cartesian poses.
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Sequence
 
 from teaching_core.calibration.types import CalibrationBinding
 from teaching_core.kinematics.provider import (
