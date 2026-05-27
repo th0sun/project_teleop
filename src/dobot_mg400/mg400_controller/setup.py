@@ -30,6 +30,7 @@ setup(
         'console_scripts': [
             'vr_teleop_node = mg400_controller.vr_teleop_node:main',
             'monitor_gui = mg400_controller.monitor_gui:main',
+            'teleop_tcp_endpoint = mg400_controller.tcp_endpoint_wrapper:main',
         ],
     },
 )

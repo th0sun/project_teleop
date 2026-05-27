@@ -83,7 +83,7 @@ run_mac_stack() {
   source_install_setup
 
   local ros_tcp_port="${ROS_TCP_PORT:-10000}"
-  ros2 run ros_tcp_endpoint default_server_endpoint \
+  ros2 run mg400_controller teleop_tcp_endpoint \
     --ros-args -p ROS_IP:=0.0.0.0 -p "ROS_TCP_PORT:=${ros_tcp_port}" &
   local endpoint_pid=$!
 
@@ -150,7 +150,7 @@ case "${mode}" in
   endpoint)
     ensure_built
     source_install_setup
-    ros2 run ros_tcp_endpoint default_server_endpoint \
+    ros2 run mg400_controller teleop_tcp_endpoint \
       --ros-args -p ROS_IP:=0.0.0.0 -p "ROS_TCP_PORT:=${ROS_TCP_PORT:-10000}" "$@"
     ;;
   teleop)

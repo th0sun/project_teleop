@@ -91,7 +91,7 @@ CMD_RVIZ="$_src && ros2 launch mg400_bringup main.launch.py; exec bash"
 CMD_BRIDGE="$_src && python3 $REPO_DIR/tools/monitor/monitor_bridge.py; exec bash"
 
 if [ "$MODE" = "3" ] || [ "$MODE" = "4" ]; then
-    CMD_EXTRA="$_src && ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0; exec bash"
+    CMD_EXTRA="$_src && ros2 run mg400_controller teleop_tcp_endpoint --ros-args -p ROS_IP:=0.0.0.0; exec bash"
 else
     CMD_EXTRA="$_src && ros2 run mg400_simulator unity_simulator; exec bash"
 fi
