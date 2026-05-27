@@ -105,7 +105,6 @@ class _ControlLoopContext:
     target_snapshot: np.ndarray
     unity_sample_snapshot: Any
     target_recv_time_snapshot: float
-    target_recv_wall_snapshot: float
     unity_send_time_snapshot: float
     target_velocity_snapshot: Optional[np.ndarray]
     is_blocked: bool                    # playback / post-stop homing window
@@ -197,15 +196,11 @@ class TeleopNode(Node):
             on_session_changed=self._reset_pending_command_registry,
         )
         self.latest_target_unity_sample = None
-        self.latest_target_recv_wall = 0.0
         self.active_command_unity_sample = None
         self.active_command_uid = None
         self.active_command_dobot_id = None
-        self.active_command_response = None
         self.active_command_text = None
         self.active_feedback_command_id_before_send = None
-        self.active_command_tracking_source = None
-        self.active_command_tracking_confidence = None
         self.pending_command_registry = PendingCommandRegistry(max_size=100)
         self._last_unity_stale_warning = 0.0  # /unity/joint_cmd stale-drop rate-limit
         self.unity_joint_cmd_rx_session_id = f"ros_joint_cmd_rx_{int(time.time() * 1000)}"
@@ -260,7 +255,6 @@ class TeleopNode(Node):
         self._sample_counter = 0  # For session logger feedback decimation
         self._realtime_command_seq = 0
         self._realtime_speed_defaults_pending = False
-        self._last_realtime_speed_defaults_attempt = 0.0
 
         # The sample queue + worker thread live on self.unity_session.
         self.unity_session.start_worker()
@@ -677,7 +671,6 @@ class TeleopNode(Node):
 
         self.latest_target = q_compensated_safe      # Latency-compensated target
         self.latest_target_unity_sample = unity_sample
-        self.latest_target_recv_wall = now_ros_sec
         self.target_recv_time = now_ros_sec          # T2: ROS receive time
         self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
 
@@ -778,7 +771,6 @@ class TeleopNode(Node):
             target_snapshot=np.asarray(self.latest_target[:4], dtype=float).copy(),
             unity_sample_snapshot=self.latest_target_unity_sample,
             target_recv_time_snapshot=float(self.target_recv_time),
-            target_recv_wall_snapshot=float(self.latest_target_recv_wall),
             unity_send_time_snapshot=float(self.unity_send_time),
             target_velocity_snapshot=target_velocity_snapshot,
             is_blocked=is_blocked,
@@ -1251,11 +1243,8 @@ class TeleopNode(Node):
         self.active_command_unity_sample = ctx.unity_sample_snapshot
         self.active_command_uid = ros_command_uid
         self.active_command_dobot_id = dobot_command_id
-        self.active_command_response = send_result.response
         self.active_command_text = cmd_str
         self.active_feedback_command_id_before_send = feedback_command_id_before_send
-        self.active_command_tracking_source = tracking_source
-        self.active_command_tracking_confidence = tracking_confidence
         self.pending_command_registry.register(
             PendingCommand(
                 control_command_seq=control_command_seq,
@@ -1369,33 +1358,6 @@ class TeleopNode(Node):
         self.feedback.stop()
         self.interactive.stop()
         self.connection.disconnect()
-
-    def execute_motion_command(self, q_target):
-        """
-        ส่งคำสั่งเคลื่อนที่แบบ Synchronized (รอจนเสร็จ)
-        เหมาะสำหรับ Mode 6 (Mouse Click) หรือ Step Move
-        """
-        # 1. Validate
-        q_safe, is_clamped = self.validator.validate_and_clamp(q_target)
-
-        # 2. Plan Command
-        speed_percent = 50 # Default safe speed
-        cmd_str = self.planner.format_command(q_safe, speed_percent)
-
-        if not cmd_str:
-            return
-
-        # 3. Send & Sync (Blocking)
-        self.get_logger().info(f"🔄 Executing Sync Motion to: {np.degrees(q_safe)}")
-
-        # เรียกใช้ New Sync Method
-        success = self.sender.send_command_with_sync(cmd_str)
-
-        if success:
-             self.get_logger().info("✅ Motion Complete (Synced)")
-             self.controller.mark_command_sent(q_safe, time.perf_counter())
-        else:
-             self.get_logger().warn("⚠️ Motion Time-out or Failed")
 
     def _publish_haptic_feedback(self):
         """
