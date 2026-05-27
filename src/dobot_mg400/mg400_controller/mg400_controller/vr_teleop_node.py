@@ -66,6 +66,7 @@ from mg400_controller.common.utils.pending_command_registry import (
     PendingCommandRegistry,
 )
 from mg400_controller.common.teleop.tool_handlers import ToolCommandHandlers
+from mg400_controller.common.teleop.sample_matcher import UnitySampleMatcher
 from mg400_controller.common.ros.teleop_interfaces import (
     create_publishers,
     create_subscriptions,
@@ -73,7 +74,6 @@ from mg400_controller.common.ros.teleop_interfaces import (
 )
 from mg400_controller.common.ros.topic_config import declare_topic_parameters
 from mg400_controller.common.ros.unity_teleop_sample import (
-    UnityTeleopSample,
     UnityTeleopSampleError,
     build_ros_joint_cmd_rx_sample,
     parse_unity_teleop_sample,
@@ -190,9 +190,7 @@ class TeleopNode(Node):
         counters.
         """
         self.latest_target = None
-        self.latest_unity_sample = None
-        self.latest_unity_sample_recv_time = 0.0
-        self.unity_samples_by_identity = {}
+        self.sample_matcher = UnitySampleMatcher()
         self.latest_target_unity_sample = None
         self.latest_target_recv_wall = 0.0
         self.current_unity_session_id = None
@@ -631,7 +629,7 @@ class TeleopNode(Node):
         if handle_session:
             self._handle_unity_session_transition(sample, now_ros_sec)
         if remember_sample:
-            self._remember_unity_sample(sample, now_ros_sec)
+            self.sample_matcher.remember(sample, now_ros_sec)
 
         if log_sample and self.triple_logger:
             self.triple_logger.log_unity_sample(sample, now_ros_sec)
@@ -653,7 +651,7 @@ class TeleopNode(Node):
 
         previous_session_id = self.current_unity_session_id
         self.current_unity_session_id = session_id
-        self.unity_samples_by_identity.clear()
+        self.sample_matcher.clear_identity_cache()
         self.pending_command_registry = PendingCommandRegistry(max_size=100)
         if not self.use_unity_teleop_sample_for_control:
             return
@@ -706,10 +704,10 @@ class TeleopNode(Node):
     def _teleop_session_logging_active(self, now_wall: float) -> bool:
         if not self.use_unity_teleop_sample_for_control:
             return True
-        if self.latest_unity_sample_recv_time <= 0.0:
+        if self.sample_matcher.latest_recv_time <= 0.0:
             return False
         return (
-            now_wall - self.latest_unity_sample_recv_time
+            now_wall - self.sample_matcher.latest_recv_time
             <= motion_config.UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC
         )
 
@@ -732,49 +730,6 @@ class TeleopNode(Node):
             "🔁 Unity teleop resumed after stale gap; reset latency compensator "
             f"gap={gap_sec * 1000.0:.1f}ms"
         )
-
-    def _remember_unity_sample(self, sample, recv_time):
-        self.latest_unity_sample = sample
-        self.latest_unity_sample_recv_time = recv_time
-        self.unity_samples_by_identity[(sample.session_id, sample.unity_seq_id)] = (
-            sample,
-            recv_time,
-        )
-
-        if len(self.unity_samples_by_identity) <= 256:
-            return
-        oldest_key = min(
-            self.unity_samples_by_identity,
-            key=lambda key: self.unity_samples_by_identity[key][1],
-        )
-        self.unity_samples_by_identity.pop(oldest_key, None)
-
-
-
-    def _recent_unity_sample(self, now_ros_sec, max_age_sec=0.25):
-        if self.latest_unity_sample is None:
-            return None
-        age = now_ros_sec - self.latest_unity_sample_recv_time
-        if 0.0 <= age <= max_age_sec:
-            return self._sample_with_match_context(
-                self.latest_unity_sample,
-                "age_only_recent_sample",
-                age * 1000.0,
-            )
-        return None
-
-    def _sample_with_match_context(self, sample, method: str, age_ms: float):
-        raw = dict(sample.raw)
-        raw["unity_sample_match_method"] = method
-        raw["unity_sample_age_ms"] = age_ms
-        return UnityTeleopSample(
-            raw=raw,
-            protocol_version=sample.protocol_version,
-            session_id=sample.session_id,
-            unity_seq_id=sample.unity_seq_id,
-        )
-
-
 
 
 
