@@ -26,7 +26,10 @@ being prepared for a second robot family.
 
 ## 2. Current state (2026-05-08)
 
-Active branch: **`realtime-smooth-adaptive`** (`origin` synced).
+Active branch: **`realtime-smooth-adaptive-clean`** (forked from
+`realtime-smooth-adaptive` @ `c14ed8e`, 9 cleanup commits ahead, not
+yet merged back — the old branch is intentionally kept as a known-
+good rollback point until this branch is hardware-verified).
 
 Last hardware-verified run: **2026-05-07** on real MG400 (Ubuntu rig,
 192.168.1.6). Both modes work cleanly:
@@ -247,13 +250,19 @@ feat/multi-robot-teaching-architecture
    │
    └── 0ecdd35 (baseline)
         │
-        └── realtime-smooth-adaptive  ← we are here, 8 commits ahead
+        └── realtime-smooth-adaptive  (c14ed8e — frozen, rollback point)
+             │
+             └── realtime-smooth-adaptive-clean  ← we are here, 9 commits ahead
 ```
 
-Merge plan: keep `realtime-smooth-adaptive` open for behaviour-preserving
-refactor commits (see §10 next-steps queue). Merge back to
-`feat/multi-robot-teaching-architecture` once handoff doc + skill +
-characterisation tests land. Removal Pass v1 (§11) is a separate branch.
+Merge plan: `realtime-smooth-adaptive-clean` holds the cleanup batch
+(submodule wrapper, log unify + 4.2 GB reclaim, dead-code pruning,
+docs/scripts/utils layout). `realtime-smooth-adaptive` is intentionally
+left at `c14ed8e` as a known-good rollback in case the cleanup
+introduces a latent runtime regression that the unit tests didn't
+catch. Once this branch is hardware-verified on real MG400 + Unity,
+fast-forward `realtime-smooth-adaptive` to match and delete the
+`-clean` suffix. Until then, work continues on `-clean`.
 
 ## 10. Next-steps queue (refactor)
 
