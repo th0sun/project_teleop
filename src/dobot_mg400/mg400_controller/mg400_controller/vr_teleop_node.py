@@ -224,22 +224,21 @@ class TeleopNode(Node):
     def _declare_runtime_params(self):
         """Declare ROS params that influence behaviour at runtime.
 
-        Today this is just ``use_unity_teleop_sample_for_control``, kept
-        as a tripwire — the parameter is exposed so existing launch
-        files don't fail, but turning it on logs a loud warning and is
-        forced off: /unity/joint_cmd is the only live robot-control
-        path. /unity/teleop_sample is log/sync only.
+        Today only ``use_unity_teleop_sample_for_control`` is exposed,
+        as a tripwire: the parameter is still accepted so older launch
+        files don't fail, but turning it on logs a loud warning. The
+        live robot-control path is ``/unity/joint_cmd``;
+        ``/unity/teleop_sample`` is log/sync only.
         """
         requested_sample_control = bool(
             self.declare_parameter("use_unity_teleop_sample_for_control", False).value
         )
         if requested_sample_control:
             self.get_logger().warn(
-                "use_unity_teleop_sample_for_control is disabled: "
-                "/unity/joint_cmd is the only live robot-control path; "
-                "/unity/teleop_sample is log/sync-only."
+                "use_unity_teleop_sample_for_control is disabled in this "
+                "build; ignoring. /unity/joint_cmd is the only live "
+                "robot-control path."
             )
-        self.use_unity_teleop_sample_for_control = False
 
     def _init_sample_worker(self):
         """Timestamp contracts, per-loop counters, the Unity teleop-sample
@@ -598,9 +597,6 @@ class TeleopNode(Node):
             except Exception as exc:
                 self.get_logger().error(f"Unity teleop sample worker error: {exc}")
 
-    def _unity_teleop_control_worker_loop(self):
-        """/unity/teleop_sample direct control is intentionally disabled."""
-        return
 
     def _process_unity_teleop_sample_payload(
         self,
@@ -642,6 +638,10 @@ class TeleopNode(Node):
             self._last_unity_sample_warning = now_ros_sec
 
     def _handle_unity_session_transition(self, sample, now_ros_sec):
+        """When Unity sends a sample with a new session_id, drop the
+        identity-keyed sample cache and the pending-command registry so
+        old-session keys can't collide with new ones.
+        """
         session_id = sample.session_id
         if self.current_unity_session_id is None:
             self.current_unity_session_id = session_id
@@ -649,87 +649,20 @@ class TeleopNode(Node):
         if session_id == self.current_unity_session_id:
             return
 
-        previous_session_id = self.current_unity_session_id
         self.current_unity_session_id = session_id
         self.sample_matcher.clear_identity_cache()
         self.pending_command_registry = PendingCommandRegistry(max_size=100)
-        if not self.use_unity_teleop_sample_for_control:
-            return
-
-        self._clear_direct_unity_target("unity_session_changed")
-        try:
-            self.target_compensator.reset()
-        except AttributeError:
-            pass
-        self.controller.reset_reference(None, now=time.perf_counter())
-        self.get_logger().info(
-            "🔁 Unity teleop session changed; cleared direct-control target "
-            f"{previous_session_id} -> {session_id}"
-        )
-
-    def _clear_direct_unity_target(self, reason: str) -> None:
-        if not self.use_unity_teleop_sample_for_control:
-            return
-        self.latest_target = None
-        self.latest_target_unity_sample = None
-        self.latest_target_recv_wall = 0.0
-        self.target_recv_time = 0.0
-        self.unity_send_time = 0.0
-        self.controller.stuck_start_time = 0.0
-        self.controller.is_stuck = False
-
-    def _direct_unity_target_is_stale(self, now_wall: float, target_recv_wall: float, unity_sample) -> bool:
-        if not self.use_unity_teleop_sample_for_control:
-            return False
-        if target_recv_wall <= 0.0:
-            return True
-
-        age_sec = now_wall - target_recv_wall
-        if age_sec <= motion_config.UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC:
-            return False
-
-        self.controller.stuck_start_time = 0.0
-        self.controller.is_stuck = False
-        if now_wall - self._last_unity_stale_warning > 1.0:
-            session_id = getattr(unity_sample, "session_id", "")
-            unity_seq_id = getattr(unity_sample, "unity_seq_id", "")
-            self.get_logger().warn(
-                "Unity teleop sample stale; suppressing robot command "
-                f"age={age_sec * 1000.0:.1f}ms "
-                f"session_id={session_id} unity_seq_id={unity_seq_id}"
-            )
-            self._last_unity_stale_warning = now_wall
-        return True
 
     def _teleop_session_logging_active(self, now_wall: float) -> bool:
-        if not self.use_unity_teleop_sample_for_control:
-            return True
-        if self.sample_matcher.latest_recv_time <= 0.0:
-            return False
-        return (
-            now_wall - self.sample_matcher.latest_recv_time
-            <= motion_config.UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC
-        )
+        """Session logging is unconditionally active in this build.
 
-    def _reset_direct_unity_after_gap(self, now_ros_sec: float) -> None:
-        if not self.use_unity_teleop_sample_for_control:
-            return
-        if self.latest_target_recv_wall <= 0.0:
-            return
+        Kept as a method so the control loop's call site reads as a
+        guarded check (and so future "log only when a fresh Unity
+        sample exists" gating has a single place to attach without
+        touching the loop body).
+        """
+        return True
 
-        gap_sec = now_ros_sec - self.latest_target_recv_wall
-        if gap_sec <= motion_config.UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC:
-            return
-
-        try:
-            self.target_compensator.reset()
-        except AttributeError:
-            pass
-        self.pending_command_registry = PendingCommandRegistry(max_size=100)
-        self.get_logger().info(
-            "🔁 Unity teleop resumed after stale gap; reset latency compensator "
-            f"gap={gap_sec * 1000.0:.1f}ms"
-        )
 
 
 
@@ -794,8 +727,6 @@ class TeleopNode(Node):
         if np.any(np.isnan(q_target)):
             self.get_logger().warn("⚠️ Received NaN joints from Unity - ignoring command")
             return
-
-        self._reset_direct_unity_after_gap(now_ros_sec)
 
         q_safe, was_clamped = self.validator.validate_and_clamp(q_target)
 
@@ -1464,13 +1395,6 @@ class TeleopNode(Node):
         # === SKIP TELEOP COMMANDS DURING PLAYBACK / POST-STOP HOMING ===
         if ctx.is_blocked:
             return  # monitoring data already published above; sequencer owns commands
-
-        if self._direct_unity_target_is_stale(
-            ctx.now_wall,
-            ctx.target_recv_wall_snapshot,
-            ctx.unity_sample_snapshot,
-        ):
-            return
 
         should_send, send_reason, queue_backlog_rad, run_queued_cmd = (
             self._make_controller_decision(ctx)
