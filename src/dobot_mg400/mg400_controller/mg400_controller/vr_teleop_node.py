@@ -30,13 +30,10 @@ from mg400_controller.common.config.robot_config import (
     JOINT_LIMITS,
     ELBOW_ANGLE_LIMIT
 )
-from mg400_controller.common.config.motion_config import (
-    SUCTION_ACTIVATION_THRESHOLD,
-)
 import mg400_controller.common.config.motion_config as motion_config
 
 # Vendor protocol surface (do not hardcode MG400 ASCII strings here).
-from mg400_protocol.dashboard import clear_error, get_tool, speed_factor
+from mg400_protocol.dashboard import clear_error, get_tool
 
 # Import core modules
 from mg400_controller.common.core.robot_connection import RobotConnection
@@ -68,6 +65,7 @@ from mg400_controller.common.utils.pending_command_registry import (
     PendingCommand,
     PendingCommandRegistry,
 )
+from mg400_controller.common.teleop.tool_handlers import ToolCommandHandlers
 from mg400_controller.common.ros.teleop_interfaces import (
     create_publishers,
     create_subscriptions,
@@ -315,14 +313,14 @@ class TeleopNode(Node):
         self.ros_subscriptions = self._register_ros_subscriptions()
 
     def _init_tool_state(self):
-        """Suction-cup state machine + last-known DO bitmask. Initialised
-        before the robot connect step so callbacks that fire mid-connect
-        can read them safely.
+        """Last-known DO bitmask. Initialised before the robot connect
+        step so the DO publish helper has something to diff against on
+        the very first tick.
+
+        The suction state machine itself now lives on ``self.tool_handlers``
+        (see ``_init_robot_handlers``), which is created later because
+        it needs the post-connect ``sender`` instance.
         """
-        self.suction_state = False
-        self.suction_pending = False
-        self.suction_requested_state = False
-        self.suction_target_q = None
         self.last_do_status = 0
 
     def _connect_and_enable_robot(self) -> bool:
@@ -353,6 +351,15 @@ class TeleopNode(Node):
             feedback_callback=self._raw_feedback_packet_callback,
         )
         self.sender = CommandSender(self.connection, self.feedback, self.get_logger())
+
+        # Unity tool / dashboard handlers — owns its own suction state
+        # machine. Needs the sender, so it lives here (post-connect).
+        self.tool_handlers = ToolCommandHandlers(
+            connection=self.connection,
+            sender=self.sender,
+            logger=self.get_logger(),
+            get_latest_target_fn=lambda: self.latest_target,
+        )
 
         # ErrorHandler (GetError API) — optional, disabled for simulator.
         self.error_handler = None
@@ -538,11 +545,15 @@ class TeleopNode(Node):
             self,
             unity_pong_callback=self._unity_pong_callback,
             unity_teleop_sample_callback=self._unity_teleop_sample_callback,
-            suction_callback=self._suction_callback,
-            light_callback=self._light_callback,
+            # self.tool_handlers is created later (post-connect, inside
+            # _init_robot_handlers because it needs the sender); use
+            # lambdas to defer the attribute lookup until a message
+            # actually arrives.
+            suction_callback=lambda msg: self.tool_handlers.suction_callback(msg),
+            light_callback=lambda msg: self.tool_handlers.light_callback(msg),
             scene_safety_callback=self._scene_safety_callback,
-            dashboard_cmd_callback=self._dashboard_cmd_callback,
-            speed_factor_callback=self._speed_factor_callback,
+            dashboard_cmd_callback=lambda msg: self.tool_handlers.dashboard_cmd_callback(msg),
+            speed_factor_callback=lambda msg: self.tool_handlers.speed_factor_callback(msg),
             teach_job_request_callback=self._teach_job_request_callback,
             topics=self.topics,
         )
@@ -879,92 +890,6 @@ class TeleopNode(Node):
         self.target_recv_time = now_ros_sec          # T2: ROS receive time
         self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
 
-    def _suction_callback(self, msg):
-        """รับคำสั่งเปิด/ปิดหัวดูด/Gripper จาก Unity (Trigger Button)"""
-        requested_state = msg.data
-
-        # ตรวจสอบว่าสถานะที่ขอมาต่างกับสถานะปัจจุบันหรือไม่
-        if requested_state != self.suction_state:
-            self.suction_requested_state = requested_state
-
-            if requested_state and motion_config.SMART_SUCTION_ENABLED and self.latest_target is not None:
-                self.suction_target_q = self.latest_target.copy()
-                self.suction_pending = True
-                self.get_logger().info("🔘 Smart Suction queued: ON (Waiting for robot to reach target)")
-            else:
-                # สั่งทันที (Immediate Mode) สำหรับการปิด/ปล่อย หรือเมื่อไม่ได้เปิด Smart Suction
-                self._handle_suction_cmd(requested_state)
-
-    def _handle_suction_cmd(self, state):
-        """จัดการการเปิด/ปิดหัวดูดแบบมีลำดับ (Sequence Control)"""
-        if not self.connection.connected:
-            self.get_logger().warn("⚠️ Cannot toggle suction; Robot disconnected.")
-            return
-
-        if state:
-            # 🟢 เปิดการดูด (Suck)
-            self.sender.set_digital_output(motion_config.VACUUM_DO_PORT, True)
-            self.sender.set_digital_output(motion_config.BLOW_DO_PORT, False)
-            self.suction_state = True
-            self.get_logger().info("吸 [SUCK] Vacuum ON, Blow OFF")
-        else:
-            # 🔴 เริ่มขั้นตอนการปล่อยลูก (Release Sequence: Vacuum OFF -> Blow ON -> Auto-Off)
-            self.sender.set_digital_output(motion_config.VACUUM_DO_PORT, False)
-            self.sender.set_digital_output(motion_config.BLOW_DO_PORT, True)
-            self.get_logger().info(f"💨 [RELEASE] Vacuum OFF, Blow ON (for {motion_config.BLOW_DURATION}s)")
-
-            # ตั้งเวลาปิดพอร์ตเป่าลมอัตโนมัติ (Safety Timer)
-            def turn_off_blow():
-                try:
-                    self.sender.set_digital_output(motion_config.BLOW_DO_PORT, False)
-                    self.get_logger().info("🛑 [IDLE] Blow OFF, All suction ports closed")
-                    self.suction_state = False
-                except Exception as e:
-                    self.get_logger().error(f"Error in turn_off_blow timer: {e}")
-
-            threading.Timer(motion_config.BLOW_DURATION, turn_off_blow).start()
-
-    def _light_callback(self, msg):
-        """Callback for external light control (e.g. from GUI)"""
-        if len(msg.data) >= 2:
-            port = msg.data[0]
-            state = bool(msg.data[1])
-            if self.connection.connected:
-                self.sender.set_digital_output(port, state)
-            else:
-                self.get_logger().warn(f"⚠️ Cannot set light port {port}; Robot disconnected.")
-
-    def _dashboard_cmd_callback(self, msg):
-        """Callback for arbitrary Dashboard Commands sent from GUI over ROS."""
-        cmd = msg.data.strip()
-        if not cmd:
-            return
-
-        if self.connection.connected:
-            self.get_logger().info(f"📨 Dashboard Command received from GUI: {cmd}")
-            # Add newline if missing as required by Dobot protocol
-            if not cmd.endswith('\n'):
-                cmd += '\n'
-            # Send via connection (non-blocking for basic commands)
-            self.connection.send_dashboard_cmd(cmd)
-        else:
-            self.get_logger().warn(f"⚠️ Cannot send dashboard cmd '{cmd}'; Robot disconnected.")
-
-    def _speed_factor_callback(self, msg):
-        """Apply Dobot global SpeedFactor from GUI/Unity."""
-        try:
-            value = int(msg.data)
-        except (TypeError, ValueError):
-            self.get_logger().warn(f"⚠️ Invalid SpeedFactor payload: {msg.data!r}")
-            return
-        value = max(1, min(100, value))
-        if self.connection.connected:
-            cmd = speed_factor(value).render()
-            self.get_logger().info(f"🏃 SpeedFactor update from GUI: {value}%")
-            self.connection.send_dashboard_cmd(cmd + "\n")
-        else:
-            self.get_logger().warn(f"⚠️ Cannot set SpeedFactor({value}); Robot disconnected.")
-
     def _teach_job_request_callback(self, msg):
         """Dispatch a structured /teach/job_request payload via TeachJobHandler.
 
@@ -1228,16 +1153,13 @@ class TeleopNode(Node):
             pass
 
     def _trigger_smart_suction(self, ctx):
-        """Fire a pending suction command once the robot has settled near
-        ``suction_target_q`` (or is detectably stuck near it).
+        """Delegate to the tool-handlers smart-suction check. Stays here
+        as a thin wrapper so the control-loop body keeps reading as a
+        sequence of node-level phases.
         """
-        if not (self.suction_pending and self.suction_target_q is not None):
-            return
-        dist = np.max(np.abs(ctx.q_current - self.suction_target_q))
-        # ระยะใกล้ Threshold = ถึงเป้า / หรือ Stuck = ค้าง ก็ยิงเลยกัน hang
-        if dist < SUCTION_ACTIVATION_THRESHOLD or self.controller.stuck_start_time > 0:
-            self._handle_suction_cmd(self.suction_requested_state)
-            self.suction_pending = False
+        self.tool_handlers.maybe_fire_smart_suction(
+            ctx.q_current, self.controller.stuck_start_time
+        )
 
     def _publish_tool_vectors(self, ctx):
         """Publish actual/target tool poses + flange FK and stash the
