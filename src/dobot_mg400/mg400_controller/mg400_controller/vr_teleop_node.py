@@ -1517,7 +1517,7 @@ class TeleopNode(Node):
                         tracking_confidence = match_result.confidence
                         metrics["final_tool_actual"] = ctx.tool_act
                         metrics["final_tool_target"] = ctx.tool_tgt
-                        metrics["ctx.operation_mode"] = ctx.operation_mode
+                        metrics["operation_mode"] = ctx.operation_mode
                         metrics["unity_sample"] = matched_unity_sample
                         metrics["control_command_seq"] = matched_seq
                         metrics["ros_command_uid"] = matched_uid
