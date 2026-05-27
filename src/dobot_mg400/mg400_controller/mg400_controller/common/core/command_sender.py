@@ -14,7 +14,16 @@ import time
 import re
 import queue
 import threading
+from dataclasses import dataclass
 from mg400_protocol.commands import do_execute
+
+
+@dataclass(frozen=True)
+class MotionSendResult:
+    success: bool
+    response: str | None = None
+    command_id: int | None = None
+
 
 class CommandSender:
     def __init__(self, robot_connection, feedback_handler, logger):
@@ -65,6 +74,34 @@ class CommandSender:
         else:
             self.logger.error("❌ Failed to send motion command")
             return False
+
+    def send_with_command_id(self, command, response_timeout=0.02):
+        """
+        ส่งคำสั่งการเคลื่อนที่และพยายามเก็บ command id จาก response ทันที.
+
+        This stays realtime-safe: it waits only for the bounded port-30003
+        acknowledgement window, not for motion completion.
+        """
+        if hasattr(self.connection, "send_motion_cmd_with_response"):
+            success, response = self.connection.send_motion_cmd_with_response(
+                command,
+                response_timeout=response_timeout,
+            )
+        else:
+            success = self.connection.send_motion_cmd(command)
+            response = None
+
+        if not success:
+            self.logger.error("❌ Failed to send motion command")
+            return MotionSendResult(False, response=response)
+
+        command_id = None
+        if response:
+            parsed_id = self._parse_command_id(response)
+            if parsed_id != -1:
+                command_id = parsed_id
+
+        return MotionSendResult(True, response=response, command_id=command_id)
 
     def set_digital_output(self, port: int, status: bool) -> bool:
         """

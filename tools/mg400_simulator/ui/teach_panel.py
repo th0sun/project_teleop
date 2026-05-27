@@ -220,7 +220,7 @@ class TeachPanel(QWidget):
             self._set_job_state('busy', f"Received {action or 'job'}...")
             return
 
-        if stage in {'compiled', 'preview_ready'}:
+        if stage == 'compiled':
             self._job_timeout_timer.stop()
             count = metadata.get('queued_command_count')
             duration = metadata.get('total_duration_s')

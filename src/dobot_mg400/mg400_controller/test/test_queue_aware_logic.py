@@ -41,8 +41,8 @@ class FakeJointState:
 
 sensor_msgs_msg.JointState = FakeJointState
 sensor_msgs.msg = sensor_msgs_msg
-sys.modules.setdefault("sensor_msgs", sensor_msgs)
-sys.modules.setdefault("sensor_msgs.msg", sensor_msgs_msg)
+sys.modules["sensor_msgs"] = sensor_msgs
+sys.modules["sensor_msgs.msg"] = sensor_msgs_msg
 
 from mg400_controller.common.config.motion_config import (
     REALTIME_DELTA_MAX_RAD,
@@ -363,12 +363,14 @@ class AdaptiveTeleopControllerTest(unittest.TestCase):
 
     # -- Feedback handler ROS plumbing (unchanged) -----------------------
     def test_feedback_handler_parses_queue_target_and_running_state(self):
+        callbacks = []
         handler = FeedbackHandler(
             DummyConnection(),
             DummyPublisher(),
             DummyClock(),
             DummyLogger(),
             stop_event=types.SimpleNamespace(is_set=lambda: True),
+            feedback_callback=callbacks.append,
         )
 
         packet = bytearray(1440)
@@ -394,6 +396,13 @@ class AdaptiveTeleopControllerTest(unittest.TestCase):
         ))
         self.assertTrue(math.isclose(
             handler.get_queue_backlog(), math.radians(0.5), rel_tol=1e-6
+        ))
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(callbacks[0]["command_id"], 42)
+        self.assertEqual(callbacks[0]["run_queued_cmd"], 1)
+        self.assertTrue(np.allclose(
+            callbacks[0]["q_actual_rad"],
+            np.radians([1.0, 2.0, 3.0, 4.0]),
         ))
 
 

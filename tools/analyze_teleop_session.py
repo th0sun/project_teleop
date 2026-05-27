@@ -11,6 +11,7 @@ file is provided, the script tries to open a file picker.
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import io
 import json
@@ -59,6 +60,7 @@ LATENCY_EVENT_FILTERS = {
     "motion_execution_ms": {"latency_arrival"},
     "true_end_to_end_ms": {"latency_arrival"},
 }
+KPI_THRESHOLD_MM = 5.0
 
 
 def _float(value) -> float:
@@ -250,6 +252,108 @@ def _fmt(value) -> str:
     return str(value)
 
 
+def _clean(values: Iterable[float]) -> np.ndarray:
+    arr = np.asarray(list(values), dtype=float)
+    return arr[np.isfinite(arr)]
+
+
+def _stats_dict(values: Iterable[float], unit: str = "") -> dict:
+    valid = _clean(values)
+    if valid.size == 0:
+        return {
+            "count": 0,
+            "mean": None,
+            "p50": None,
+            "median": None,
+            "p95": None,
+            "p99": None,
+            "min": None,
+            "max": None,
+            "unit": unit,
+        }
+    p50 = float(np.percentile(valid, 50))
+    return {
+        "count": int(valid.size),
+        "mean": float(np.mean(valid)),
+        "p50": p50,
+        "median": p50,
+        "p95": float(np.percentile(valid, 95)),
+        "p99": float(np.percentile(valid, 99)),
+        "min": float(np.min(valid)),
+        "max": float(np.max(valid)),
+        "unit": unit,
+    }
+
+
+def _column_values(rows: list[dict[str, str]], column: str) -> np.ndarray:
+    return np.asarray([_float(row.get(column)) for row in rows], dtype=float)
+
+
+def _rows_with_event(rows: list[dict[str, str]], event: str) -> list[dict[str, str]]:
+    return [row for row in rows if _event_type(row) == event]
+
+
+def _counter(rows: list[dict[str, str]], column: str) -> dict[str, int]:
+    counter: dict[str, int] = {}
+    for row in rows:
+        value = row.get(column)
+        if value is None or value == "":
+            continue
+        counter[str(value)] = counter.get(str(value), 0) + 1
+    return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _duration_rate_from_t(t: np.ndarray, rows_count: int) -> dict:
+    valid = t[np.isfinite(t)]
+    if valid.size == 0:
+        return {"duration_sec": None, "effective_hz": None}
+    duration = float(np.max(valid) - np.min(valid))
+    rate = float(rows_count / duration) if duration > 0 else None
+    return {"duration_sec": duration, "effective_hz": rate}
+
+
+def _gap_stats_from_t(t: np.ndarray) -> dict:
+    valid = t[np.isfinite(t)]
+    if valid.size < 2:
+        return _stats_dict([], "ms")
+    gaps_ms = np.diff(valid) * 1000.0
+    return _stats_dict(gaps_ms, "ms")
+
+
+def _truthy(value) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _latest_session_file(log_root: Path) -> Path | None:
+    root = log_root.expanduser()
+    if root.name != "teleop_sessions" and (root / "teleop_sessions").is_dir():
+        root = root / "teleop_sessions"
+    candidates = sorted(root.glob("teleop_session_*.csv"), key=lambda path: path.stat().st_mtime)
+    return candidates[-1] if candidates else None
+
+
+def _unity_sample_path_for_main(main_path: Path) -> Path | None:
+    stem = main_path.stem.replace("teleop_session_", "", 1)
+    candidates = [
+        main_path.with_name(f"unity_teleop_sample_{stem}.csv"),
+        main_path.with_name(f"unity_teleop_sample_from_teleop_session_{stem}.csv"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _file_info(path: Path | None) -> dict:
+    if path is None or not path.exists():
+        return {}
+    return {
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "modified_unix": path.stat().st_mtime,
+    }
+
+
 def _plot_joint_positions(t, joints, out: Path) -> None:
     fig, axes = plt.subplots(4, 1, figsize=(13, 9), sharex=True)
     colors = {
@@ -422,7 +526,7 @@ def _downsample_indices(mask: np.ndarray, max_points: int = 1800) -> np.ndarray:
 
 def _plot_report_latency(metrics: dict, out: Path) -> None:
     items = [
-        ("network_delay_ms", "Unity -> ROS"),
+        ("network_delay_ms", "Unity -> ROS\nexcess"),
         ("decision_delay_ms", "ROS decision"),
         ("robot_response_ms", "Robot response"),
         ("true_end_to_end_ms", "End-to-end reached"),
@@ -472,7 +576,7 @@ def _stat_value(metrics: dict, key: str, field: str) -> float | None:
 
 def _plot_report_latency_split(metrics: dict, out: Path) -> None:
     items = [
-        ("network_delay_ms", "Unity -> ROS"),
+        ("network_delay_ms", "Unity -> ROS excess"),
         ("decision_delay_ms", "ROS compute"),
         ("robot_response_ms", "Robot response"),
         ("true_end_to_end_ms", "End-to-end"),
@@ -525,7 +629,7 @@ def _plot_report_accuracy(metrics: dict, out: Path) -> None:
             units.append(unit)
 
     fig, axes = plt.subplots(1, max(1, len(labels)), figsize=(9.5, 4.8))
-    if len(labels) == 1:
+    if not isinstance(axes, np.ndarray):
         axes = [axes]
     if not labels:
         axes[0].text(0.5, 0.5, "No target-reached accuracy samples", ha="center", va="center")
@@ -546,7 +650,7 @@ def _plot_report_accuracy(metrics: dict, out: Path) -> None:
 
 def _plot_report_poster_summary(metrics: dict, out: Path, robot_tcp_source: str) -> None:
     latency_cards = [
-        ("Unity -> ROS", _stat_value(metrics, "network_delay_ms", "median"), "ms"),
+        ("Unity -> ROS excess", _stat_value(metrics, "network_delay_ms", "median"), "ms"),
         ("ROS compute", _stat_value(metrics, "decision_delay_ms", "median"), "ms"),
         ("Robot response", _stat_value(metrics, "robot_response_ms", "median"), "ms"),
         ("End-to-end", _stat_value(metrics, "true_end_to_end_ms", "median"), "ms"),
@@ -668,7 +772,7 @@ def _plot_report_tcp_views(t, rows, xyz, out: Path, robot_tcp_source: str) -> No
 
 def _plot_report_metrics_card(metrics: dict, out: Path, robot_tcp_source: str) -> None:
     cards = [
-        ("Unity -> ROS", "median", "network_delay_ms", "median", "ms"),
+        ("Unity -> ROS excess", "median", "network_delay_ms", "median", "ms"),
         ("ROS decision", "median", "decision_delay_ms", "median", "ms"),
         ("Robot response", "median", "robot_response_ms", "median", "ms"),
         ("End-to-end", "median", "true_end_to_end_ms", "median", "ms"),
@@ -725,6 +829,247 @@ def _write_cartesian_csv(path: Path, t, xyz) -> None:
             writer.writerow(row)
 
 
+def _plot_plate_pair(
+    t: np.ndarray,
+    rows: list[dict[str, str]],
+    xyz: dict[str, np.ndarray],
+    target_layer: str,
+    actual_layer: str,
+    title: str,
+    out: Path,
+    *,
+    threshold_mm: float = KPI_THRESHOLD_MM,
+) -> dict:
+    start, end = _active_window(rows, t)
+    target = xyz[target_layer]
+    actual = xyz[actual_layer]
+    mask = (t >= start) & (t <= end) & np.isfinite(target).all(axis=1) & np.isfinite(actual).all(axis=1)
+    idx = _downsample_indices(mask, 3500)
+    full_idx = np.flatnonzero(mask)
+    summary = {
+        "file": out.stem,
+        "target_layer": target_layer,
+        "actual_layer": actual_layer,
+        "row_count": int(full_idx.size),
+        "kpi_threshold_mm": float(threshold_mm),
+        "points_over_kpi_5mm": 0,
+        "peak_sample_index": None,
+        "peak_vector_error_mm": None,
+        "peak_dx_mm": None,
+        "peak_dy_mm": None,
+        "peak_dz_mm": None,
+    }
+    fig, ax = plt.subplots(figsize=(10, 7.5))
+    ax.set_facecolor("#eef4fb")
+    if full_idx.size:
+        diff = actual[full_idx] - target[full_idx]
+        err = _norm_rows(diff)
+        peak_pos = int(np.argmax(err))
+        peak_idx = int(full_idx[peak_pos])
+        over = err > threshold_mm
+        summary.update(
+            {
+                "points_over_kpi_5mm": int(np.count_nonzero(over)),
+                "peak_sample_index": peak_idx,
+                "peak_vector_error_mm": float(err[peak_pos]),
+                "peak_dx_mm": float(diff[peak_pos, 0]),
+                "peak_dy_mm": float(diff[peak_pos, 1]),
+                "peak_dz_mm": float(diff[peak_pos, 2]),
+            }
+        )
+        ax.plot(target[idx, 0], target[idx, 1], color="#f28e8e", linewidth=3.0, alpha=0.9, label="Target trajectory")
+        ax.plot(actual[idx, 0], actual[idx, 1], color="#0b61ff", linewidth=2.2, alpha=0.95, label="Actual trajectory")
+        over_idx = full_idx[over]
+        over_idx = over_idx[:: max(1, int(np.ceil(over_idx.size / 250)))] if over_idx.size else over_idx
+        if over_idx.size:
+            ax.scatter(actual[over_idx, 0], actual[over_idx, 1], s=18, color="#d97900", edgecolor="white", linewidth=0.45, label=f"3D error > KPI ({threshold_mm:g} mm)")
+        ax.scatter(actual[peak_idx, 0], actual[peak_idx, 1], s=110, marker="D", color="#b00000", edgecolor="white", linewidth=0.9, label=f"Peak row {peak_idx}")
+        ax.set_title(f"{title} - plate-view trajectory | Points > KPI ({threshold_mm:g} mm): {summary['points_over_kpi_5mm']} | peak {summary['peak_vector_error_mm']:.3f} mm", fontsize=14)
+    else:
+        ax.text(0.5, 0.5, "No overlapping XYZ samples for this layer pair", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(f"{title} - plate-view trajectory | no overlap", fontsize=14)
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(True, alpha=0.18)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.16), ncol=4, frameon=False)
+    fig.tight_layout()
+    fig.savefig(out, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return summary
+
+
+def _plot_plate_contact_sheet(figures: dict[str, Path], out: Path) -> None:
+    items = [
+        ("Plot_VR", figures["plate_vr"]),
+        ("PLOT_UNITY_VS_ROS", figures["plate_unity_vs_ros"]),
+        ("PLOT_UNITY_VS_ROBOT", figures["plate_unity_vs_robot"]),
+        ("PLOT_ROS_VS_ROBOT_MANUAL", figures["plate_ros_vs_robot"]),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle("Teleop plate-view layer comparison", fontsize=18, weight="bold")
+    for ax, (label, image_path) in zip(axes.ravel(), items):
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(label, loc="left", fontsize=10)
+        if image_path.exists():
+            ax.imshow(plt.imread(image_path))
+        for spine in ax.spines.values():
+            spine.set_color("#c9cdd2")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+
+
+def _write_plate_summary_csv(path: Path, summaries: list[dict]) -> None:
+    fields = [
+        "file",
+        "target_layer",
+        "actual_layer",
+        "row_count",
+        "kpi_threshold_mm",
+        "points_over_kpi_5mm",
+        "peak_sample_index",
+        "peak_vector_error_mm",
+        "peak_dx_mm",
+        "peak_dy_mm",
+        "peak_dz_mm",
+    ]
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        for row in summaries:
+            writer.writerow({field: row.get(field, "") for field in fields})
+
+
+def _build_session_report(
+    main_path: Path,
+    rows: list[dict[str, str]],
+    t: np.ndarray,
+    unity_path: Path | None,
+    unity_rows: list[dict[str, str]],
+) -> dict:
+    event_counts = dict(collections.Counter(_event_type(row) for row in rows))
+    event_counts = dict(sorted(event_counts.items(), key=lambda item: (-item[1], item[0])))
+    main_report = {
+        "file": _file_info(main_path),
+        "rows": len(rows),
+        "columns": len(rows[0]) if rows else 0,
+        "duration_rate": _duration_rate_from_t(t, len(rows)),
+        "gap_ms": _gap_stats_from_t(t),
+        "event_counts": event_counts,
+        "unique_ros_command_uid": len({r.get("ros_command_uid") for r in rows if r.get("ros_command_uid")}),
+    }
+    feedback_rows = _rows_with_event(rows, "robot_feedback")
+    feedback_t = _time_axis(feedback_rows) if feedback_rows else np.array([], dtype=float)
+    unity_event_rows = _rows_with_event(rows, "unity_sample")
+    unity_event_t = _time_axis(unity_event_rows) if unity_event_rows else np.array([], dtype=float)
+    command_rows = _rows_with_event(rows, "ros_command")
+    arrival_rows = _rows_with_event(rows, "latency_arrival")
+    main_report["robot_feedback"] = {
+        "duration_rate": _duration_rate_from_t(feedback_t, len(feedback_rows)),
+        "robot_mode_counts": _counter(feedback_rows, "robot_mode"),
+        "error_status_counts": _counter(feedback_rows, "error_status"),
+        "nonzero_error_status_rows": sum(1 for row in feedback_rows if row.get("error_status") not in ("", "0", "0.0")),
+    }
+    main_report["commands"] = {
+        "count": len(command_rows),
+        "send_reason_counts": _counter(command_rows, "send_reason"),
+        "time_since_last_cmd_ms": _stats_dict(_column_values(command_rows, "time_since_last_cmd_ms"), "ms"),
+        "network_delay_ms": _stats_dict(_column_values(command_rows, "network_delay_ms"), "ms"),
+        "decision_delay_ms": _stats_dict(_column_values(command_rows, "decision_delay_ms"), "ms"),
+    }
+    main_report["latency_arrival"] = {
+        "count": len(arrival_rows),
+        "command_latency_ms": _stats_dict(_column_values(arrival_rows, "command_latency_ms"), "ms"),
+        "robot_response_ms": _stats_dict(_column_values(arrival_rows, "robot_response_ms"), "ms"),
+        "true_end_to_end_ms": _stats_dict(_column_values(arrival_rows, "true_end_to_end_ms"), "ms"),
+    }
+    main_report["accuracy"] = {
+        "final_error_rad": _stats_dict(_column_values(rows, "final_error_rad"), "rad"),
+        "max_joint_error_rad": _stats_dict(_column_values(rows, "max_joint_error_rad"), "rad"),
+        "match_tool_error_ros_cmd_to_robot_actual_mm": _stats_dict(_column_values(rows, "error_ros_cmd_tool_to_robot_actual_mm"), "mm"),
+        "robot_target_to_actual_error_mm": _stats_dict(_column_values(feedback_rows, "error_robot_tool_target_to_actual_mm"), "mm"),
+        "active_ros_cmd_to_actual_tool_error_mm": _stats_dict(_column_values(feedback_rows, "error_ros_cmd_tool_to_robot_actual_mm"), "mm"),
+    }
+    queue_backlog = _column_values(rows, "queue_backlog_rad")
+    pending = _column_values(rows, "pending_command_count")
+    stale_age = _column_values(rows, "unity_sample_age_ms")
+    main_report["anomalies"] = {
+        "stale_unity_sample_age_gt_100ms_rows": int(np.count_nonzero(stale_age[np.isfinite(stale_age)] > 100.0)),
+        "ambiguous_settle_rows": sum(1 for row in rows if _truthy(row.get("settle_match_ambiguous"))),
+        "pending_command_rows": int(np.count_nonzero(pending[np.isfinite(pending)] > 0)),
+        "max_pending_command_count": float(np.nanmax(pending)) if np.isfinite(pending).any() else None,
+        "queue_backlog_gt_0p01rad_rows": int(np.count_nonzero(queue_backlog[np.isfinite(queue_backlog)] > 0.01)),
+        "robot_internal_target_error_gt_10mm_rows": int(np.count_nonzero(_column_values(feedback_rows, "error_robot_tool_target_to_actual_mm")[np.isfinite(_column_values(feedback_rows, "error_robot_tool_target_to_actual_mm"))] > 10.0)) if feedback_rows else 0,
+    }
+    if unity_event_t.size:
+        before = t < float(np.min(unity_event_t))
+        after = t > float(np.max(unity_event_t))
+        main_report["unity_window_in_main"] = {
+            "main_rows_before_first_unity": int(np.count_nonzero(before)),
+            "sec_before_first_unity": float(np.min(unity_event_t) - np.min(t[np.isfinite(t)])) if np.isfinite(t).any() else None,
+            "main_rows_after_last_unity": int(np.count_nonzero(after)),
+            "sec_after_last_unity": float(np.max(t[np.isfinite(t)]) - np.max(unity_event_t)) if np.isfinite(t).any() else None,
+            "events_after_last_unity": dict(collections.Counter(_event_type(rows[i]) for i in np.flatnonzero(after))),
+        }
+    unity_report = {"file": _file_info(unity_path), "rows": len(unity_rows), "columns": len(unity_rows[0]) if unity_rows else 0}
+    if unity_rows:
+        unity_t = _column_values(unity_rows, "unity_send_ts")
+        if not np.isfinite(unity_t).any():
+            unity_t = _column_values(unity_rows, "controller_capture_ts")
+        seq = _column_values(unity_rows, "unity_seq_id")
+        valid_seq = seq[np.isfinite(seq)].astype(int)
+        seq_missing = 0
+        duplicates = 0
+        if valid_seq.size:
+            seq_missing = int((int(np.max(valid_seq)) - int(np.min(valid_seq)) + 1) - len(set(valid_seq.tolist())))
+            duplicates = int(valid_seq.size - len(set(valid_seq.tolist())))
+        main_seq = {_float(row.get("unity_seq_id")) for row in rows if row.get("unity_seq_id") not in (None, "")}
+        main_seq_int = {int(v) for v in main_seq if np.isfinite(v)}
+        unity_seq_int = set(valid_seq.tolist())
+        unity_report.update(
+            {
+                "duration_rate": _duration_rate_from_t(unity_t, len(unity_rows)),
+                "gap_ms": _gap_stats_from_t(unity_t),
+                "seq_min": int(np.min(valid_seq)) if valid_seq.size else None,
+                "seq_max": int(np.max(valid_seq)) if valid_seq.size else None,
+                "missing_seq": seq_missing,
+                "duplicates": duplicates,
+                "valid_true_rows": sum(1 for row in unity_rows if _truthy(row.get("is_valid", "true"))),
+                "control_mode_counts": _counter(unity_rows, "control_mode"),
+                "filter_status_counts": _counter(unity_rows, "unity_filter_status"),
+                "seq_cross_file_matched": len(main_seq_int & unity_seq_int),
+                "seq_cross_file_missing": len(unity_seq_int - main_seq_int),
+            }
+        )
+    return {"main": main_report, "unity": unity_report}
+
+
+def _write_all_metrics_csv(path: Path, report: dict, metrics: dict, plate_summaries: list[dict]) -> None:
+    with path.open("w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["section", "metric", "field", "value", "unit"])
+        for key, stat in metrics.items():
+            unit = stat.get("unit", "")
+            for field in ("count", "mean", "median", "p95", "p99", "min", "max"):
+                if field in stat:
+                    writer.writerow(["metric", key, field, _fmt(stat.get(field)), unit])
+        for section, data in report.items():
+            _write_flat_report_rows(writer, section, data)
+        for summary in plate_summaries:
+            for key, value in summary.items():
+                writer.writerow(["plate_view", summary.get("file", ""), key, _fmt(value), ""])
+
+
+def _write_flat_report_rows(writer, prefix: str, data) -> None:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            _write_flat_report_rows(writer, f"{prefix}.{key}", value)
+    else:
+        writer.writerow(["report", prefix, "value", _fmt(data), ""])
+
+
 def analyze_file(path: Path, out_root: Path | None = None) -> Path:
     rows = _read_csv(path)
     if not rows:
@@ -732,6 +1077,8 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
 
     out_dir = out_root or (path.parent / f"{path.stem}_analysis")
     out_dir.mkdir(parents=True, exist_ok=True)
+    unity_path = _unity_sample_path_for_main(path)
+    unity_rows = _read_csv(unity_path) if unity_path else []
 
     t = _time_axis(rows)
     joints = {layer: _fill_forward(_joint_matrix(rows, layer)) for layer in LAYERS}
@@ -853,6 +1200,11 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
         "report_tcp_views": out_dir / "report_tcp_path_views.png",
         "report_metrics_card": out_dir / "report_metrics_card.png",
         "report_poster_summary": out_dir / "report_poster_summary.png",
+        "plate_vr": out_dir / "Plot_VR_plate_clean_solid_kpi_peak.png",
+        "plate_unity_vs_ros": out_dir / "PLOT_UNITY_VS_ROS_plate_clean_solid_kpi_peak.png",
+        "plate_unity_vs_robot": out_dir / "PLOT_UNITY_VS_ROBOT_plate_clean_solid_kpi_peak.png",
+        "plate_ros_vs_robot": out_dir / "PLOT_ROS_VS_ROBOT_MANUAL_plate_clean_solid_kpi_peak.png",
+        "plate_contact_sheet": out_dir / "contact_sheet_plate_clean_solid.png",
     }
     _plot_joint_positions(t, joints, figures["joint_positions"])
     _plot_joint_error(t, joints, figures["joint_error"])
@@ -865,13 +1217,36 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
     _plot_report_joint_active(t, rows, joints, figures["report_joint_tracking"])
     _plot_report_tcp_views(t, rows, xyz, figures["report_tcp_views"], robot_tcp_source)
     _plot_report_metrics_card(metrics, figures["report_metrics_card"], robot_tcp_source)
+    plate_summaries = [
+        _plot_plate_pair(t, rows, xyz, "unity_raw", "robot", "Plot_VR", figures["plate_vr"]),
+        _plot_plate_pair(t, rows, xyz, "unity_compensated", "ros_cmd", "PLOT_UNITY_VS_ROS", figures["plate_unity_vs_ros"]),
+        _plot_plate_pair(t, rows, xyz, "unity_compensated", "robot", "PLOT_UNITY_VS_ROBOT", figures["plate_unity_vs_robot"]),
+        _plot_plate_pair(t, rows, xyz, "ros_cmd", "robot", "PLOT_ROS_VS_ROBOT_MANUAL", figures["plate_ros_vs_robot"]),
+    ]
+    _plot_plate_contact_sheet(figures, figures["plate_contact_sheet"])
+
+    report = _build_session_report(path, rows, t, unity_path, unity_rows)
 
     _write_cartesian_csv(out_dir / "cartesian_samples.csv", t, xyz)
     _save_summary_csv(out_dir / "summary_metrics.csv", metrics)
+    _write_plate_summary_csv(out_dir / "plate_clean_solid_summary.csv", plate_summaries)
+    _write_all_metrics_csv(out_dir / "summary_all_metrics.csv", report, metrics, plate_summaries)
     with (out_dir / "summary_metrics.json").open("w") as fh:
-        json.dump({"input": str(path), "event_counts": event_counts, "mode_counts": mode_counts, "metrics": metrics}, fh, indent=2)
+        json.dump(
+            {
+                "input": str(path),
+                "unity_input": str(unity_path) if unity_path else None,
+                "event_counts": event_counts,
+                "mode_counts": mode_counts,
+                "metrics": metrics,
+                "report": report,
+                "plate_summaries": plate_summaries,
+            },
+            fh,
+            indent=2,
+        )
 
-    _write_markdown_summary(out_dir / "summary.md", path, rows, event_counts, mode_counts, metrics, figures, robot_tcp_source)
+    _write_markdown_summary(out_dir / "summary.md", path, rows, event_counts, mode_counts, metrics, figures, robot_tcp_source, report, plate_summaries)
     return out_dir
 
 
@@ -887,19 +1262,142 @@ def _metric_line(metrics: dict, key: str, label: str) -> str:
     )
 
 
-def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_counts, metrics, figures, robot_tcp_source: str) -> None:
+def _value_line(label: str, value, unit: str = "") -> str:
+    suffix = f" {unit}" if unit else ""
+    return f"- {label}: {_fmt(value)}{suffix}"
+
+
+def _stat_line(report: dict, path_keys: tuple[str, ...], label: str, unit: str = "") -> str:
+    data = report
+    for key in path_keys:
+        data = data.get(key, {}) if isinstance(data, dict) else {}
+    if not isinstance(data, dict) or not data.get("count"):
+        return f"- {label}: no samples"
+    stat_unit = unit or data.get("unit", "")
+    return (
+        f"- {label}: n={data.get('count')}, mean {_fmt(data.get('mean'))} {stat_unit}, "
+        f"p50 {_fmt(data.get('p50', data.get('median')))} {stat_unit}, "
+        f"p95 {_fmt(data.get('p95'))} {stat_unit}, "
+        f"p99 {_fmt(data.get('p99'))} {stat_unit}, max {_fmt(data.get('max'))} {stat_unit}"
+    )
+
+
+def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_counts, metrics, figures, robot_tcp_source: str, report: dict, plate_summaries: list[dict]) -> None:
+    main = report.get("main", {})
+    unity = report.get("unity", {})
+    feedback = main.get("robot_feedback", {})
+    commands = main.get("commands", {})
+    latency = main.get("latency_arrival", {})
+    anomalies = main.get("anomalies", {})
+    unity_window = main.get("unity_window_in_main", {})
     lines = [
         "# Teleop Session Analysis",
         "",
+        "## Input Files",
+        "",
         f"- Input: `{source}`",
+        f"- Unity input: `{unity.get('file', {}).get('path', '')}`",
         f"- Rows: {len(rows)}",
         f"- Events: {event_counts}",
         f"- Operation modes: {mode_counts}",
         f"- Robot TCP source: {robot_tcp_source}",
         "",
+        "## Layer Flow",
+        "",
+        "- Layer 1 Unity sample: `/unity/teleop_sample` protocol rows from Unity controller/IK/filter output.",
+        "- Layer 2 Unity target: ROS receives valid Unity target and applies timing/compensation context.",
+        "- Layer 3 ROS command: adaptive gate converts target into robot command only when movement is needed.",
+        "- Layer 4 Dobot/MG400 command result: command ID/result and target-reached matching rows.",
+        "- Layer 5 Robot feedback: high-rate actual joint/tool/mode/error feedback from controller.",
+        "- Layer 6 Analysis/match: offline comparison of Unity target, ROS command, and robot actual TCP/joints.",
+        "",
+        "## Log Size / Rate",
+        "",
+        _value_line("Main rows", main.get("rows")),
+        _value_line("Main columns", main.get("columns")),
+        _value_line("Main duration", (main.get("duration_rate") or {}).get("duration_sec"), "s"),
+        _value_line("Main effective rate", (main.get("duration_rate") or {}).get("effective_hz"), "Hz"),
+        _stat_line(main, ("gap_ms",), "Main row gap", "ms"),
+        _value_line("Robot feedback rows", event_counts.get("robot_feedback", 0)),
+        _value_line("Robot feedback effective rate", (feedback.get("duration_rate") or {}).get("effective_hz"), "Hz"),
+        _value_line("Unity rows", unity.get("rows")),
+        _value_line("Unity effective rate", (unity.get("duration_rate") or {}).get("effective_hz"), "Hz"),
+        _stat_line(unity, ("gap_ms",), "Unity sample gap", "ms"),
+        "",
+        "## Event Counts",
+        "",
+    ]
+    lines.extend(f"- {key}: {value}" for key, value in event_counts.items())
+    lines.extend(
+        [
+            "",
+            "## Unity Integrity",
+            "",
+            _value_line("Unity seq min", unity.get("seq_min")),
+            _value_line("Unity seq max", unity.get("seq_max")),
+            _value_line("Unity missing seq", unity.get("missing_seq")),
+            _value_line("Unity duplicate seq", unity.get("duplicates")),
+            _value_line("Unity valid true rows", unity.get("valid_true_rows")),
+            _value_line("Unity seq matched across files", unity.get("seq_cross_file_matched")),
+            _value_line("Unity seq missing across files", unity.get("seq_cross_file_missing")),
+            f"- Unity control modes: {unity.get('control_mode_counts', {})}",
+            f"- Unity filter statuses: {unity.get('filter_status_counts', {})}",
+            "",
+            "## Command / Latency",
+            "",
+            _value_line("ROS commands", commands.get("count")),
+            f"- Send reasons: {commands.get('send_reason_counts', {})}",
+            _stat_line(commands, ("time_since_last_cmd_ms",), "Command gap / time since last command", "ms"),
+            _stat_line(commands, ("network_delay_ms",), "Network / Unity-to-ROS excess delay", "ms"),
+            _stat_line(commands, ("decision_delay_ms",), "ROS decision delay", "ms"),
+            _value_line("Latency-arrival rows", latency.get("count")),
+            _stat_line(latency, ("command_latency_ms",), "Command latency", "ms"),
+            _stat_line(latency, ("robot_response_ms",), "Robot response", "ms"),
+            _stat_line(latency, ("true_end_to_end_ms",), "True end-to-end", "ms"),
+            "",
+            "## Accuracy / Error",
+            "",
+            _stat_line(main, ("accuracy", "final_error_rad"), "Final/match joint error", "rad"),
+            _stat_line(main, ("accuracy", "max_joint_error_rad"), "Max joint error", "rad"),
+            _stat_line(main, ("accuracy", "match_tool_error_ros_cmd_to_robot_actual_mm"), "Match TCP error ROS command to robot actual", "mm"),
+            _stat_line(main, ("accuracy", "robot_target_to_actual_error_mm"), "Robot internal target-to-actual TCP error", "mm"),
+            _stat_line(main, ("accuracy", "active_ros_cmd_to_actual_tool_error_mm"), "Active ROS command-to-actual TCP error", "mm"),
+            "",
+            "## Status / Anomalies",
+            "",
+            f"- Robot mode counts: {feedback.get('robot_mode_counts', {})}",
+            f"- Error status counts: {feedback.get('error_status_counts', {})}",
+            _value_line("Nonzero error_status rows", feedback.get("nonzero_error_status_rows")),
+            _value_line("Stale Unity sample age >100ms rows", anomalies.get("stale_unity_sample_age_gt_100ms_rows")),
+            _value_line("Ambiguous settle rows", anomalies.get("ambiguous_settle_rows")),
+            _value_line("Pending command rows", anomalies.get("pending_command_rows")),
+            _value_line("Max pending command count", anomalies.get("max_pending_command_count")),
+            _value_line("Queue backlog >0.01rad rows", anomalies.get("queue_backlog_gt_0p01rad_rows")),
+            _value_line("Robot internal target error >10mm rows", anomalies.get("robot_internal_target_error_gt_10mm_rows")),
+            _value_line("Rows before first Unity event", unity_window.get("main_rows_before_first_unity")),
+            _value_line("Seconds before first Unity event", unity_window.get("sec_before_first_unity"), "s"),
+            _value_line("Rows after last Unity event", unity_window.get("main_rows_after_last_unity")),
+            _value_line("Seconds after last Unity event", unity_window.get("sec_after_last_unity"), "s"),
+            f"- Events after last Unity event: {unity_window.get('events_after_last_unity', {})}",
+            "",
+            "## Plate-View KPI Plots",
+            "",
+        ]
+    )
+    for item in plate_summaries:
+        lines.append(
+            f"- {item.get('file')}: rows={item.get('row_count')}, "
+            f"points>KPI={item.get('points_over_kpi_5mm')}, "
+            f"peak={_fmt(item.get('peak_vector_error_mm'))} mm, "
+            f"peak dXYZ=({_fmt(item.get('peak_dx_mm'))}, {_fmt(item.get('peak_dy_mm'))}, {_fmt(item.get('peak_dz_mm'))}) mm"
+        )
+    lines.extend(
+        [
+            "",
         "## Poster Metrics",
         "",
-        _metric_line(metrics, "network_delay_ms", "Unity -> ROS network delay"),
+        _metric_line(metrics, "network_delay_ms", "Unity -> ROS excess delay after clock calibration"),
+        "- Note: Unity timestamps are Unity runtime seconds, so this is delay above the calibrated clock floor, not absolute one-way network latency.",
         _metric_line(metrics, "decision_delay_ms", "ROS decision delay"),
         _metric_line(metrics, "robot_response_ms", "ROS command -> robot motion response"),
         _metric_line(metrics, "true_end_to_end_ms", "Unity -> robot target reached"),
@@ -915,9 +1413,18 @@ def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_c
         _metric_line(metrics, "robot_max_joint_speed", "Robot max joint speed"),
         _metric_line(metrics, "robot_tcp_z_range", "Robot TCP Z travel range"),
         "",
+        "## Report-Ready Tables",
+        "",
+        "- `summary_all_metrics.csv`: flattened table with all layer numbers for reports.",
+        "- `summary_metrics.json`: structured JSON with full report, metrics, and plate summaries.",
+        "- `summary_metrics.csv`: compact metric table.",
+        "- `plate_clean_solid_summary.csv`: KPI/peak table matching the old plate-view workflow.",
+        "- `cartesian_samples.csv`: time-aligned XYZ samples and Cartesian errors.",
+        "",
         "## Generated Figures",
         "",
-    ]
+        ]
+    )
     for label, fig_path in figures.items():
         lines.append(f"- {label}: `{fig_path.name}`")
     lines.append("")

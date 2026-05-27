@@ -71,35 +71,11 @@ commits on top, oldest first:
 
 ## 4. What's deferred — known smells (do NOT delete yet)
 
-Each item is intentionally left enabled because we don't yet have proof
-that no consumer (Unity build, mock, monitor GUI, an analyser, an
-operator's launch file) depends on it. Each entry says **what would
-prove it dead** so a future cleanup pass can justify removal.
+The legacy Unity teach callbacks and legacy teach actions were removed from
+the active runtime contract. The remaining items below are still wired and
+need their own proof before deletion.
 
-### 4.1 Three legacy Unity teach callbacks (in `vr_teleop_node.py`)
-- `_teach_status_callback` (subscribes `/unity/teach_status`)
-- `_traj_data_callback` (subscribes `/unity/trajectory_data`)
-- `_joint_trajectory_callback` (subscribes `/mg400/joint_trajectory_controller/command`)
-
-Their docstrings already say "DEPRECATED in favour of `/teach/job_request`".
-Unity's modern code path uses the job_request channel, but the old topics
-are still published by older Unity builds and some test bench fixtures.
-
-**Proof of death needed**: confirm with the Unity team that no shipping
-build publishes to `/unity/teach_status` or `/unity/trajectory_data` for
-one full release. Capture a `ros2 bag record` from a real demo and grep
-for the topic names — must be empty.
-
-### 4.2 `record_start`, `record_stop`, `preview_sim` actions (in `teach_job_handler.py`)
-
-The handler's own docstring admits "Unity owns capture today", yet the
-actions are wired and tested. They exist so a host-side recorder can be
-re-introduced (multi-robot architecture work may want it).
-
-**Proof of death needed**: AGENTS.md "Removal Pass" can drop them once the
-multi-robot work confirms Unity stays the recorder of record.
-
-### 4.3 `FAST_REPEAT_*` + `fastest_path_repeat` profile (in `motion_config.py` + `trajectory_recorder.py`)
+### 4.1 `FAST_REPEAT_*` + `fastest_path_repeat` profile (in `motion_config.py` + `trajectory_recorder.py`)
 
 The `PLAYBACK_EXECUTION_PROFILE = "preserve_timing"` default never touches
 the dormant branch. The fast-repeat profile reads a parallel set of
@@ -111,7 +87,7 @@ historical "play it as fast as possible" path.
 "fastest_path_repeat"` payload appears in any saved Unity demo log or in
 any tool under `tools/`.
 
-### 4.4 `USE_MIXED_PRIMITIVES = False` default
+### 4.2 `USE_MIXED_PRIMITIVES = False` default
 
 The mixed-primitive Cartesian compile path (LINE → MovL, ARC → Arc,
 GENERAL → JointMovJ chain) is fully verified on real hardware. The flag
@@ -173,21 +149,17 @@ Topics published / subscribed by `vr_teleop_node`:
 |---|---|---|---|
 | `/unity/joint_cmd` | sub | active | Unity → realtime joint targets |
 | `/unity/speed_factor` | sub | active | Unity → SpeedFactor 0-100% |
-| `/teach/job_request` | sub | active | Unity → typed teach action (compile/preview_sim/execute/export/stop/record_*) |
+| `/teach/job_request` | sub | active | Unity → typed teach action (compile/execute/tune/export/stop) |
 | `/teach/job_status` | pub | active | ROS → Unity job lifecycle |
 | `/teach/job_artifact` | pub | active | ROS → Unity compiled plan / preview frames |
-| `/unity/teach_status` | sub | **LEGACY 4.1** | older Unity teach control surface |
-| `/unity/trajectory_data` | sub | **LEGACY 4.1** | older Unity trajectory dump |
-| `/mg400/joint_trajectory_controller/command` | sub | **LEGACY 4.1** | older JointTrajectory-style publisher |
 | `/vr/suction_cmd` | sub | active | Unity → vacuum gripper bool |
 | `/mg400/light_cmd` | sub | active | Unity → digital output light |
 | `/joint_states` | pub | active | RViz feedback |
 | `/mg400/robot_mode` | pub | active | Int32 enable/running/error |
 | `/mg400/error_status` | pub | active | Int32 controller error |
 
-`teach_job_request.action` values currently routed: `compile`, `preview_sim`
-(LEGACY 4.2), `execute`, `export`, `stop`, `record_start` (LEGACY 4.2),
-`record_stop` (LEGACY 4.2).
+`teach_job_request.action` values currently routed: `compile`, `execute`,
+`tune`, `export`, `stop`.
 
 ## 7. How to run
 

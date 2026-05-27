@@ -22,17 +22,13 @@ std_msgs_msg.Bool = _DummyMsg
 std_msgs_msg.Int32MultiArray = _DummyMsg
 std_msgs_msg.Int64 = _DummyMsg
 std_msgs_msg.Int32 = _DummyMsg
-trajectory_msgs_msg.JointTrajectory = _DummyMsg
 
 sensor_msgs.msg = sensor_msgs_msg
 std_msgs.msg = std_msgs_msg
-trajectory_msgs.msg = trajectory_msgs_msg
 sys.modules["sensor_msgs"] = sensor_msgs
 sys.modules["sensor_msgs.msg"] = sensor_msgs_msg
 sys.modules["std_msgs"] = std_msgs
 sys.modules["std_msgs.msg"] = std_msgs_msg
-sys.modules["trajectory_msgs"] = trajectory_msgs
-sys.modules["trajectory_msgs.msg"] = trajectory_msgs_msg
 
 from mg400_controller.common.config.motion_config import (  # noqa: E402
     DASHBOARD_CMD_TOPIC,
@@ -43,8 +39,7 @@ from mg400_controller.common.config.motion_config import (  # noqa: E402
     TEACH_JOB_REQUEST_TOPIC,
     TEACH_JOB_STATUS_TOPIC,
     TOOL_ACTUAL_TOPIC,
-    TRAJECTORY_DATA_TOPIC,
-    UNITY_TRAJECTORY_TOPIC,
+    UNITY_TELEOP_SAMPLE_TOPIC,
     UNITY_PONG_TOPIC,
     UNITY_SPEED_FACTOR_TOPIC,
     UNITY_TOPIC,
@@ -108,9 +103,6 @@ class TeleopRosWiringTest(unittest.TestCase):
             "light_callback": lambda msg: None,
             "scene_safety_callback": lambda msg: None,
             "dashboard_cmd_callback": lambda msg: None,
-            "teach_status_callback": lambda msg: None,
-            "traj_data_callback": lambda msg: None,
-            "joint_trajectory_callback": lambda msg: None,
             "speed_factor_callback": lambda msg: None,
             "teach_job_request_callback": lambda msg: None,
         }
@@ -119,12 +111,11 @@ class TeleopRosWiringTest(unittest.TestCase):
 
         self.assertEqual(subscriptions.pong.topic, UNITY_PONG_TOPIC)
         self.assertEqual(subscriptions.dashboard_cmd.topic, DASHBOARD_CMD_TOPIC)
-        self.assertEqual(subscriptions.traj_data.topic, TRAJECTORY_DATA_TOPIC)
-        self.assertEqual(subscriptions.unity_trajectory.topic, UNITY_TRAJECTORY_TOPIC)
+        self.assertEqual(subscriptions.unity_teleop_sample.topic, UNITY_TELEOP_SAMPLE_TOPIC)
         self.assertEqual(subscriptions.speed_factor.topic, UNITY_SPEED_FACTOR_TOPIC)
         self.assertEqual(subscriptions.teach_job_request.topic, TEACH_JOB_REQUEST_TOPIC)
         self.assertEqual(subscriptions.scene_safety_enabled.topic, SCENE_SAFETY_ENABLE_TOPIC)
-        self.assertEqual(len(node.subscription_calls), 10)
+        self.assertEqual(len(node.subscription_calls), 8)
 
     def test_attach_unity_subscription_uses_unity_topic(self):
         node = FakeNode()
@@ -138,13 +129,13 @@ class TeleopRosWiringTest(unittest.TestCase):
     def test_topic_parameters_can_override_unity_contract_topics(self):
         node = FakeNode()
         node.parameters["topics.unity_joint_cmd"] = "/robot_a/unity/joint_cmd"
-        node.parameters["topics.unity_trajectory"] = "/robot_a/program"
+        node.parameters["topics.unity_teleop_sample"] = "/robot_a/unity/teleop_sample"
         node.parameters["topics.suction"] = "/robot_a/tool/suction"
 
         topics = declare_topic_parameters(node)
 
         self.assertEqual(topics.unity_joint_cmd, "/robot_a/unity/joint_cmd")
-        self.assertEqual(topics.unity_trajectory, "/robot_a/program")
+        self.assertEqual(topics.unity_teleop_sample, "/robot_a/unity/teleop_sample")
         self.assertEqual(topics.suction, "/robot_a/tool/suction")
 
     def test_custom_topics_are_used_by_subscriptions(self):
@@ -155,15 +146,12 @@ class TeleopRosWiringTest(unittest.TestCase):
             "light_callback": lambda msg: None,
             "scene_safety_callback": lambda msg: None,
             "dashboard_cmd_callback": lambda msg: None,
-            "teach_status_callback": lambda msg: None,
-            "traj_data_callback": lambda msg: None,
-            "joint_trajectory_callback": lambda msg: None,
             "speed_factor_callback": lambda msg: None,
             "teach_job_request_callback": lambda msg: None,
         }
         topics = TeleopTopicConfig(
             unity_joint_cmd="/robot_a/unity/joint_cmd",
-            unity_trajectory="/robot_a/program",
+            unity_teleop_sample="/robot_a/unity/teleop_sample",
             unity_speed_factor="/robot_a/speed_factor",
             suction="/robot_a/tool/suction",
         )
@@ -172,7 +160,7 @@ class TeleopRosWiringTest(unittest.TestCase):
         unity_subscription = attach_unity_subscription(node, lambda msg: None, object(), topics=topics)
 
         self.assertEqual(subscriptions.suction.topic, "/robot_a/tool/suction")
-        self.assertEqual(subscriptions.unity_trajectory.topic, "/robot_a/program")
+        self.assertEqual(subscriptions.unity_teleop_sample.topic, "/robot_a/unity/teleop_sample")
         self.assertEqual(subscriptions.speed_factor.topic, "/robot_a/speed_factor")
         self.assertEqual(unity_subscription.topic, "/robot_a/unity/joint_cmd")
 

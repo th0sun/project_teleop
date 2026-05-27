@@ -45,12 +45,10 @@ from typing import Any, Dict, List, Optional
 # ``mg400_controller.common.trajectory.teach_job_handler.VALID_ACTIONS``.
 VALID_ACTIONS = (
     "compile",
-    "preview_sim",
     "execute",
+    "tune",
     "export",
     "stop",
-    "record_start",
-    "record_stop",
 )
 
 DEFAULT_TOPIC = "/teach/job_request"
@@ -189,7 +187,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--trajectory",
         type=Path,
         help="Path to a Unity-format trajectory JSON.  Required for compile / "
-             "preview_sim / execute / export.",
+             "execute / export.",
     )
     parser.add_argument(
         "--action",
@@ -249,7 +247,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    actions_needing_trajectory = {"compile", "preview_sim", "execute", "export"}
+    actions_needing_trajectory = {"compile", "execute", "export"}
     trajectory: Optional[Dict[str, Any]] = None
     if args.trajectory is not None:
         trajectory = _load_trajectory(args.trajectory.expanduser().resolve())

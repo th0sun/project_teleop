@@ -41,10 +41,8 @@ class TeleopTopicConfig:
     suction: str = motion_config.SUCTION_TOPIC
     light: str = motion_config.LIGHT_TOPIC
     dashboard_cmd: str = motion_config.DASHBOARD_CMD_TOPIC
-    teach_status: str = motion_config.TEACH_STATUS_TOPIC
-    trajectory_data: str = motion_config.TRAJECTORY_DATA_TOPIC
-    unity_trajectory: str = motion_config.UNITY_TRAJECTORY_TOPIC
     unity_joint_cmd: str = motion_config.UNITY_TOPIC
+    unity_teleop_sample: str = motion_config.UNITY_TELEOP_SAMPLE_TOPIC
     unity_speed_factor: str = motion_config.UNITY_SPEED_FACTOR_TOPIC
     teach_job_request: str = motion_config.TEACH_JOB_REQUEST_TOPIC
     teach_job_status: str = motion_config.TEACH_JOB_STATUS_TOPIC

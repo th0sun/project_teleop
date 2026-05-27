@@ -8,7 +8,6 @@ from mg400_controller.common.trajectory.trajectory_recorder import (
     PREVIEW_START_TOLERANCE_DEG,
     compiled_playback_plan_to_dict,
     TrajectoryRecorder,
-    frames_from_joint_trajectory_msg,
 )
 from mg400_controller.common.utils.kinematics import KinematicsCalculator
 
@@ -823,33 +822,6 @@ class TrajectoryRecorderTest(unittest.TestCase):
         queued = [event for event in events if event[0] == "waypoint_queued"]
         self.assertAlmostEqual(queued[0][1]["original_target_time_s"], 0.05)
         self.assertAlmostEqual(queued[0][1]["target_time_s"], 0.18, places=5)
-
-    def test_converts_unity_joint_trajectory_msg_to_internal_degree_frames(self):
-        class Duration:
-            def __init__(self, sec, nanosec):
-                self.sec = sec
-                self.nanosec = nanosec
-
-        class Point:
-            def __init__(self, positions, sec, nanosec):
-                self.positions = positions
-                self.time_from_start = Duration(sec, nanosec)
-
-        msg = type("Msg", (), {})()
-        msg.points = [
-            Point(np.radians([0.0, 0.0, 0.0, 0.0]), 0, 0),
-            Point(np.radians([10.0, -5.0, 0.0, 0.0]), 0, 500_000_000),
-            Point(np.radians([20.0, -10.0, 0.0, 0.0]), 1, 0),
-        ]
-
-        frames = frames_from_joint_trajectory_msg(msg)
-
-        self.assertEqual(len(frames), 3)
-        self.assertEqual(frames[0]["timeStamp"], 0.0)
-        self.assertEqual(frames[1]["timeStamp"], 0.5)
-        self.assertEqual(frames[2]["j1"], 20.0)
-        self.assertEqual(frames[2]["j2"], -10.0)
-
 
 if __name__ == "__main__":
     unittest.main()

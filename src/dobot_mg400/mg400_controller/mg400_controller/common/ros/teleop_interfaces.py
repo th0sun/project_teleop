@@ -12,7 +12,6 @@ from dataclasses import dataclass
 
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String, Float64MultiArray, Bool, Int32MultiArray, Int64, Int32
-from trajectory_msgs.msg import JointTrajectory
 
 from mg400_controller.common.ros.topic_config import (
     DEFAULT_TELEOP_TOPICS,
@@ -46,13 +45,11 @@ class TeleopPublishers:
 @dataclass
 class TeleopSubscriptions:
     pong: object
+    unity_teleop_sample: object
     suction: object
     lights: object
     scene_safety_enabled: object
     dashboard_cmd: object
-    teach_status: object
-    traj_data: object
-    unity_trajectory: object
     speed_factor: object
     teach_job_request: object
     unity: object = None
@@ -90,15 +87,22 @@ def create_subscriptions(
     light_callback,
     scene_safety_callback,
     dashboard_cmd_callback,
-    teach_status_callback,
-    traj_data_callback,
-    joint_trajectory_callback,
     speed_factor_callback,
     teach_job_request_callback,
+    unity_teleop_sample_callback=None,
     topics: TeleopTopicConfig = DEFAULT_TELEOP_TOPICS,
 ):
+    if unity_teleop_sample_callback is None:
+        unity_teleop_sample_callback = lambda msg: None
+
     return TeleopSubscriptions(
         pong=node.create_subscription(String, topics.unity_pong, unity_pong_callback, 10),
+        unity_teleop_sample=node.create_subscription(
+            String,
+            topics.unity_teleop_sample,
+            unity_teleop_sample_callback,
+            512,
+        ),
         suction=node.create_subscription(Bool, topics.suction, suction_callback, 10),
         lights=node.create_subscription(Int32MultiArray, topics.light, light_callback, 10),
         scene_safety_enabled=node.create_subscription(
@@ -111,24 +115,6 @@ def create_subscriptions(
             String,
             topics.dashboard_cmd,
             dashboard_cmd_callback,
-            10,
-        ),
-        teach_status=node.create_subscription(
-            String,
-            topics.teach_status,
-            teach_status_callback,
-            10,
-        ),
-        traj_data=node.create_subscription(
-            String,
-            topics.trajectory_data,
-            traj_data_callback,
-            10,
-        ),
-        unity_trajectory=node.create_subscription(
-            JointTrajectory,
-            topics.unity_trajectory,
-            joint_trajectory_callback,
             10,
         ),
         speed_factor=node.create_subscription(

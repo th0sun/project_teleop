@@ -12,7 +12,12 @@ import time
 import uuid
 from typing import Optional, Callable, List
 
-from core.unity_tcp_bridge import UnityTcpBridge, active_joint_positions_deg
+from core.unity_tcp_bridge import (
+    UnityTcpBridge,
+    active_joint_positions_deg,
+    build_teleop_sample_payload,
+    encode_unity_joint_frame_id,
+)
 
 try:
     import rclpy
@@ -48,6 +53,8 @@ class ROSBridge:
         self._thread: Optional[threading.Thread] = None
         
         self._tcp_bridge: Optional[UnityTcpBridge] = None
+        self.teleop_session_id = f"mac-sim-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        self._unity_seq_id = 0
         self.connected = False
 
     # ── Public API ───────────────────────────────────────────────────────────
@@ -111,16 +118,34 @@ class ROSBridge:
         consumes sensor_msgs/JointState positions in radians.
         """
         if self._tcp_bridge:
-            self._tcp_bridge.publish_joint_cmd(joints_deg)
-            return
+            return bool(self._tcp_bridge.publish_joint_cmd(joints_deg))
             
         if not self.connected or self._node is None:
-            return
+            return False
+        self._unity_seq_id += 1
+        timestamp = float(time.time())
         msg = JointState()
         msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.header.frame_id = encode_unity_joint_frame_id(
+            self.teleop_session_id,
+            self._unity_seq_id,
+        )
         msg.name = ['joint1', 'joint2', 'joint3', 'joint4']
         msg.position = [math.radians(float(j)) for j in joints_deg[:4]]
+        sample = String()
+        sample.data = json.dumps(
+            build_teleop_sample_payload(
+                msg.position,
+                session_id=self.teleop_session_id,
+                unity_seq_id=self._unity_seq_id,
+                timestamp=timestamp,
+            ),
+            separators=(',', ':'),
+            sort_keys=True,
+        )
+        self._node.pub_teleop_sample.publish(sample)
         self._node.pub_joint_cmd.publish(msg)
+        return True
 
     def publish_dashboard_cmd(self, cmd: str):
         """Publish a raw dashboard command string, e.g. 'EnableRobot()'."""
@@ -219,7 +244,9 @@ if _ROS_AVAILABLE:
 
             # Publishers
             self.pub_joint_cmd    = self.create_publisher(JointState,
-                                        '/unity/joint_cmd', 10)
+                                        '/unity/joint_cmd', 100)
+            self.pub_teleop_sample = self.create_publisher(String,
+                                        '/unity/teleop_sample', 512)
             self.pub_dashboard    = self.create_publisher(String,
                                         '/teleop/dashboard_cmd', 10)
             self.pub_control_mode = self.create_publisher(String,

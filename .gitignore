@@ -25,4 +25,16 @@ __pycache__/
 *.swp
 *~
 
+# Xcode / mac_app build artifacts
+tools/mac_app/build/
+tools/mac_app/**/Objects-normal/
+tools/mac_app/**/DerivedSources/
+tools/mac_app/**/DerivedData/
+tools/mac_app/**/*.hmap
+tools/mac_app/**/*.dia
+tools/mac_app/**/*.LinkFileList
+tools/mac_app/**/*.swiftmodule/
+tools/mac_app/**/xcuserdata/
+tools/mac_app/**/*.xcuserdatad/
+
 # External dependencies

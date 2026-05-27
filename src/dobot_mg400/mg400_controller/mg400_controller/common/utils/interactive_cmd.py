@@ -67,7 +67,14 @@ class InteractiveCommandHandler:
         while not self.stop_event.is_set():
             try:
                 cmd = input().strip().lower()
+            except EOFError:
+                self.logger.info("Interactive stdin closed; keyboard commands disabled")
+                break
+            except Exception as e:
+                self.logger.error(f"Interactive command error: {e}")
+                continue
                 
+            try:
                 if cmd == 'q':
                     self.logger.info("👋 Quit requested")
                     self.stop_event.set()

@@ -59,6 +59,16 @@ REALTIME_SPEEDJ_MAX = 100         # % - cmd Δ at MAX_RAD uses this SpeedJ
 REALTIME_ACCJ_MIN = 25            # % - matches SpeedJ to keep ramp shape consistent
 REALTIME_ACCJ_MAX = 100           # %
 REALTIME_CP = 80                  # CP for live teleop commands (matches CP_VALUE)
+REALTIME_COMMAND_ID_RESPONSE_TIMEOUT_SEC = 0.002  # Bounded wait for port-30003 command id
+UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC = 0.5  # Stop direct Unity control if JSON samples stop.
+UNITY_JOINT_CMD_STALE_DROP_SEC = 0.25  # Drop stale live joint targets instead of chasing queue tails.
+
+# Diagnostics only: "passed near" matching for every queued realtime command.
+# This is deliberately separate from settled-arrival logging because CP/blending
+# can pass through a waypoint without stopping at it.
+COMMAND_PASS_NEAR_NORM_TOLERANCE_RAD = 0.01      # ~0.57 deg 4J vector norm
+COMMAND_PASS_NEAR_TOOL_XYZ_TOLERANCE_MM = 5.0    # includes current ROS/Dobot tool-frame offset
+COMMAND_PASS_NEAR_TOOL_R_TOLERANCE_DEG = 1.0
 
 # (DYNAMIC_PROXIMITY_* legacy aliases removed — no remaining consumers after
 # the adaptive controller refactor.  If a downstream tool still imports them,
@@ -78,6 +88,7 @@ VALID_PER_JOINT_LIMIT = 0.01     # rad (~0.6°) - All joints must be within this
 
 # 📡 ROS Topics
 UNITY_TOPIC = "/unity/joint_cmd"  # รับคำสั่งจาก Unity/VR
+UNITY_TELEOP_SAMPLE_TOPIC = "/unity/teleop_sample"  # std_msgs/String JSON trace sample
 UNITY_SPEED_FACTOR_TOPIC = "/unity/speed_factor"
 RVIZ_TOPIC  = "/joint_states"     # ส่งสถานะไปแสดงใน RViz
 DEBUG_TOPIC = "/teleop/debug"     # Debug messages
@@ -91,14 +102,10 @@ SENT_COMMAND_TOPIC = "/teleop/sent_command"
 UNITY_XYZ_TOPIC = "/teleop/unity_xyz"
 PLAYBACK_UNITY_TOPIC = "/teleop/playback_unity"
 TRAJ_PREVIEW_TOPIC = "/teleop/traj_preview"
-TEACH_STATUS_TOPIC = "/unity/teach_status"
-TRAJECTORY_DATA_TOPIC = "/unity/trajectory_data"
-UNITY_TRAJECTORY_TOPIC = "/mg400/joint_trajectory_controller/command"
 # Job-request contract: explicit teach-and-repeat job submission channel.
-# Replaces the legacy "publish JointTrajectory == execute now" behaviour with a
-# typed action enum (compile / preview_sim / execute / export / stop / record_*)
-# so the ROS adapter can decide between dry compile, simulator preview, real
-# robot execute, or artifact export without overloading topic semantics.
+# The production Unity scene uses this channel for compile / execute / tune /
+# export / stop. Legacy teach topics were removed from the runtime wiring so
+# there is one teach-repeat command path to reason about.
 TEACH_JOB_REQUEST_TOPIC = "/teach/job_request"
 TEACH_JOB_STATUS_TOPIC = "/teach/job_status"
 TEACH_JOB_ARTIFACT_TOPIC = "/teach/job_artifact"

@@ -149,13 +149,18 @@ def parse_feedback_packet(
         return None
 
     q_actual = tuple(float(value) for value in record["QActual"][:4])
-    if test_value == 0 and sum(abs(value) for value in q_actual) < 0.000001:
+    robot_mode = int(record["RobotMode"])
+    if (
+        test_value == 0
+        and robot_mode == 0
+        and sum(abs(value) for value in q_actual) < 0.000001
+    ):
         return None
 
     return FeedbackSnapshot(
         q_actual_deg=q_actual,
         q_target_deg=tuple(float(value) for value in record["QTarget"][:4]),
-        robot_mode=int(record["RobotMode"]),
+        robot_mode=robot_mode,
         digital_inputs=int(record["DigitalInputs"]),
         digital_outputs=int(record["DigitalOutputs"]),
         speed_scaling=float(record["SpeedScaling"]),

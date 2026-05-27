@@ -5,5 +5,4 @@ from .trajectory_recorder import (  # noqa: F401
     CompiledPlaybackPlan,
     TrajectoryRecorder,
     compiled_playback_plan_to_dict,
-    frames_from_joint_trajectory_msg,
 )

@@ -20,7 +20,7 @@ JobRequest schema (JSON over ``std_msgs/String``)::
 
     {
       "job_id": "uuid-v4",
-      "action": "compile|execute|tune|export|stop|record_start|record_stop",
+      "action": "compile|execute|tune|export|stop",
       "target": "mg400" | "robot_a" | ...,
       "trajectory": {
         "filename": "...",
@@ -63,36 +63,23 @@ from mg400_controller.common.trajectory.trajectory_recorder import (
 
 
 # ── Action constants (string-typed enum) ─────────────────────────────────────
-# LEGACY (2026-05): ``preview_sim``, ``record_start`` and ``record_stop``
-# are kept wired and tested but the operator-facing flow on Unity now uses
-# ``compile`` + ``execute`` only.  See AGENTS.md §4.2 for the proof-of-
-# death checklist.  Do NOT remove these constants in a refactor pass — a
-# future ADR ("Removal Pass v1") owns that decision.
 ACTION_COMPILE = "compile"
-ACTION_PREVIEW_SIM = "preview_sim"        # LEGACY 4.2
 ACTION_EXECUTE = "execute"
 ACTION_TUNE = "tune"
 ACTION_EXPORT = "export"
 ACTION_STOP = "stop"
-ACTION_RECORD_START = "record_start"      # LEGACY 4.2
-ACTION_RECORD_STOP = "record_stop"        # LEGACY 4.2
 
 VALID_ACTIONS = frozenset({
     ACTION_COMPILE,
-    ACTION_PREVIEW_SIM,
     ACTION_EXECUTE,
     ACTION_TUNE,
     ACTION_EXPORT,
     ACTION_STOP,
-    ACTION_RECORD_START,
-    ACTION_RECORD_STOP,
 })
 
 # Stages used in JobStatus.stage.
 STAGE_RECEIVED = "received"
 STAGE_COMPILED = "compiled"
-STAGE_PREVIEW_READY = "preview_ready"
-STAGE_PREVIEW_STARTED = "preview_started"
 STAGE_EXECUTING = "executing"
 STAGE_TUNED = "tuned"
 STAGE_DONE = "done"
@@ -231,21 +218,11 @@ class TeachJobHandler:
     The handler keeps the request boundary explicit:
     * ``compile`` runs the trajectory through the recorder's compile-only path
       and returns a JSON artifact.  Robot is **not** moved.
-    * ``preview_sim`` is **safety-gated**: until a dedicated sim backend is
-      wired in, it is treated as compile-only.  The recorder is given the
-      trajectory, the compiled artifact is published on ``/teach/job_artifact``
-      and ``stage="preview_ready"`` is emitted, but **no motion command is ever
-      sent to the real robot**.  This prevents the action whose name says
-      "sim" from accidentally driving the MG400.  Once a real sim adapter
-      lands it can be wired through this same code path without a contract
-      change.
     * ``execute`` requires real-robot consent (see ``allow_real_execute_fn``)
       and starts the playback worker.
+    * ``tune`` updates playback tuning while a job is running.
     * ``export`` writes the compiled artifact to disk for inspection.
-    * ``stop`` aborts any running playback or recording.
-    * ``record_start`` / ``record_stop`` toggle the host-side recorder if the
-      caller wants ROS to capture from `/unity/joint_cmd`.  Unity owns capture
-      today, but contract still exposes the hook.
+    * ``stop`` aborts any running playback.
     """
 
     def __init__(
@@ -308,8 +285,6 @@ class TeachJobHandler:
         try:
             if request.action == ACTION_COMPILE:
                 return self._handle_compile(request)
-            if request.action == ACTION_PREVIEW_SIM:
-                return self._handle_preview_sim(request)
             if request.action == ACTION_EXECUTE:
                 return self._handle_play(request, sim=False)
             if request.action == ACTION_TUNE:
@@ -318,10 +293,6 @@ class TeachJobHandler:
                 return self._handle_export(request)
             if request.action == ACTION_STOP:
                 return self._handle_stop(request)
-            if request.action == ACTION_RECORD_START:
-                return self._handle_record_start(request)
-            if request.action == ACTION_RECORD_STOP:
-                return self._handle_record_stop(request)
         except Exception as exc:  # pragma: no cover - defensive
             self._log.error(f"Unhandled error in teach job '{request.action}': {exc}")
             return self._fail(request, ERR_BAD_PAYLOAD, str(exc))
@@ -372,67 +343,11 @@ class TeachJobHandler:
             },
         )
 
-    def _handle_preview_sim(self, request: JobRequest) -> JobStatus:
-        """Compile-only safety path for ``preview_sim``.
-
-        No sim backend is wired today.  Driving the real robot from an action
-        named ``preview_sim`` would surprise the operator, so the handler
-        treats this action as a compile + artifact publish.  When a true sim
-        backend lands (e.g. the unity_simulator package) it can be invoked
-        from this method without changing the contract.
-        """
-        self._apply_request_tuning(request)
-        if not self._load_trajectory_or_fail(request):
-            return self._last_status
-
-        try:
-            plan = self._recorder.compile_loaded_plan()
-        except Exception as exc:
-            return self._fail(request, ERR_BAD_PAYLOAD, f"Sim preview compile failed: {exc}")
-
-        scene_violations = self._scene_safety_violations(plan)
-        artifact = compiled_playback_plan_to_dict(plan)
-        artifact_payload = {
-            "job_id": request.job_id,
-            "artifact": artifact,
-            "preview_sim": True,
-        }
-        try:
-            self._publish_artifact(json.dumps(artifact_payload, sort_keys=True))
-        except Exception as exc:
-            self._log.warn(f"Failed to publish preview_sim artifact: {exc}")
-
-        return self._succeed(
-            request,
-            stage=STAGE_PREVIEW_READY,
-            message=(
-                f"Sim preview compiled ({len(plan.queued_commands)} cmds, "
-                f"{plan.total_duration_s:.2f}s).  Real robot was NOT moved."
-            ),
-            metadata={
-                "sim": True,
-                "real_robot_moved": False,
-                "waypoint_count": len(plan.waypoints),
-                "raw_waypoint_count": int(getattr(plan, "raw_waypoint_count", len(plan.waypoints))),
-                "simplify_tolerance_deg": float(getattr(plan, "simplify_tolerance_deg", 0.0)),
-                "queued_command_count": len(plan.queued_commands),
-                "event_command_count": len(getattr(plan, "event_commands", ())),
-                "total_duration_s": plan.total_duration_s,
-                "time_scale": plan.time_scale,
-                "original_timing_feasible": plan.original_timing_feasible,
-                "playback_tuning": self._current_tuning(),
-                "scene_safety_enabled": self._scene_safety_enabled(),
-                "scene_safety_blocked": bool(scene_violations),
-                "scene_safety_violations": scene_violations[:5],
-            },
-        )
-
     def _handle_play(self, request: JobRequest, *, sim: bool) -> JobStatus:
         """Real-robot playback path.
 
         ``sim`` is retained as a parameter for symmetry but the only caller
-        passes ``sim=False``; ``preview_sim`` goes through
-        ``_handle_preview_sim`` to keep the no-real-motion guarantee explicit.
+        passes ``sim=False``. Validation is handled by ``compile``.
         """
         if sim:
             # Defensive: should not happen via the public dispatcher, but if a
@@ -441,7 +356,7 @@ class TeachJobHandler:
             return self._fail(
                 request,
                 ERR_EXECUTE_FORBIDDEN,
-                "Sim playback path disabled: use preview_sim (compile-only).",
+                "Sim playback path disabled: use compile for dry-run validation.",
             )
 
         self._apply_request_tuning(request)
@@ -561,33 +476,6 @@ class TeachJobHandler:
             stage=STAGE_STOPPED,
             message="Recorder stopped" + (" (home)" if go_home else ""),
             metadata={"go_home": go_home},
-        )
-
-    def _handle_record_start(self, request: JobRequest) -> JobStatus:
-        if self._recorder.is_recording:
-            return self._fail(request, ERR_ALREADY_PLAYING,
-                              "Recorder already running")
-        try:
-            self._recorder.start_recording()
-        except Exception as exc:
-            return self._fail(request, ERR_BAD_PAYLOAD, f"start_recording failed: {exc}")
-        return self._succeed(
-            request,
-            stage=STAGE_EXECUTING,
-            message="Host-side recorder started",
-            metadata={},
-        )
-
-    def _handle_record_stop(self, request: JobRequest) -> JobStatus:
-        try:
-            frames = self._recorder.stop_recording()
-        except Exception as exc:
-            return self._fail(request, ERR_BAD_PAYLOAD, f"stop_recording failed: {exc}")
-        return self._succeed(
-            request,
-            stage=STAGE_DONE,
-            message=f"Recording stopped ({len(frames)} frames)",
-            metadata={"frame_count": len(frames)},
         )
 
     def _handle_playback_event(self, event_name: str, payload: Dict[str, Any]):

@@ -217,27 +217,75 @@ class RobotConnection:
     
     def send_motion_cmd(self, command):
         """ส่งคำสั่งการเคลื่อนที่ with Auto-Reconnect"""
+        success, _response = self.send_motion_cmd_with_response(
+            command,
+            response_timeout=None,
+        )
+        return success
+
+    def _prepare_motion_command(self, command):
+        cmd_str = command if isinstance(command, str) else command.decode()
+        if not cmd_str.endswith('\n'):
+            cmd_str += '\n'
+        return cmd_str
+
+    def _recv_motion_response(self, timeout):
+        if timeout is None:
+            return None
+        try:
+            self.cmd_sock.settimeout(timeout)
+            response = self.cmd_sock.recv(4096)
+            if not response:
+                return None
+            return response.decode('utf-8', errors='replace').strip()
+        except socket.timeout:
+            return None
+        finally:
+            self.cmd_sock.settimeout(SOCKET_TIMEOUT)
+
+    def _drain_motion_responses(self):
+        """Drop stale port-30003 responses before sending a new motion command."""
+        try:
+            self.cmd_sock.settimeout(0.0)
+            while True:
+                response = self.cmd_sock.recv(4096)
+                if not response:
+                    break
+        except (BlockingIOError, socket.timeout):
+            pass
+        finally:
+            self.cmd_sock.settimeout(SOCKET_TIMEOUT)
+
+    def send_motion_cmd_with_response(self, command, response_timeout=0.02):
+        """Send a motion command and optionally capture the immediate command id response.
+
+        Port 30003 returns a short response such as ``0,{123},...`` before the
+        motion completes.  Realtime teleop only waits a tiny bounded window for
+        that response so command-id logging does not become a completion wait.
+        """
         if not self.connected:
             if not self._reconnect_port('cmd'):
-                return False
+                return False, None
         try:
-            cmd_str = command if isinstance(command, str) else command.decode()
-            if not cmd_str.endswith('\n'):
-                cmd_str += '\n'
+            cmd_str = self._prepare_motion_command(command)
+            if response_timeout is not None:
+                self._drain_motion_responses()
             self.cmd_sock.send(cmd_str.encode())
-            return True
+            return True, self._recv_motion_response(response_timeout)
         except (OSError, socket.error) as e:
             self.logger.warn(f"Motion socket error: {e}. Reconnecting...")
             if self._reconnect_port('cmd'):
                 try:
+                    if response_timeout is not None:
+                        self._drain_motion_responses()
                     self.cmd_sock.send(cmd_str.encode())
-                    return True
+                    return True, self._recv_motion_response(response_timeout)
                 except Exception as retry_e:
                     self.logger.error(f"Retry motion failed: {retry_e}")
-            return False
+            return False, None
         except Exception as e:
             self.logger.error(f"Motion command failed: {e}")
-            return False
+            return False, None
     
     def disconnect(self):
         """ปิดการเชื่อมต่อทั้งหมด"""

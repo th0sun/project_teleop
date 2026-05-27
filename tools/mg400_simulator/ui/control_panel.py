@@ -4,6 +4,7 @@ Right-side control panel for the MG400 Simulator.
 """
 
 import numpy as np
+import os
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QSlider, QDoubleSpinBox, QPushButton, QComboBox,
@@ -345,13 +346,13 @@ class ControlPanel(QWidget):
         
         h = QHBoxLayout()
         h.addWidget(_label('Host:'))
-        self._ros_host = QLineEdit('192.168.1.11')
+        self._ros_host = QLineEdit(os.environ.get('MG400_SIM_ROS_HOST', '192.168.1.11'))
         h.addWidget(self._ros_host)
         
         h.addWidget(_label('Port:'))
         self._ros_port = QSpinBox()
         self._ros_port.setRange(1, 65535)
-        self._ros_port.setValue(10000)
+        self._ros_port.setValue(int(os.environ.get('MG400_SIM_ROS_PORT', '10000')))
         h.addWidget(self._ros_port)
         v.addLayout(h)
 

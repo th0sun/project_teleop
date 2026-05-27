@@ -19,6 +19,7 @@ import numpy as np
 import time
 import json
 import os
+import queue
 
 # Import configuration
 from mg400_controller.common.config.robot_config import (
@@ -52,7 +53,6 @@ from mg400_controller.common.utils.interactive_cmd import InteractiveCommandHand
 from mg400_controller.common.utils.error_handler import ErrorHandler
 from mg400_controller.common.utils.collision_haptic import CollisionHaptic
 from mg400_controller.common.trajectory.trajectory_recorder import TrajectoryRecorder
-from mg400_controller.common.trajectory.trajectory_recorder import frames_from_joint_trajectory_msg
 from mg400_controller.common.trajectory.teach_job_handler import TeachJobHandler
 from mg400_controller.common.logic.safety_monitor import SafetyMonitor
 from mg400_controller.common.logic.scene_safety_guard import SceneSafetyGuard
@@ -64,16 +64,30 @@ from mg400_controller.common.utils.unified_triple_logger import (
     UnifiedTripleLogger,
     prompt_enable_triple_logging,
 )
+from mg400_controller.common.utils.pending_command_registry import (
+    PendingCommand,
+    PendingCommandRegistry,
+)
 from mg400_controller.common.ros.teleop_interfaces import (
     create_publishers,
     create_subscriptions,
     attach_unity_subscription,
 )
 from mg400_controller.common.ros.topic_config import declare_topic_parameters
+from mg400_controller.common.ros.unity_teleop_sample import (
+    UnityTeleopSample,
+    UnityTeleopSampleError,
+    build_ros_joint_cmd_rx_sample,
+    parse_unity_joint_frame_id,
+    parse_unity_teleop_sample,
+)
 
 # =========================
 # ===== MAIN NODE ========
 # =========================
+
+LEGACY_HOME_JOINT_TOL_RAD = 1e-4
+LEGACY_HOME_COMMAND_MIN_INTERVAL_SEC = 1.0
 
 class TeleopNode(Node):
     def __init__(self):
@@ -113,6 +127,27 @@ class TeleopNode(Node):
         )
 
         self.latest_target = None
+        self.latest_unity_sample = None
+        self.latest_unity_sample_recv_time = 0.0
+        self.unity_samples_by_identity = {}
+        self.pending_joint_msgs_by_identity = {}
+        self.latest_target_unity_sample = None
+        self.latest_target_recv_wall = 0.0
+        self.current_unity_session_id = None
+        self.active_command_unity_sample = None
+        self.active_command_uid = None
+        self.active_command_dobot_id = None
+        self.active_command_response = None
+        self.active_command_text = None
+        self.active_feedback_command_id_before_send = None
+        self.active_command_tracking_source = None
+        self.active_command_tracking_confidence = None
+        self.pending_command_registry = PendingCommandRegistry(max_size=100)
+        self._last_unity_sample_warning = 0.0
+        self._last_unity_stale_warning = 0.0
+        self._last_legacy_home_command_wall = 0.0
+        self.unity_joint_cmd_rx_session_id = f"ros_joint_cmd_rx_{int(time.time() * 1000)}"
+        self._unity_joint_cmd_rx_seq = 0
 
         # 1. Initialize logic modules
         # Import MotionConfig for thresholds and Analyzer
@@ -126,6 +161,17 @@ class TeleopNode(Node):
         self.ros_publishers = create_publishers(self, topics=self.topics)
         self.create_timer(1.0, self._publish_heartbeat) # 1Hz Ping
 
+        requested_sample_control = bool(
+            self.declare_parameter("use_unity_teleop_sample_for_control", False).value
+        )
+        if requested_sample_control:
+            self.get_logger().warn(
+                "use_unity_teleop_sample_for_control is disabled: "
+                "/unity/joint_cmd is the only live robot-control path; "
+                "/unity/teleop_sample is log/sync-only."
+            )
+        self.use_unity_teleop_sample_for_control = False
+
         # Cross-layer timestamp contract:
         # - T1/T2/T3/T4/T5 and CSV log timestamps are ROS-local wall seconds.
         # - perf_counter is used only for control-loop intervals and stuck logic.
@@ -137,6 +183,19 @@ class TeleopNode(Node):
         self._realtime_command_seq = 0
         self._realtime_speed_defaults_pending = False
         self._last_realtime_speed_defaults_attempt = 0.0
+        self._unity_sample_queue = queue.SimpleQueue()
+        self._unity_control_latest = None
+        self._unity_control_latest_lock = threading.Lock()
+        self._unity_control_latest_event = threading.Event()
+        self._unity_sample_enqueued_count = 0
+        self._unity_sample_processed_count = 0
+        self._unity_control_processed_count = 0
+        self._unity_sample_worker_thread = threading.Thread(
+            target=self._unity_teleop_sample_worker_loop,
+            daemon=True,
+        )
+        self._unity_control_worker_thread = None
+        self._unity_sample_worker_thread.start()
 
         # --- One-file Teleop Session Logger (Unity → ROS2 → Robot) ---
         self.triple_logger = None
@@ -169,6 +228,7 @@ class TeleopNode(Node):
         #
         # Active inputs:
         #   unity_pong_callback        — Unity RTT heartbeat
+        #   unity_teleop_sample        — Unity JSON trace protocol v1
         #   suction_callback           — Unity → vacuum gripper bool
         #   light_callback             — Unity → signal-light DO
         #   scene_safety_callback      — Unity → workspace-guard toggle
@@ -176,12 +236,6 @@ class TeleopNode(Node):
         #   speed_factor_callback      — Unity → global SpeedFactor slider
         #   teach_job_request_callback — Unity → typed teach job request
         #
-        # LEGACY (2026-05) — see AGENTS.md §4.1 for the proof-of-death
-        # checklist.  Older Unity builds publish to these topics, so the
-        # callbacks stay wired by default:
-        #   teach_status_callback        — /unity/teach_status
-        #   traj_data_callback           — /unity/trajectory_data
-        #   joint_trajectory_callback    — /mg400/joint_trajectory_controller/command
         self.ros_subscriptions = self._register_ros_subscriptions()
 
         # Suction Cup Control (Smart Trigger)
@@ -204,7 +258,8 @@ class TeleopNode(Node):
             self.ros_publishers.rviz,
             self.get_clock(),
             self.get_logger(),
-            self.stop_event
+            self.stop_event,
+            feedback_callback=self._raw_feedback_packet_callback,
         )
 
         self.sender = CommandSender(self.connection, self.feedback, self.get_logger())
@@ -245,10 +300,8 @@ class TeleopNode(Node):
         )
         self._last_scene_safety_block_log = 0.0
 
-        # Job-request dispatcher for /teach/job_request (compile/preview_sim/
-        # execute/export/stop/record_*).  Replaces the implicit "publish
-        # JointTrajectory == execute now" behaviour.  Status / artifact replies
-        # go to /teach/job_status and /teach/job_artifact.
+        # Job-request dispatcher for the production teach-repeat path. Status
+        # / artifact replies go to /teach/job_status and /teach/job_artifact.
         self.teach_job_handler = TeachJobHandler(
             recorder=self.trajectory_recorder,
             publish_status_fn=lambda payload: self.ros_publishers.teach_job_status.publish(
@@ -297,10 +350,7 @@ class TeleopNode(Node):
         self.create_timer(0.05, self._publish_haptic_feedback)
 
         self.get_logger().info(f"✅ Teleop Node Ready")
-        self.get_logger().info(
-            f"🎓 Teach & Repeat: {self.topics.teach_status} + "
-            f"{self.topics.trajectory_data} + {self.topics.unity_trajectory}"
-        )
+        self.get_logger().info(f"🎓 Teach & Repeat: {self.topics.teach_job_request}")
         self.get_logger().info(f"📊 Control Strategy: Adaptive Δ + Per-Cmd SpeedJ + Stuck Detection")
         self.get_logger().info(
             f"📏 Adaptive gate: Δ "
@@ -368,21 +418,18 @@ class TeleopNode(Node):
         this method tells you exactly which callbacks are wired without
         scrolling through the __init__ body.
 
-        Three callbacks are LEGACY (see AGENTS.md §4.1):
-        ``_teach_status_callback``, ``_traj_data_callback``,
-        ``_joint_trajectory_callback``.  They stay enabled so older
-        Unity builds keep working.
+        Production teach-repeat uses /teach/job_request only; old
+        teach-status / raw-trajectory / JointTrajectory auto-play topics are
+        intentionally not subscribed.
         """
         return create_subscriptions(
             self,
             unity_pong_callback=self._unity_pong_callback,
+            unity_teleop_sample_callback=self._unity_teleop_sample_callback,
             suction_callback=self._suction_callback,
             light_callback=self._light_callback,
             scene_safety_callback=self._scene_safety_callback,
             dashboard_cmd_callback=self._dashboard_cmd_callback,
-            teach_status_callback=self._teach_status_callback,        # LEGACY 4.1
-            traj_data_callback=self._traj_data_callback,              # LEGACY 4.1
-            joint_trajectory_callback=self._joint_trajectory_callback,  # LEGACY 4.1
             speed_factor_callback=self._speed_factor_callback,
             teach_job_request_callback=self._teach_job_request_callback,
             topics=self.topics,
@@ -417,71 +464,408 @@ class TeleopNode(Node):
             pass
 
 
+    def _unity_teleop_sample_callback(self, msg):
+        """Fast ROS callback: capture raw Unity JSON and return immediately."""
+        recv_time = time.time()
+        payload = msg.data
+        self._unity_sample_enqueued_count += 1
+        self._unity_sample_queue.put((recv_time, payload))
+
+    def _unity_teleop_sample_worker_loop(self):
+        """Log every Unity JSON sample off the ROS executor thread."""
+        while not self.stop_event.is_set() or not self._unity_sample_queue.empty():
+            try:
+                recv_time, payload = self._unity_sample_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                self._process_unity_teleop_sample_payload(
+                    payload,
+                    recv_time,
+                    drive_control=False,
+                    log_sample=True,
+                    remember_sample=True,
+                    handle_session=True,
+                    accept_legacy=True,
+                )
+                self._unity_sample_processed_count += 1
+            except Exception as exc:
+                self.get_logger().error(f"Unity teleop sample worker error: {exc}")
+
+    def _unity_teleop_control_worker_loop(self):
+        """/unity/teleop_sample direct control is intentionally disabled."""
+        return
+
+    def _process_unity_teleop_sample_payload(
+        self,
+        payload: str,
+        now_ros_sec: float,
+        *,
+        drive_control: bool = True,
+        log_sample: bool = True,
+        remember_sample: bool = True,
+        handle_session: bool = True,
+        accept_legacy: bool = True,
+    ):
+        """Receive Unity JSON trace protocol samples.
+
+        This never drives the robot directly.  `/unity/joint_cmd` is the live
+        robot-control topic; this JSON sample is only for logging and matching
+        that joint command to Unity-side controller/IK context.
+        """
+        try:
+            sample = parse_unity_teleop_sample(payload)
+        except UnityTeleopSampleError as exc:
+            if now_ros_sec - self._last_unity_sample_warning > 1.0:
+                self.get_logger().warn(f"Invalid /unity/teleop_sample ignored: {exc}")
+                self._last_unity_sample_warning = now_ros_sec
+            return
+
+        if handle_session:
+            self._handle_unity_session_transition(sample, now_ros_sec)
+        if remember_sample:
+            self._remember_unity_sample(sample, now_ros_sec)
+
+        if log_sample and self.triple_logger:
+            self.triple_logger.log_unity_sample(sample, now_ros_sec)
+
+        if accept_legacy and not self.use_unity_teleop_sample_for_control:
+            self._accept_pending_joint_for_sample(sample, now_ros_sec)
+
+        if drive_control and now_ros_sec - self._last_unity_sample_warning > 1.0:
+            self.get_logger().warn(
+                "/unity/teleop_sample direct control is disabled; "
+                "publish live joint targets on /unity/joint_cmd."
+            )
+            self._last_unity_sample_warning = now_ros_sec
+
+    def _handle_unity_session_transition(self, sample, now_ros_sec):
+        session_id = sample.session_id
+        if self.current_unity_session_id is None:
+            self.current_unity_session_id = session_id
+            return
+        if session_id == self.current_unity_session_id:
+            return
+
+        previous_session_id = self.current_unity_session_id
+        self.current_unity_session_id = session_id
+        self.unity_samples_by_identity.clear()
+        self.pending_joint_msgs_by_identity.clear()
+        self.pending_command_registry = PendingCommandRegistry(max_size=100)
+        if not self.use_unity_teleop_sample_for_control:
+            return
+
+        self._clear_direct_unity_target("unity_session_changed")
+        try:
+            self.target_compensator.reset()
+        except AttributeError:
+            pass
+        self.controller.reset_reference(None, now=time.perf_counter())
+        self.get_logger().info(
+            "🔁 Unity teleop session changed; cleared direct-control target "
+            f"{previous_session_id} -> {session_id}"
+        )
+
+    def _clear_direct_unity_target(self, reason: str) -> None:
+        if not self.use_unity_teleop_sample_for_control:
+            return
+        self.latest_target = None
+        self.latest_target_unity_sample = None
+        self.latest_target_recv_wall = 0.0
+        self.target_recv_time = 0.0
+        self.unity_send_time = 0.0
+        self.controller.stuck_start_time = 0.0
+        self.controller.is_stuck = False
+
+    def _direct_unity_target_is_stale(self, now_wall: float, target_recv_wall: float, unity_sample) -> bool:
+        if not self.use_unity_teleop_sample_for_control:
+            return False
+        if target_recv_wall <= 0.0:
+            return True
+
+        age_sec = now_wall - target_recv_wall
+        if age_sec <= motion_config.UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC:
+            return False
+
+        self.controller.stuck_start_time = 0.0
+        self.controller.is_stuck = False
+        if now_wall - self._last_unity_stale_warning > 1.0:
+            session_id = getattr(unity_sample, "session_id", "")
+            unity_seq_id = getattr(unity_sample, "unity_seq_id", "")
+            self.get_logger().warn(
+                "Unity teleop sample stale; suppressing robot command "
+                f"age={age_sec * 1000.0:.1f}ms "
+                f"session_id={session_id} unity_seq_id={unity_seq_id}"
+            )
+            self._last_unity_stale_warning = now_wall
+        return True
+
+    def _teleop_session_logging_active(self, now_wall: float) -> bool:
+        if not self.use_unity_teleop_sample_for_control:
+            return True
+        if self.latest_unity_sample_recv_time <= 0.0:
+            return False
+        return (
+            now_wall - self.latest_unity_sample_recv_time
+            <= motion_config.UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC
+        )
+
+    def _reset_direct_unity_after_gap(self, now_ros_sec: float) -> None:
+        if not self.use_unity_teleop_sample_for_control:
+            return
+        if self.latest_target_recv_wall <= 0.0:
+            return
+
+        gap_sec = now_ros_sec - self.latest_target_recv_wall
+        if gap_sec <= motion_config.UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC:
+            return
+
+        try:
+            self.target_compensator.reset()
+        except AttributeError:
+            pass
+        self.pending_command_registry = PendingCommandRegistry(max_size=100)
+        self.get_logger().info(
+            "🔁 Unity teleop resumed after stale gap; reset latency compensator "
+            f"gap={gap_sec * 1000.0:.1f}ms"
+        )
+
+    def _remember_unity_sample(self, sample, recv_time):
+        self.latest_unity_sample = sample
+        self.latest_unity_sample_recv_time = recv_time
+        self.unity_samples_by_identity[(sample.session_id, sample.unity_seq_id)] = (
+            sample,
+            recv_time,
+        )
+
+        if len(self.unity_samples_by_identity) <= 256:
+            return
+        oldest_key = min(
+            self.unity_samples_by_identity,
+            key=lambda key: self.unity_samples_by_identity[key][1],
+        )
+        self.unity_samples_by_identity.pop(oldest_key, None)
+
+    def _remember_pending_joint_msg(self, identity, msg, recv_time):
+        self.pending_joint_msgs_by_identity[identity] = (msg, recv_time)
+
+        if len(self.pending_joint_msgs_by_identity) <= 512:
+            return
+        oldest_key = min(
+            self.pending_joint_msgs_by_identity,
+            key=lambda key: self.pending_joint_msgs_by_identity[key][1],
+        )
+        self.pending_joint_msgs_by_identity.pop(oldest_key, None)
+        if recv_time - self._last_unity_sample_warning > 1.0:
+            session_id, unity_seq_id = oldest_key
+            self.get_logger().warn(
+                "Dropped pending /unity/joint_cmd because matching "
+                "/unity/teleop_sample did not arrive before cache limit: "
+                f"session_id={session_id} unity_seq_id={unity_seq_id}"
+            )
+            self._last_unity_sample_warning = recv_time
+
+    def _accept_pending_joint_for_sample(self, sample, now_ros_sec):
+        identity = (sample.session_id, sample.unity_seq_id)
+        pending = self.pending_joint_msgs_by_identity.pop(identity, None)
+        if pending is None:
+            return
+
+        joint_msg, joint_recv_time = pending
+        self._accept_joint_msg(
+            joint_msg,
+            joint_recv_time,
+            unity_sample=self._sample_with_match_context(
+                sample,
+                "exact_joint_header_identity_deferred",
+                max(0.0, (now_ros_sec - joint_recv_time) * 1000.0),
+            ),
+        )
+
+    def _recent_unity_sample(self, now_ros_sec, max_age_sec=0.25):
+        if self.latest_unity_sample is None:
+            return None
+        age = now_ros_sec - self.latest_unity_sample_recv_time
+        if 0.0 <= age <= max_age_sec:
+            return self._sample_with_match_context(
+                self.latest_unity_sample,
+                "age_only_recent_sample",
+                age * 1000.0,
+            )
+        return None
+
+    def _sample_with_match_context(self, sample, method: str, age_ms: float):
+        raw = dict(sample.raw)
+        raw["unity_sample_match_method"] = method
+        raw["unity_sample_age_ms"] = age_ms
+        return UnityTeleopSample(
+            raw=raw,
+            protocol_version=sample.protocol_version,
+            session_id=sample.session_id,
+            unity_seq_id=sample.unity_seq_id,
+        )
+
+    def _joint_msg_identity(self, msg):
+        return parse_unity_joint_frame_id(
+            getattr(getattr(msg, "header", None), "frame_id", "")
+        )
+
+    def _sample_for_joint_msg(self, msg, now_ros_sec):
+        identity = parse_unity_joint_frame_id(
+            getattr(getattr(msg, "header", None), "frame_id", "")
+        )
+        if identity is None:
+            return self._recent_unity_sample(now_ros_sec)
+
+        sample_pair = self.unity_samples_by_identity.get(identity)
+        if sample_pair is not None:
+            sample, recv_time = sample_pair
+            return self._sample_with_match_context(
+                sample,
+                "exact_joint_header_identity",
+                max(0.0, (time.time() - recv_time) * 1000.0),
+            )
+
+        return None
+
+    def _is_legacy_home_joint_cmd(self, msg) -> bool:
+        try:
+            q_target = np.asarray(msg.position[:4], dtype=float)
+        except Exception:
+            return False
+        if q_target.shape[0] < 4 or not np.all(np.isfinite(q_target)):
+            return False
+        return bool(np.all(np.abs(q_target[:4]) <= LEGACY_HOME_JOINT_TOL_RAD))
+
+    def _accept_legacy_home_joint_cmd(self, now_ros_sec: float) -> None:
+        if now_ros_sec - self._last_legacy_home_command_wall < LEGACY_HOME_COMMAND_MIN_INTERVAL_SEC:
+            return
+        self._last_legacy_home_command_wall = now_ros_sec
+
+        self._clear_direct_unity_target("legacy_home_joint_cmd")
+        self.pending_command_registry = PendingCommandRegistry(max_size=100)
+        try:
+            self.target_compensator.reset()
+        except AttributeError:
+            pass
+        self.controller.reset_reference(None, now=time.perf_counter())
+        self.get_logger().info(
+            "🏠 Legacy /unity/joint_cmd Home accepted during direct Unity sample control"
+        )
+        self.trajectory_recorder.stop_all(go_home=True)
+
     def _unity_callback(self, msg):
         """รับคำสั่งจาก Unity/VR - Store latest target only"""
         if not self.connection.connected or len(msg.position) < 4:
             return
 
-        try:
-            # 1. Validate & Clamp Joints
-            q_target = np.array(msg.position)
-
-            # 🛡️ Anti-NaN Protection
-            if np.any(np.isnan(q_target)):
-                self.get_logger().warn("⚠️ Received NaN joints from Unity - ignoring command")
-                return
-
-            q_safe, was_clamped = self.validator.validate_and_clamp(q_target)
-
-            if was_clamped:
-                self.get_logger().warn("⚠️ Joint command exceeded limits - clamped to safe range", once=True)
-
-            # 2. Extract Unity timestamp (T1) and ROS timestamp (T2)
-            unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            now_ros_sec = time.time()  # Use absolute time for sync and logging
-
-            # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION (Triple-Lock) ---
-            # Level 2 & 3: Filtered Min-Window + Drift Compensation
-            corrected_unity_time = self.clock_calibrator.calibrate(unity_send_time_sec, now_ros_sec)
-
-            # 3. Latency compensation based on measured Unity-to-ROS timing.
-            q_compensated_safe = self.target_compensator.compensate(
-                q_safe,
-                corrected_unity_time,
-                now_ros_sec,
-            )
-
-            # 📊 Publish Unity Input XYZ (FK of raw Unity joint angles, degrees)
-            try:
-                unity_xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_safe))
-                xyz_msg = Float64MultiArray()
-                xyz_msg.data = unity_xyz.tolist()
-                self.ros_publishers.unity_xyz.publish(xyz_msg)
-            except Exception:
-                pass
-
-            if self.triple_logger:
-                self.triple_logger.log_unity_target(
-                    q_safe,
-                    q_compensated_safe,
-                    unity_send_time_sec,
-                    corrected_unity_time,
-                    now_ros_sec,
+        now_ros_sec = time.time()  # Use absolute time for sync and logging
+        unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        raw_age_sec = now_ros_sec - unity_send_time_sec
+        if (
+            unity_send_time_sec > 0.0
+            and 0.0 <= raw_age_sec <= 10.0
+            and raw_age_sec > motion_config.UNITY_JOINT_CMD_STALE_DROP_SEC
+        ):
+            if now_ros_sec - self._last_unity_stale_warning > 0.5:
+                self.get_logger().warn(
+                    "Dropped stale /unity/joint_cmd before control "
+                    f"age={raw_age_sec * 1000.0:.1f}ms"
                 )
+                self._last_unity_stale_warning = now_ros_sec
+            return
 
-            # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
-            if self._realtime_speed_defaults_pending:
-                tr = self.trajectory_recorder
-                playback_blocked = tr.is_playing or (time.perf_counter() < tr._block_until)
-                if not playback_blocked:
-                    self._restore_realtime_speed_defaults("first_realtime_target")
+        q_target = np.asarray(msg.position[:4], dtype=float)
+        self._unity_joint_cmd_rx_seq += 1
+        unity_sample = build_ros_joint_cmd_rx_sample(
+            q_target.tolist(),
+            session_id=self.unity_joint_cmd_rx_session_id,
+            rx_seq_id=self._unity_joint_cmd_rx_seq,
+            unity_send_ts=unity_send_time_sec,
+            ros_recv_ts=now_ros_sec,
+        )
 
-            self.latest_target = q_compensated_safe          # Latency-compensated target
-            self.target_recv_time = now_ros_sec          # T2: ROS receive time
-            self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
+        self._accept_joint_msg(msg, now_ros_sec, unity_sample=unity_sample, q_target=q_target)
 
+    def _accept_joint_msg(self, msg, now_ros_sec, *, unity_sample=None, q_target=None):
+        try:
+            if q_target is None:
+                q_target = np.array(msg.position)
+            unity_send_time_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if unity_send_time_sec <= 0.0:
+                unity_send_time_sec = now_ros_sec
+            self._accept_unity_joint_target(
+                q_target,
+                unity_send_time_sec,
+                now_ros_sec,
+                unity_sample=unity_sample,
+            )
         except Exception as e:
             self.get_logger().error(f"Error in _unity_callback: {e}")
+
+    def _accept_unity_joint_target(
+        self,
+        q_target,
+        unity_send_time_sec,
+        now_ros_sec,
+        *,
+        unity_sample=None,
+    ):
+        # 1. Validate & Clamp Joints
+        if np.any(np.isnan(q_target)):
+            self.get_logger().warn("⚠️ Received NaN joints from Unity - ignoring command")
+            return
+
+        self._reset_direct_unity_after_gap(now_ros_sec)
+
+        q_safe, was_clamped = self.validator.validate_and_clamp(q_target)
+
+        if was_clamped:
+            self.get_logger().warn("⚠️ Joint command exceeded limits - clamped to safe range", once=True)
+
+        # --- 🕒 DYNAMIC CLOCK SYNCHRONIZATION (Triple-Lock) ---
+        # Level 2 & 3: Filtered Min-Window + Drift Compensation
+        corrected_unity_time = self.clock_calibrator.calibrate(unity_send_time_sec, now_ros_sec)
+
+        # 3. Latency compensation based on measured Unity-to-ROS timing.
+        q_compensated_safe = self.target_compensator.compensate(
+            q_safe,
+            corrected_unity_time,
+            now_ros_sec,
+        )
+
+        # 📊 Publish Unity Input XYZ (FK of raw Unity joint angles, degrees)
+        try:
+            unity_xyz = self.feedback.kinematics.forward_kinematics(np.degrees(q_safe))
+            xyz_msg = Float64MultiArray()
+            xyz_msg.data = unity_xyz.tolist()
+            self.ros_publishers.unity_xyz.publish(xyz_msg)
+        except Exception:
+            pass
+
+        if self.triple_logger:
+            self.triple_logger.log_unity_target(
+                q_safe,
+                q_compensated_safe,
+                unity_send_time_sec,
+                corrected_unity_time,
+                now_ros_sec,
+                unity_sample=unity_sample,
+            )
+
+        # 4. Update Latest Target (Do NOT send here - control_loop will decide when to send)
+        if self._realtime_speed_defaults_pending:
+            tr = self.trajectory_recorder
+            playback_blocked = tr.is_playing or (time.perf_counter() < tr._block_until)
+            if not playback_blocked:
+                self._restore_realtime_speed_defaults("first_realtime_target")
+
+        self.latest_target = q_compensated_safe      # Latency-compensated target
+        self.latest_target_unity_sample = unity_sample
+        self.latest_target_recv_wall = now_ros_sec
+        self.target_recv_time = now_ros_sec          # T2: ROS receive time
+        self.unity_send_time = corrected_unity_time  # T1: Calibrated Unity send time
 
     def _suction_callback(self, msg):
         """รับคำสั่งเปิด/ปิดหัวดูด/Gripper จาก Unity (Trigger Button)"""
@@ -569,102 +953,6 @@ class TeleopNode(Node):
         else:
             self.get_logger().warn(f"⚠️ Cannot set SpeedFactor({value}); Robot disconnected.")
 
-    # ── Teach & Repeat callbacks ──────────────────────────────────────────────
-    # LEGACY (2026-05): the three callbacks below subscribe to teach topics
-    # that pre-date /teach/job_request.  Unity's modern code path uses the
-    # job_request channel, but older Unity builds and bench fixtures still
-    # publish to these topics, so they remain wired by default.  See
-    # AGENTS.md §4.1 for the proof-of-death checklist before removal.
-    def _teach_status_callback(self, msg):
-        """Handle /unity/teach_status: Record | Stop | Save | Load:<name> | Preview.
-
-        DEPRECATED in favour of /teach/job_request.  Retained because the
-        ``Save`` semantics overlap with the host-side recorder pipeline.
-
-        See AGENTS.md §4.1 — removal blocked on Unity team sign-off and a
-        bag-recording sweep showing this topic stays empty for a full
-        release cycle.
-        """
-        self.get_logger().warn(
-            f"⚠️  Legacy /unity/teach_status used. Prefer /teach/job_request "
-            f"(topic: {self.topics.teach_job_request})",
-            once=True,
-        )
-        status = msg.data.strip()
-        tr = self.trajectory_recorder
-        self.get_logger().info(f"🎓 Teach status: {status}")
-
-        if status == "Record":
-            tr.start_recording()
-        elif status == "Stop":
-            tr.stop_all(go_home=True)
-        elif status == "Save":
-            tr.save_temp()
-        elif status.startswith("Save:"):
-            name = status.split(":", 1)[1].strip()
-            path = tr.save_as(name)
-            self.get_logger().info(f"💾 Trajectory saved as → {path}")
-        elif status.startswith("Load:"):
-            name = status.split(":", 1)[1].strip()
-            tr.load(name)
-        elif status == "Preview":
-            # Publish full trajectory data for monitor background dots (race.py style)
-            if tr.loaded_frames:
-                t0 = tr.loaded_frames[0]["timeStamp"]
-                preview = {
-                    "t": [f["timeStamp"] - t0 for f in tr.loaded_frames],
-                    "q": [[f["j1"], f["j2"], f["j3"], f["j4"]] for f in tr.loaded_frames]
-                }
-                pmsg = String(); pmsg.data = json.dumps(preview)
-                self.ros_publishers.traj_preview.publish(pmsg)
-            tr.start_preview()
-        else:
-            self.get_logger().warn(f"⚠️ Unknown teach status: {status}")
-
-    def _traj_data_callback(self, msg):
-        """Handle /unity/trajectory_data: raw JSON from Unity Save button.
-
-        LEGACY (2026-05): see AGENTS.md §4.1 — superseded by
-        ``action=record_stop`` / ``action=compile`` on /teach/job_request.
-        """
-        json_str = msg.data.strip()
-        if json_str:
-            path = self.trajectory_recorder.save_from_unity_json(json_str)
-            if path:
-                self.get_logger().info(f"🎓 Unity trajectory saved → {path}")
-
-    def _joint_trajectory_callback(self, msg):
-        """Handle Unity's saved teach-repeat JointTrajectory and play it.
-
-        DEPRECATED auto-play path: publishing JointTrajectory implicitly meant
-        "execute now".  Use /teach/job_request with action='execute' instead.
-        Kept for backwards compatibility while Unity migrates.
-        """
-        self.get_logger().warn(
-            "⚠️  Legacy JointTrajectory auto-play path used. Migrate Unity to "
-            f"/teach/job_request (topic: {self.topics.teach_job_request})",
-            once=True,
-        )
-        frames = frames_from_joint_trajectory_msg(msg)
-        if not frames:
-            self.get_logger().warn("⚠️ Unity JointTrajectory had no valid 4-joint points")
-            return
-
-        tr = self.trajectory_recorder
-        if tr.load_frames(frames, name="unity_joint_trajectory"):
-            t0 = frames[0]["timeStamp"]
-            preview = {
-                "t": [f["timeStamp"] - t0 for f in frames],
-                "q": [[f["j1"], f["j2"], f["j3"], f["j4"]] for f in frames]
-            }
-            pmsg = String(); pmsg.data = json.dumps(preview)
-            self.ros_publishers.traj_preview.publish(pmsg)
-            self.get_logger().info(
-                f"🎓 Unity JointTrajectory received: {len(frames)} points, "
-                f"{frames[-1]['timeStamp'] - frames[0]['timeStamp']:.2f}s; starting playback"
-            )
-            tr.start_preview()
-
     def _teach_job_request_callback(self, msg):
         """Dispatch a structured /teach/job_request payload via TeachJobHandler.
 
@@ -677,7 +965,37 @@ class TeleopNode(Node):
         except Exception:
             self.get_logger().error("teach_job_request: cannot read .data field")
             return
-        self.teach_job_handler.handle(payload)
+
+        payload_len = len(payload)
+        action = None
+        job_id = None
+        try:
+            envelope = json.loads(payload)
+            if isinstance(envelope, dict):
+                action = envelope.get("action")
+                job_id = envelope.get("job_id")
+        except Exception:
+            pass
+
+        if action:
+            self.get_logger().info(
+                f"teach_job_request received action={action!r} "
+                f"job_id={job_id or ''!r} bytes={payload_len}"
+            )
+        else:
+            snippet = payload[:160].replace("\n", " ")
+            self.get_logger().warn(
+                f"teach_job_request received unparsable envelope "
+                f"bytes={payload_len} head={snippet!r}"
+            )
+
+        status = self.teach_job_handler.handle(payload)
+        self.get_logger().info(
+            f"teach_job_request handled stage={getattr(status, 'stage', '?')!r} "
+            f"action={getattr(status, 'action', None)!r} "
+            f"job_id={getattr(status, 'job_id', '')!r} "
+            f"error={getattr(status, 'error_code', None)!r}"
+        )
 
     def _reset_live_teleop_reference(self, reason: str):
         """Anchor live teleop at the robot's current pose after playback."""
@@ -804,6 +1122,39 @@ class TeleopNode(Node):
             if time.perf_counter() > next_time + period:
                 next_time = time.perf_counter() + period
 
+    def _raw_feedback_packet_callback(self, sample: dict) -> None:
+        """Log each accepted MG400 30004 feedback packet at packet cadence."""
+        if self.triple_logger is None:
+            return
+
+        feedback_wall = float(sample["timestamp"])
+        if not self._teleop_session_logging_active(feedback_wall):
+            return
+
+        tr = getattr(self, "trajectory_recorder", None)
+        is_blocked = bool(
+            tr is not None and (tr.is_playing or (time.perf_counter() < tr._block_until))
+        )
+        operation_mode = "teach_repeat_playback" if is_blocked else "realtime"
+
+        q_actual = np.asarray(sample["q_actual_rad"], dtype=float)
+        q_target = np.asarray(sample["q_target_rad"], dtype=float)
+        queue_backlog = float(np.max(np.abs(q_target[:4] - q_actual[:4])))
+
+        self.triple_logger.log_robot_feedback(
+            q_actual,
+            ros_timestamp=feedback_wall,
+            robot_mode=int(sample["robot_mode"]),
+            error_status=int(sample["error_status"]),
+            robot_tool_actual=sample["tool_vector_actual"],
+            robot_tool_target=sample["tool_vector_target"],
+            robot_feedback_command_id=int(sample["command_id"]),
+            queue_backlog_rad=queue_backlog,
+            run_queued_cmd=int(sample["run_queued_cmd"]),
+            operation_mode=operation_mode,
+            joints_are_degrees=False,
+        )
+
     def _control_loop_step(self):
         """
         Main Control Logic (50Hz) - Called by high-precision thread
@@ -821,6 +1172,17 @@ class TeleopNode(Node):
             # Use perf_counter for ultra-precise delta-time calculation in logic
             now = time.perf_counter()
             now_wall = time.time()
+            target_snapshot = np.asarray(self.latest_target[:4], dtype=float).copy()
+            unity_sample_snapshot = self.latest_target_unity_sample
+            target_recv_time_snapshot = float(self.target_recv_time)
+            target_recv_wall_snapshot = float(self.latest_target_recv_wall)
+            unity_send_time_snapshot = float(self.unity_send_time)
+            target_velocity_raw = self.target_compensator.target_velocity
+            target_velocity_snapshot = (
+                None
+                if target_velocity_raw is None
+                else np.asarray(target_velocity_raw, dtype=float).copy()
+            )
 
             # === TEACH & REPEAT GATING ===
             # is_blocked: during playback OR during post-stop homing (5 s window)
@@ -829,7 +1191,7 @@ class TeleopNode(Node):
             operation_mode = "teach_repeat_playback" if is_blocked else "realtime"
             if tr.is_recording and not is_blocked:
                 # We record the *TARGET* from VR/Simulator, not the actual robot pos
-                tr.record_tick(self.latest_target)
+                tr.record_tick(target_snapshot)
 
             # === UPDATE VELOCITY ===
             # Delegate velocity tracking to controller
@@ -895,6 +1257,7 @@ class TeleopNode(Node):
 
             # === PUBLISH ROBOT MODE & ERROR ===
             current_mode = int(self.feedback.get_robot_mode())
+            feedback_command_id = self.feedback.get_command_id()
             mode_msg = Int32()
             mode_msg.data = current_mode
             self.ros_publishers.robot_mode.publish(mode_msg)
@@ -903,19 +1266,60 @@ class TeleopNode(Node):
             err_msg = Int32()
             err_msg.data = int(err_info['error_status'])
             self.ros_publishers.error_status.publish(err_msg)
+            velocity_mag = np.max(np.abs(self.controller.robot_velocity))
+            session_logging_active = self._teleop_session_logging_active(now_wall)
 
-            if self.triple_logger and self._sample_counter % 5 == 0:
-                self.triple_logger.log_robot_feedback(
+            if self.triple_logger and session_logging_active:
+                pass_samples = self.pending_command_registry.pass_samples(
                     q_current,
-                    ros_timestamp=now_wall,
-                    robot_mode=current_mode,
-                    error_status=err_info['error_status'],
-                    robot_tool_actual=tool_act,
-                    robot_tool_target=tool_tgt,
-                    robot_feedback_command_id=self.feedback.get_command_id(),
-                    operation_mode=operation_mode,
-                    joints_are_degrees=False,
+                    tool_actual=tool_act,
+                    now_wall=now_wall,
+                    norm_tolerance_rad=motion_config.COMMAND_PASS_NEAR_NORM_TOLERANCE_RAD,
+                    per_joint_tolerance_rad=motion_config.VALID_PER_JOINT_LIMIT,
+                    tool_xyz_tolerance_mm=motion_config.COMMAND_PASS_NEAR_TOOL_XYZ_TOLERANCE_MM,
+                    tool_r_tolerance_deg=motion_config.COMMAND_PASS_NEAR_TOOL_R_TOLERANCE_DEG,
                 )
+                for sample in pass_samples:
+                    command = sample.command
+                    feedback_before_send = command.feedback_command_id_before_send
+                    feedback_id_changed = (
+                        None
+                        if feedback_before_send is None
+                        else feedback_command_id != feedback_before_send
+                    )
+                    self.triple_logger.log_command_match(
+                        event_type=sample.event_type,
+                        control_command_seq=command.control_command_seq,
+                        ros_command_uid=command.ros_command_uid,
+                        dobot_command_id=command.dobot_command_id,
+                        robot_feedback_command_id=feedback_command_id,
+                        status=sample.status,
+                        dobot_command_text=command.command_text,
+                        command_tracking_source=sample.method,
+                        command_tracking_confidence=sample.confidence,
+                        feedback_command_id_before_send=feedback_before_send,
+                        feedback_command_id_at_result=feedback_command_id,
+                        feedback_command_id_changed=feedback_id_changed,
+                        settle_match_method=sample.method,
+                        settle_match_ambiguous=sample.candidate_count > 1,
+                        settle_candidate_count=sample.candidate_count,
+                        settle_match_error_rad=sample.joint_norm_error_rad,
+                        settle_match_age_ms=sample.match_age_ms,
+                        pending_command_count=sample.pending_count,
+                        ros_timestamp=now_wall,
+                        ros_cmd_joints=command.target_rad,
+                        robot_joints=q_current,
+                        ros_cmd_tool_target=command.target_tool,
+                        robot_tool_actual=tool_act,
+                        robot_tool_target=tool_tgt,
+                        final_error_rad=sample.joint_norm_error_rad,
+                        max_joint_error_rad=sample.joint_max_error_rad,
+                        velocity_mag_rad_s=velocity_mag,
+                        robot_mode=current_mode,
+                        error_status=err_info['error_status'],
+                        operation_mode=operation_mode,
+                        unity_sample=command.unity_sample,
+                    )
 
             # === PERIODIC TOOL INDEX QUERY (every ~5s at 50Hz = 250 cycles) ===
             self._tool_query_counter += 1
@@ -947,8 +1351,6 @@ class TeleopNode(Node):
 
             # === MOTION TRACKING (Latency Analyzer) ===
             # T4: Motion Start
-            velocity_mag = np.max(np.abs(self.controller.robot_velocity))
-
             # Update Analyzer Stats
             self.latency_analyzer.update_tracking(velocity_mag)
 
@@ -969,15 +1371,115 @@ class TeleopNode(Node):
                         # CLI Log
                         self.get_logger().info(report)
 
-                        if self.triple_logger:
+                        if self.triple_logger and session_logging_active:
+                            match_result = self.pending_command_registry.match(
+                                q_current,
+                                feedback_command_id=feedback_command_id,
+                                now_wall=now_wall,
+                                norm_tolerance_rad=0.01,
+                                per_joint_tolerance_rad=motion_config.VALID_PER_JOINT_LIMIT,
+                            )
+                            matched_command = match_result.command
+                            if matched_command is not None:
+                                matched_seq = matched_command.control_command_seq
+                                matched_uid = matched_command.ros_command_uid
+                                matched_dobot_id = matched_command.dobot_command_id
+                                matched_command_text = matched_command.command_text
+                                matched_unity_sample = matched_command.unity_sample
+                                matched_target_rad = matched_command.target_rad
+                                matched_target_tool = matched_command.target_tool
+                                feedback_before_send = matched_command.feedback_command_id_before_send
+                            else:
+                                matched_seq = metrics.get("control_command_seq")
+                                matched_uid = self.active_command_uid
+                                matched_dobot_id = self.active_command_dobot_id
+                                matched_command_text = self.active_command_text
+                                matched_unity_sample = self.active_command_unity_sample
+                                matched_target_rad = metrics.get("target")
+                                matched_target_tool = metrics.get("ros_cmd_tool_target")
+                                feedback_before_send = self.active_feedback_command_id_before_send
+
+                            feedback_id_changed = (
+                                None
+                                if feedback_before_send is None
+                                else feedback_command_id != feedback_before_send
+                            )
+                            command_id_match = match_result.command_id_match
+                            command_result_status = match_result.status
+                            settle_match_method = match_result.method
+                            tracking_source = match_result.method
+                            tracking_confidence = match_result.confidence
                             metrics["final_tool_actual"] = tool_act
                             metrics["final_tool_target"] = tool_tgt
                             metrics["operation_mode"] = operation_mode
+                            metrics["unity_sample"] = matched_unity_sample
+                            metrics["control_command_seq"] = matched_seq
+                            metrics["ros_command_uid"] = matched_uid
+                            metrics["dobot_command_id"] = matched_dobot_id
+                            metrics["robot_feedback_command_id"] = feedback_command_id
+                            metrics["command_id_match"] = command_id_match
+                            metrics["command_result_status"] = command_result_status
+                            metrics["dobot_command_text"] = matched_command_text
+                            metrics["command_tracking_source"] = tracking_source
+                            metrics["command_tracking_confidence"] = tracking_confidence
+                            metrics["feedback_command_id_before_send"] = feedback_before_send
+                            metrics["feedback_command_id_at_result"] = feedback_command_id
+                            metrics["feedback_command_id_changed"] = feedback_id_changed
+                            metrics["settle_match_method"] = settle_match_method
+                            metrics["settle_match_ambiguous"] = match_result.ambiguous
+                            metrics["settle_candidate_count"] = match_result.candidate_count
+                            metrics["settle_match_error_rad"] = match_result.match_error_rad
+                            metrics["settle_second_best_error_rad"] = match_result.second_best_error_rad
+                            metrics["settle_match_age_ms"] = match_result.match_age_ms
+                            metrics["pending_command_count"] = match_result.pending_count
+                            metrics["target"] = matched_target_rad
+                            metrics["ros_cmd_tool_target"] = matched_target_tool
                             self.triple_logger.log_latency_event(metrics)
+                            self.triple_logger.log_command_result(
+                                control_command_seq=matched_seq,
+                                ros_command_uid=matched_uid,
+                                dobot_command_id=matched_dobot_id,
+                                robot_feedback_command_id=feedback_command_id,
+                                status=command_result_status,
+                                command_id_match=command_id_match,
+                                dobot_command_text=matched_command_text,
+                                command_tracking_source=tracking_source,
+                                command_tracking_confidence=tracking_confidence,
+                                feedback_command_id_before_send=feedback_before_send,
+                                feedback_command_id_at_result=feedback_command_id,
+                                feedback_command_id_changed=feedback_id_changed,
+                                settle_match_method=settle_match_method,
+                                settle_match_ambiguous=match_result.ambiguous,
+                                settle_candidate_count=match_result.candidate_count,
+                                settle_match_error_rad=match_result.match_error_rad,
+                                settle_second_best_error_rad=match_result.second_best_error_rad,
+                                settle_match_age_ms=match_result.match_age_ms,
+                                pending_command_count=match_result.pending_count,
+                                ros_timestamp=now_wall,
+                                ros_cmd_joints=matched_target_rad,
+                                robot_joints=q_current,
+                                ros_cmd_tool_target=matched_target_tool,
+                                robot_tool_actual=tool_act,
+                                robot_tool_target=tool_tgt,
+                                final_error_rad=metrics.get("final_error"),
+                                max_joint_error_rad=metrics.get("max_error"),
+                                robot_mode=current_mode,
+                                error_status=err_info['error_status'],
+                                operation_mode=operation_mode,
+                                unity_sample=matched_unity_sample,
+                            )
+                            self.pending_command_registry.mark_logged(match_result)
 
             # === SKIP TELEOP COMMANDS DURING PLAYBACK / POST-STOP HOMING ===
             if is_blocked:
                 return  # monitoring data already published above; sequencer owns commands
+
+            if self._direct_unity_target_is_stale(
+                now_wall,
+                target_recv_wall_snapshot,
+                unity_sample_snapshot,
+            ):
+                return
 
             # ---------------------------------------------------------
             # 🧠 TELEOP CONTROLLER DECISION
@@ -990,17 +1492,17 @@ class TeleopNode(Node):
             run_queued_cmd = self.feedback.get_run_queued_cmd()
 
             should_send, send_reason = self.controller.should_send_command(
-                self.latest_target,
+                target_snapshot,
                 q_current,
                 now=now,
                 queue_backlog_rad=queue_backlog_rad,
                 run_queued_cmd=run_queued_cmd,
-                target_velocity=self.target_compensator.target_velocity,
+                target_velocity=target_velocity_snapshot,
             )
 
             if should_send:
                 if motion_config.SCENE_SAFETY_BLOCK_REALTIME:
-                    safety_result = self.scene_safety_guard.check_joints_rad(self.latest_target)
+                    safety_result = self.scene_safety_guard.check_joints_rad(target_snapshot)
                     if safety_result.blocked:
                         if now - self._last_scene_safety_block_log > 0.5:
                             self.get_logger().error(
@@ -1015,7 +1517,10 @@ class TeleopNode(Node):
                 # force_send=True when stuck: bypass should_skip_motion which silently drops commands
                 is_stuck_recovery = send_reason.startswith("Stuck")
                 cmd_str, q_safe = self.controller.format_command_string(
-                    self.latest_target, q_current=q_current, force_send=is_stuck_recovery)
+                    target_snapshot,
+                    q_current=q_current,
+                    force_send=is_stuck_recovery,
+                )
 
                 if not cmd_str:
                     return
@@ -1023,21 +1528,59 @@ class TeleopNode(Node):
                 # 2. Timing Stats
                 t3_cmd_send = time.time()
                 # 3. Send to Robot
-                if self.sender.send(cmd_str):
+                send_result = self.sender.send_with_command_id(
+                    cmd_str,
+                    response_timeout=motion_config.REALTIME_COMMAND_ID_RESPONSE_TIMEOUT_SEC,
+                )
+                if send_result.success:
                     self._realtime_command_seq += 1
                     control_command_seq = self._realtime_command_seq
+                    ros_command_uid = f"ros_cmd_{control_command_seq:06d}"
+                    dobot_command_id = send_result.command_id
+                    feedback_command_id_before_send = feedback_command_id
+                    tracking_source = (
+                        "dobot_ack_id"
+                        if dobot_command_id is not None
+                        else "ros_sequence_pose_target"
+                    )
+                    tracking_confidence = (
+                        "medium"
+                        if dobot_command_id is not None
+                        else "low"
+                    )
                     ros_cmd_tool_target = self.feedback.kinematics.forward_kinematics(
                         np.degrees(q_safe)
                     )
                     # Start Tracking (T1-T3)
                     self.latency_analyzer.start_tracking(
-                        self.unity_send_time,
-                        self.target_recv_time,
+                        unity_send_time_snapshot,
+                        target_recv_time_snapshot,
                         t3_cmd_send,
                         q_safe,
                         current_q=q_current,
                         command_seq=control_command_seq,
                         target_tool=ros_cmd_tool_target,
+                    )
+                    self.active_command_unity_sample = unity_sample_snapshot
+                    self.active_command_uid = ros_command_uid
+                    self.active_command_dobot_id = dobot_command_id
+                    self.active_command_response = send_result.response
+                    self.active_command_text = cmd_str
+                    self.active_feedback_command_id_before_send = feedback_command_id_before_send
+                    self.active_command_tracking_source = tracking_source
+                    self.active_command_tracking_confidence = tracking_confidence
+                    self.pending_command_registry.register(
+                        PendingCommand(
+                            control_command_seq=control_command_seq,
+                            ros_command_uid=ros_command_uid,
+                            target_rad=q_safe.copy(),
+                            target_tool=np.asarray(ros_cmd_tool_target, dtype=float).copy(),
+                            dobot_command_id=dobot_command_id,
+                            command_text=cmd_str,
+                            unity_sample=unity_sample_snapshot,
+                            sent_wall_timestamp=t3_cmd_send,
+                            feedback_command_id_before_send=feedback_command_id_before_send,
+                        )
                     )
 
                     # File Log (CSV)
@@ -1046,13 +1589,13 @@ class TeleopNode(Node):
                     time_since_last = sent_mono - self.controller.last_sent_time
                     velocity_mag = np.max(self.controller.robot_velocity)
                     network_delay_ms = (
-                        (self.target_recv_time - self.unity_send_time) * 1000.0
-                        if self.target_recv_time > 0 and self.unity_send_time > 0
+                        (target_recv_time_snapshot - unity_send_time_snapshot) * 1000.0
+                        if target_recv_time_snapshot > 0 and unity_send_time_snapshot > 0
                         else 0.0
                     )
                     decision_delay_ms = (
-                        (t3_cmd_send - self.target_recv_time) * 1000.0
-                        if self.target_recv_time > 0
+                        (t3_cmd_send - target_recv_time_snapshot) * 1000.0
+                        if target_recv_time_snapshot > 0
                         else 0.0
                     )
 
@@ -1061,10 +1604,10 @@ class TeleopNode(Node):
                     if self.triple_logger:
                         self.triple_logger.log_ros_cmd(
                             q_safe,
-                            self.latest_target,
+                            target_snapshot,
                             t3_cmd_send,
-                            t1_unity_send_ros_wall=self.unity_send_time,
-                            t2_ros_recv_wall=self.target_recv_time,
+                            t1_unity_send_ros_wall=unity_send_time_snapshot,
+                            t2_ros_recv_wall=target_recv_time_snapshot,
                             network_delay_ms=network_delay_ms,
                             decision_delay_ms=decision_delay_ms,
                             send_reason=send_reason,
@@ -1075,13 +1618,21 @@ class TeleopNode(Node):
                             time_since_last_cmd_ms=time_since_last * 1000.0,
                             velocity_mag_rad_s=velocity_mag,
                             control_command_seq=control_command_seq,
+                            ros_command_uid=ros_command_uid,
+                            dobot_command_id=dobot_command_id,
+                            dobot_command_response=send_result.response,
+                            dobot_command_text=cmd_str,
+                            command_tracking_source=tracking_source,
+                            command_tracking_confidence=tracking_confidence,
+                            feedback_command_id_before_send=feedback_command_id_before_send,
                             ros_cmd_tool_target=ros_cmd_tool_target,
+                            unity_sample=unity_sample_snapshot,
                             joints_are_degrees=False,
                         )
 
                     # CLI Report
                     msg = self.latency_analyzer.format_sent_report(
-                        should_send, send_reason, q_current, self.latest_target,
+                        should_send, send_reason, q_current, target_snapshot,
                         self.controller.last_sent_target, self.controller.last_sent_time,
                         self.controller.robot_velocity,
                         robot_mode=robot_status['robot_mode'],
@@ -1103,6 +1654,30 @@ class TeleopNode(Node):
         """ปิดทุกอย่างอย่างเรียบร้อย"""
         self.get_logger().info("Shutting down...")
         self.stop_event.set()
+
+        unity_worker = getattr(self, "_unity_sample_worker_thread", None)
+        if unity_worker is not None:
+            unity_worker.join(timeout=5.0)
+        unity_control_worker = getattr(self, "_unity_control_worker_thread", None)
+        if unity_control_worker is not None:
+            self._unity_control_latest_event.set()
+            unity_control_worker.join(timeout=5.0)
+
+        if unity_worker is not None or unity_control_worker is not None:
+            pending = 0
+            unity_queue = getattr(self, "_unity_sample_queue", None)
+            if unity_queue is not None:
+                try:
+                    pending = unity_queue.qsize()
+                except NotImplementedError:
+                    pending = -1
+            self.get_logger().info(
+                "Unity teleop workers stopped: "
+                f"enqueued={getattr(self, '_unity_sample_enqueued_count', 0)} "
+                f"logged={getattr(self, '_unity_sample_processed_count', 0)} "
+                f"controlled={getattr(self, '_unity_control_processed_count', 0)} "
+                f"pending={pending}"
+            )
 
         if self.triple_logger:
             self.triple_logger.close()

@@ -66,8 +66,6 @@ flowchart LR
 
     %% Unity to ROS via ROS-TCP-Endpoint.
     pathPub -- "/unity/joint_cmd\nsensor_msgs/JointState" --> endpoint
-    pathPub -.->|"legacy: /unity/trajectory_data\nstd_msgs/String JSON"| endpoint
-    pathPub -.->|"legacy: /mg400/joint_trajectory_controller/command"| endpoint
     teachPub -- "/teach/job_request\ncompile / execute / tune / stop" --> endpoint
     teachPub -- "/unity/speed_factor\nstd_msgs/Int32" --> endpoint
     teachPub -- "/mg400/scene_safety_enabled\nstd_msgs/Bool" --> endpoint

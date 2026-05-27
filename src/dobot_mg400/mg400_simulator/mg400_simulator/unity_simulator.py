@@ -13,16 +13,12 @@ Unity Simulator - จำลองการส่งข้อมูลจาก U
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
 from mg400_controller.common.config.robot_config import JOINT_LIMITS, ELBOW_ANGLE_LIMIT
 import math
 import random
 import time
-import json
-import os
 import threading
 import tkinter as tk
-from tkinter import ttk
 import numpy as np
 
 JOINT_LIMITS = [(-160, 160), (-25, 85), (-25, 105), (-360, 360)]
@@ -45,7 +41,6 @@ class UnitySimulator(Node):
         print("4 = Manual (Continuous Stream)")
         print("5 = Manual Step (Move sliders then press Send)")
         print("6 = Mouse 3D (IK with Workspace Limits) ")
-        print("7 = Teach & Repeat (Record / Play panel) ")
         choice = input("> ")
 
         if choice == '1':   self.mode = 'sine'
@@ -54,7 +49,6 @@ class UnitySimulator(Node):
         elif choice == '4': self.mode = 'manual'
         elif choice == '5': self.mode = 'manual_step'
         elif choice == '6': self.mode = 'mouse_3d'
-        elif choice == '7': self.mode = 'teach_repeat'
         else:
             print("Invalid input, defaulting to 'manual_step'")
             self.mode = 'manual_step'
@@ -94,16 +88,10 @@ class UnitySimulator(Node):
         self.key_active_start = {}   # Timestamp when key sequence started
         self.last_update_time = 0    # For repeat rate control
         
-        # Teach & Repeat publishers
-        self.pub_teach_status = self.create_publisher(String, '/unity/teach_status', 10)
-        self.pub_traj_data    = self.create_publisher(String, '/unity/trajectory_data', 10)
-
         if self.mode in ['manual', 'manual_step']:
             self.init_gui()
         elif self.mode == 'mouse_3d':
             self.init_mouse_3d_gui()
-        elif self.mode == 'teach_repeat':
-            self.init_teach_repeat_gui()
 
         # === Timer ===
         self.create_timer(1.0 / self.rate, self.publish_callback)
@@ -277,7 +265,7 @@ class UnitySimulator(Node):
         if not self.mouse_active:
             return
             
-        canvas_size = 300.0 if self.mode == 'teach_repeat' else 550.0
+        canvas_size = 550.0
         
         # 1. Map Mouse -> J1 Angle (Symmetric -160 to 160)
         # Center X is 0 degrees
@@ -310,10 +298,7 @@ class UnitySimulator(Node):
         
         self.canvas.coords(self.position_dot, visual_x-5, visual_y-5, visual_x+5, visual_y+5)
         
-        if self.mode == 'teach_repeat':
-            self.joint_label.config(text=f"J1: {self.j1_angle:5.1f}°  J2: {self.j2_angle:5.1f}°\nJ3: {self.j3_angle:5.1f}°  J4: {self.j4_angle:5.1f}°")
-        else:
-            self.update_joint_display()
+        self.update_joint_display()
     
     def on_mouse_enter(self, event):
         """Activate mouse control when entering canvas"""
@@ -383,10 +368,6 @@ class UnitySimulator(Node):
         self.j3_angle = np.clip(self.j3_angle, j3_min_elbow, j3_max_elbow)
         self.j4_angle = np.clip(self.j4_angle, JOINT_LIMITS[3][0], JOINT_LIMITS[3][1])
         
-        if self.mode == 'teach_repeat':
-            if hasattr(self, 'joint_label'):
-                self.joint_label.config(text=f"J1: {self.j1_angle:5.1f}°  J2: {self.j2_angle:5.1f}°\nJ3: {self.j3_angle:5.1f}°  J4: {self.j4_angle:5.1f}°")
-    
     def update_j3_j4_from_keyboard(self):
         """Update J3 and J4 based on Watchdog timer"""
         current_time = time.time()
@@ -579,10 +560,8 @@ class UnitySimulator(Node):
             positions = self.generate_circle()
         elif self.mode == 'random':
             positions = self.generate_random()
-        elif self.mode in ['mouse_3d', 'teach_repeat']:
+        elif self.mode == 'mouse_3d':
             if self.tk_root:
-                if self.mode == 'teach_repeat' and getattr(self, '_tr_is_playing', False):
-                    return  # playback owns the command stream
                 # Use all 4 joint angles directly (no IK)
                 positions = [
                     math.radians(self.j1_angle),  # J1 from mouse
@@ -622,180 +601,6 @@ class UnitySimulator(Node):
             self.random_positions[i] += delta
             self.random_positions[i] = max(-self.amplitude, min(self.amplitude, self.random_positions[i]))
         return self.random_positions
-
-    # ═══════════════════════════════════════════════════════════════════════
-    #  MODE 7 — TEACH & REPEAT GUI
-    # ═══════════════════════════════════════════════════════════════════════
-    TRAJ_DIR = os.path.expanduser('~/project_teleop_ws/trajectories')
-
-    def init_teach_repeat_gui(self):
-        os.makedirs(self.TRAJ_DIR, exist_ok=True)
-        self._tr_is_playing = False
-        self._tr_is_recording = False
-        self.tk_root = tk.Tk()
-        self.tk_root.title('\U0001F3AF Teach & Repeat — Simulator')
-        self.tk_root.geometry('650x580')
-        self.tk_root.resizable(False, False)
-
-        main_frame = tk.Frame(self.tk_root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # ── Left Panel: Joint Control Workspace ───────────────────────────
-        canvas_frame = tk.LabelFrame(main_frame, text="Joint Control Workspace", font=("Arial", 11, "bold"))
-        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
-
-        self.canvas = tk.Canvas(canvas_frame, width=300, height=300, bg="white", highlightthickness=1)
-        self.canvas.pack(padx=10, pady=10)
-
-        self.canvas.bind("<Motion>", self.on_mouse_move)
-        self.canvas.bind("<Enter>", self.on_mouse_enter)
-        self.canvas.bind("<Leave>", self.on_mouse_leave)
-
-        self.draw_joint_workspace_teach_repeat()
-
-        joint_frame = tk.Frame(canvas_frame)
-        joint_frame.pack(fill=tk.X, pady=5)
-        self.joint_label = tk.Label(joint_frame,
-                                    text="J1: 0.0\u00b0  J2: 0.0\u00b0\nJ3: 0.0\u00b0  J4: 0.0\u00b0",
-                                    font=("Courier", 11, "bold"), justify="center")
-        self.joint_label.pack(pady=5)
-        self.keyboard_label = self.joint_label  # update_keyboard_display needs this attr
-
-        self.tk_root.bind('<KeyPress>', self.on_key_press)
-        self.tk_root.bind('<KeyRelease>', self.on_key_release)
-
-        inst_text = "Controls:\n\u2022 Mouse in box: J1 (X) & J2 (Y)\n\u2022 W/S keys: J3 | A/D keys: J4"
-        tk.Label(canvas_frame, text=inst_text, font=("Arial", 8), justify="center", fg="gray").pack(pady=5)
-
-        # ── Right Panel: Teach & Repeat Controls ──────────────────────────
-        control_frame = tk.Frame(main_frame)
-        control_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
-
-        pad = dict(padx=10, pady=4, sticky='ew')
-
-        # ── Status label ──────────────────────────────────────────────────
-        self._tr_status = tk.StringVar(value='IDLE')
-        tk.Label(control_frame, textvariable=self._tr_status,
-                 font=('Courier', 14, 'bold'), fg='#0ea5e9',
-                 anchor='center').grid(row=0, column=0, columnspan=2, pady=8)
-
-        # ── Record / Stop / Preview buttons ───────────────────────────────
-        btn_cfg = dict(font=('Arial', 11, 'bold'), width=14, height=2)
-        tk.Button(control_frame, text='\U0001F534 Record', bg='#ef4444', fg='white',
-                  command=self._tr_record, **btn_cfg).grid(row=1, column=0, **pad)
-        tk.Button(control_frame, text='\u23f9  Stop', bg='#64748b', fg='white',
-                  command=self._tr_stop, **btn_cfg).grid(row=1, column=1, **pad)
-        tk.Button(control_frame, text='\u25b6  Preview', bg='#3b82f6', fg='white',
-                  command=self._tr_preview, **btn_cfg).grid(row=2, column=0, columnspan=2, **pad)
-
-        # ── Save as filename ──────────────────────────────────────────────
-        tk.Label(control_frame, text='Save as filename:',
-                 font=('Arial', 9, 'bold')).grid(row=3, column=0, columnspan=2, padx=10, pady=(12, 2), sticky='w')
-        self._tr_name_entry = tk.Entry(control_frame, width=18, font=('Arial', 10))
-        self._tr_name_entry.grid(row=4, column=0, padx=10, pady=2, sticky='ew')
-        tk.Button(control_frame, text='\U0001F4BE Save As', font=('Arial', 9, 'bold'),
-                  bg='#22c55e', fg='white',
-                  command=self._tr_save_as).grid(row=4, column=1, padx=10, pady=2, sticky='ew')
-
-        # ── File dropdown + Load ──────────────────────────────────────────
-        tk.Label(control_frame, text='Load trajectory:',
-                 font=('Arial', 9, 'bold')).grid(row=5, column=0, columnspan=2, padx=10, pady=(10, 2), sticky='w')
-        self._tr_file_var = tk.StringVar()
-        self._tr_combo = ttk.Combobox(control_frame, textvariable=self._tr_file_var,
-                                       state='readonly', width=22)
-        self._tr_combo.grid(row=6, column=0, padx=10, pady=2, sticky='ew')
-        self._tr_refresh_files()
-        tk.Button(control_frame, text='\U0001F4c2 Load', font=('Arial', 10, 'bold'),
-                  command=self._tr_load).grid(row=6, column=1, padx=10, pady=2, sticky='ew')
-        tk.Button(control_frame, text='\U0001F504 Refresh', font=('Arial', 9),
-                  command=self._tr_refresh_files).grid(row=7, column=1, padx=10, pady=2, sticky='ew')
-
-        control_frame.columnconfigure(0, weight=1)
-        control_frame.columnconfigure(1, weight=1)
-
-        # Start GUI keyboard-watchdog loop
-        self.tk_root.after(30, self.gui_update_loop_teach_repeat)
-
-    def draw_joint_workspace_teach_repeat(self):
-        self.canvas.delete("all")
-        cx, cy = 150, 150
-        
-        self.canvas.create_line(cx, 0, cx, 300, fill="lightgray", width=1)
-        self.canvas.create_line(0, cy, 300, cy, fill="lightgray", width=1)
-        
-        for r in [50, 100, 140]:
-            self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r, outline="#e0e0e0", width=1)
-        
-        self.canvas.create_text(cx, 10, text="J2 (+)", fill="blue", font=("Arial", 9))
-        self.canvas.create_text(cx, 290, text="J2 (-)", fill="blue", font=("Arial", 9))
-        self.canvas.create_text(20, cy, text="J1 (-)", fill="red", font=("Arial", 9))
-        self.canvas.create_text(280, cy, text="J1 (+)", fill="red", font=("Arial", 9))
-        
-        self.position_dot = self.canvas.create_oval(cx-5, cy-5, cx+5, cy+5, fill="green", outline="darkgreen", width=2)
-
-    def gui_update_loop_teach_repeat(self):
-        self.update_j3_j4_from_keyboard()
-        self.tk_root.after(30, self.gui_update_loop_teach_repeat)
-
-    def _tr_publish(self, status_str):
-        msg = String()
-        msg.data = status_str
-        self.pub_teach_status.publish(msg)
-        self._tr_status.set(status_str)
-        self.get_logger().info(f'\U0001F3AF Teach status → {status_str}')
-
-    def _tr_record(self):
-        self._tr_is_recording = True
-        self._tr_publish('Record')
-
-    def _tr_stop(self):
-        self._tr_is_playing = False
-        self._tr_is_recording = False
-        # Reset joint angles to Home (0,0,0,0) so teleop doesn't
-        # drive robot away from home after the homing command finishes
-        self.j1_angle = 0.0
-        self.j2_angle = 0.0
-        self.j3_angle = 0.0
-        self.j4_angle = 0.0
-        if hasattr(self, 'position_dot'):
-            cx, cy = 150, 150
-            self.canvas.coords(self.position_dot, cx-5, cy-5, cx+5, cy+5)
-        if hasattr(self, 'joint_label'):
-            self.joint_label.config(text="J1: 0.0°  J2: 0.0°\nJ3: 0.0°  J4: 0.0°")
-        self._tr_publish('Stop')
-
-    def _tr_save(self):
-        self._tr_publish('Save')  # quick-save as temp_trajectory.json
-
-    def _tr_save_as(self):
-        name = getattr(self, '_tr_name_entry', None)
-        filename = name.get().strip() if name else ''
-        if not filename:
-            self._tr_status.set('Enter a filename first')
-            return
-        self._tr_publish(f'Save:{filename}')
-        self.tk_root.after(400, self._tr_refresh_files)  # refresh dropdown after save
-
-    def _tr_preview(self):
-        self._tr_is_playing = True
-        self._tr_publish('Preview')
-
-    def _tr_load(self):
-        name = self._tr_file_var.get()
-        if name:
-            self._tr_publish(f'Load:{name}')
-
-    def _tr_refresh_files(self):
-        try:
-            files = sorted(f for f in os.listdir(self.TRAJ_DIR) if f.endswith('.json'))
-        except FileNotFoundError:
-            files = []
-        self._tr_combo['values'] = files
-        if files:
-            self._tr_combo.current(0)
-
-    def _tr_send_json(self):
-        pass  # superseded by Save As filename workflow
 
 def main(args=None):
     rclpy.init(args=args)

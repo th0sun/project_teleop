@@ -2,10 +2,8 @@
 # -*- coding: utf-8 -*-
 """Trajectory file I/O — pure functions extracted from TrajectoryRecorder.
 
-This module contains the save / load / list helpers that were previously
-methods on ``TrajectoryRecorder``.  The recorder still exposes the same
-public method surface for backwards compatibility — those methods are
-thin facades that call back into the functions here.
+This module contains the save / load / list helpers used by
+``TrajectoryRecorder`` and the simulator's Unity-JSON importer.
 
 Behaviour is intentionally identical to the pre-extraction code:
 
@@ -13,14 +11,13 @@ Behaviour is intentionally identical to the pre-extraction code:
   in the same shape the operator-facing JSON files have always used.
 - ``load_trajectory`` accepts both the wrapped ``{"frames": ...}`` form
   and the legacy bare-list form (raw Unity dumps).
-- ``parse_unity_trajectory_json`` mirrors the recorder's prior
-  ``save_from_unity_json`` parser including the default filename
-  ``unity_trajectory.json``.
+- ``parse_unity_trajectory_json`` parses imported Unity trajectory files and
+  keeps the default filename ``unity_trajectory.json``.
 - ``list_trajectory_files`` returns sorted ``*.json`` file names from
   ``traj_dir`` and silently returns an empty list if the directory is
   missing — matching the recorder's prior behaviour.
 
-No new behaviour, no new fields, no new validation.  Refactor only.
+No robot movement or ROS subscription behaviour lives in this module.
 """
 
 from __future__ import annotations
@@ -91,7 +88,7 @@ def parse_unity_trajectory_json(
     json_str: str,
     logger,
 ) -> Tuple[List[Dict], List[Dict], str]:
-    """Parse a /unity/trajectory_data JSON payload.
+    """Parse an imported Unity trajectory JSON payload.
 
     Returns ``(frames, events, filename)``.  ``filename`` defaults to
     ``unity_trajectory.json`` if the payload does not specify one.

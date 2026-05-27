@@ -28,7 +28,7 @@ from typing import Iterable, List, Sequence, Tuple
 import numpy as np
 
 from mg400_controller.common.utils.kinematics import KinematicsCalculator
-from teaching_core.trajectory.command_arc_sampling import sample_command_arc_xyzr
+from teaching_core.trajectory import sample_command_arc_xyzr
 from teaching_core.trajectory.segment_classifier import SegmentType
 
 

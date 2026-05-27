@@ -5,6 +5,7 @@ Layout: 3-D viewport (left, stretchy) | control panel (right, fixed 310px)
 """
 
 import numpy as np
+import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QStatusBar, QAction, QMenuBar, QMessageBox,
@@ -32,6 +33,8 @@ class MainWindow(QMainWindow):
         )
         self._feedback_follow_reason = ''
         self._feedback_sync_samples_remaining = 0
+        self._live_stream_target = None
+        self._live_stream_last_sent = None
 
         self._build_ui()
         self._build_menu()
@@ -41,6 +44,12 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_status)
         self._timer.start(200)
+
+        self._live_stream_timer = QTimer(self)
+        self._live_stream_timer.timeout.connect(self._flush_live_joint_stream)
+        self._live_stream_timer.start(int(os.environ.get('MG400_SIM_LIVE_STREAM_MS', '8')))
+        if os.environ.get('MG400_SIM_AUTO_CONNECT', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+            QTimer.singleShot(500, self._auto_connect_ros)
 
     # ── UI Construction ───────────────────────────────────────────────────────
 
@@ -198,8 +207,7 @@ class MainWindow(QMainWindow):
         self._viewport.set_ghost_joints(None)
         self._panel.set_joints(joints)
         self._teach.set_current_joints(joints)
-        if self._ros.connected:
-            self._ros.publish_joint_cmd(joints)
+        self._queue_live_joints(joints)
 
     @pyqtSlot(float, float, float)
     def _on_ee_dragged(self, x, y, z):
@@ -212,8 +220,7 @@ class MainWindow(QMainWindow):
         self._viewport.set_ghost_joints(None)
         self._viewport.set_joints(joints)
         self._teach.set_current_joints(joints)
-        if self._ros.connected:
-            self._ros.publish_joint_cmd(joints)
+        self._queue_live_joints(joints)
 
     @pyqtSlot(list)
     def _on_teach_goto(self, joints: list):
@@ -295,6 +302,30 @@ class MainWindow(QMainWindow):
             return
         self._ros.publish_speed(max(1, min(100, speed_factor)))
 
+    def _queue_live_joints(self, joints: list):
+        """Publish the latest local target immediately, then keep only latest.
+
+        The Mac simulator is the Unity-like source. For live teleop preview the
+        outgoing `/unity/joint_cmd` must follow the local target, not feedback.
+        """
+        self._live_stream_target = [float(v) for v in joints[:4]]
+        self._publish_live_target(force=True)
+
+    def _flush_live_joint_stream(self):
+        self._publish_live_target(force=False)
+
+    def _publish_live_target(self, force: bool = False):
+        if not self._ros.connected or self._live_stream_target is None:
+            return
+        target = self._live_stream_target
+        if not force and self._live_stream_last_sent is not None:
+            if max(abs(a - b) for a, b in zip(target, self._live_stream_last_sent)) < 0.001:
+                return
+        if self._ros.publish_joint_cmd(target):
+            self._live_stream_last_sent = list(target)
+        else:
+            self.statusBar().showMessage('ROS-TCP send failed; reconnect the bridge.', 1500)
+
     @pyqtSlot()
     def _send_joints_to_ros(self):
         joints = self._viewport.get_joints()
@@ -327,6 +358,15 @@ class MainWindow(QMainWindow):
                 self._panel._ros_check.setChecked(False)
         else:
             self._ros.stop()
+
+    def _auto_connect_ros(self):
+        if not self._ros.connected:
+            host = self._panel._ros_host.text()
+            port = self._panel._ros_port.value()
+            self._on_ros_toggle(host, port, True)
+            self._panel._ros_check.blockSignals(True)
+            self._panel._ros_check.setChecked(self._ros.connected)
+            self._panel._ros_check.blockSignals(False)
 
     # ── ROS callbacks (called from spin thread) ───────────────────────────────
 

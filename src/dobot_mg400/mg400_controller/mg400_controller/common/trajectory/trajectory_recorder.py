@@ -18,8 +18,8 @@ Handles the full lifecycle:
 5. **Stop**    — abort any operation and send the robot Home (0,0,0,0).
 
 Topic integration (managed by vr_teleop_node.py):
-  /unity/teach_status   — String: Record | Stop | Save | Load | Preview
-  /unity/trajectory_data — String: JSON body from Unity
+  /teach/job_request    — String JSON body from Unity / simulator
+  /unity/joint_cmd      — JointState live pose for realtime control
 """
 
 import os
@@ -213,37 +213,6 @@ def compiled_playback_plan_to_dict(plan: CompiledPlaybackPlan) -> Dict[str, Any]
             for event in getattr(plan, "event_commands", ())
         ],
     }
-
-
-def frames_from_joint_trajectory_msg(msg) -> List[Dict]:
-    """Convert a ROS ``trajectory_msgs/JointTrajectory``-like message to frames.
-
-    Unity's current `ROSPathPublisher` sends this message when the user presses
-    "Send To Real Robot".  The recorder stores degrees internally, while ROS
-    trajectory points use radians for revolute joints.
-    """
-    frames = []
-    last_t = None
-    for point in getattr(msg, "points", []):
-        positions = getattr(point, "positions", [])
-        if len(positions) < 4:
-            continue
-        duration = getattr(point, "time_from_start", None)
-        if duration is None:
-            continue
-        t = float(getattr(duration, "sec", 0)) + float(getattr(duration, "nanosec", 0)) * 1e-9
-        if last_t is not None and t <= last_t:
-            continue
-        q_deg = np.degrees(np.asarray(positions[:4], dtype=float))
-        frames.append({
-            "timeStamp": round(t, 6),
-            "j1": round(float(q_deg[0]), 6),
-            "j2": round(float(q_deg[1]), 6),
-            "j3": round(float(q_deg[2]), 6),
-            "j4": round(float(q_deg[3]), 6),
-        })
-        last_t = t
-    return frames
 
 
 class TrajectoryRecorder:
@@ -487,17 +456,6 @@ class TrajectoryRecorder:
         """Save last recording with a user-supplied name."""
         path = trajectory_io.resolve_trajectory_path(self._traj_dir, name)
         return trajectory_io.save_trajectory(path, self._frames, self._events, self._log)
-
-    def save_from_unity_json(self, json_str: str) -> str:
-        """Receive raw JSON from Unity /unity/trajectory_data and save."""
-        frames, events, filename = trajectory_io.parse_unity_trajectory_json(
-            json_str, self._log,
-        )
-        if not frames:
-            return ""
-        self._frames = frames
-        self._events = events
-        return self.save_as(filename)
 
     def load(self, name: str) -> bool:
         """Load a trajectory file by name from TRAJ_DIR."""

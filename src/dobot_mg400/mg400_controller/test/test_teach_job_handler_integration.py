@@ -10,9 +10,8 @@ The test reproduces the request payload that
 the contract from architecture_phase_research_log.md §21:
 
 * A1  ``compile``      → received → compiled, artifact published
-* A2  ``preview_sim``  → received → preview_ready, real_robot_moved=False
-* A3  ``execute``      → received → executing, playback engaged
-* A4  ``execute`` while gated → received → failed/EXECUTE_FORBIDDEN
+* A2  ``execute``      → received → executing, playback engaged
+* A3  ``execute`` while gated → received → failed/EXECUTE_FORBIDDEN
 
 No ROS runtime is required.  The handler is rclpy-free; we substitute a
 fake recorder that exposes only the surface ``TeachJobHandler`` actually
@@ -27,12 +26,10 @@ from pathlib import Path
 from mg400_controller.common.trajectory.teach_job_handler import (
     ACTION_COMPILE,
     ACTION_EXECUTE,
-    ACTION_PREVIEW_SIM,
     ERR_EXECUTE_FORBIDDEN,
     STAGE_COMPILED,
     STAGE_EXECUTING,
     STAGE_FAILED,
-    STAGE_PREVIEW_READY,
     STAGE_RECEIVED,
     TeachJobHandler,
 )
@@ -131,11 +128,8 @@ class _FakeRecorder:
         return path
 
     def start_preview(self):
-        # If this is ever called from a preview_sim path the test will FAIL
-        # because A2 forbids real-robot motion for that action.
+        # Execute uses this path to engage playback.
         self.start_preview_calls += 1
-        # Simulate "would have sent JointMovJ ..." so we can assert nothing
-        # leaks for sim:
         self.sent_motion_strings.append("JointMovJ(...stub...)")
 
     def stop_all(self, go_home=False):
@@ -232,37 +226,11 @@ class TeachJobBridgeUnityIntegrationTest(unittest.TestCase):
         )
 
     # -- A2 ----------------------------------------------------------------
-    def test_preview_sim_emits_preview_ready_without_engaging_real_robot(self):
-        cap = _CapturingHandler(allow_real_execute=True, traj_dir=self._tmp())
-        payload = _build_unity_request(
-            ACTION_PREVIEW_SIM, self.frames, file_name=self.file_name,
-            job_id="phase2-A2",
-        )
-
-        cap.handler.handle(payload)
-
-        self.assertEqual(cap.stages(), [STAGE_RECEIVED, STAGE_PREVIEW_READY])
-        terminal = cap.terminal()
-        self.assertTrue(terminal["metadata"]["sim"])
-        self.assertFalse(terminal["metadata"]["real_robot_moved"])
-
-        # Defining safety assertion for A2: no motion-side calls reached the
-        # recorder.  start_preview() would be the path that builds JointMovJ
-        # commands and dispatches them to port 30003 in production.
-        self.assertEqual(cap.recorder.start_preview_calls, 0)
-        self.assertEqual(cap.recorder.sent_motion_strings, [])
-
-        # Artifact emitted with the preview_sim flag so downstream tooling can
-        # tell it apart from a regular compile artifact.
-        self.assertEqual(len(cap.artifacts), 1)
-        self.assertTrue(cap.artifacts[0]["preview_sim"])
-
-    # -- A3 ----------------------------------------------------------------
     def test_execute_action_engages_playback_when_robot_allowed(self):
         cap = _CapturingHandler(allow_real_execute=True, traj_dir=self._tmp())
         payload = _build_unity_request(
             ACTION_EXECUTE, self.frames, file_name=self.file_name,
-            job_id="phase2-A3",
+            job_id="phase2-A2",
         )
 
         cap.handler.handle(payload)
@@ -272,12 +240,12 @@ class TeachJobBridgeUnityIntegrationTest(unittest.TestCase):
         self.assertTrue(cap.terminal()["metadata"]["real_robot_moved"])
         self.assertFalse(cap.terminal()["metadata"]["sim"])
 
-    # -- A4 ----------------------------------------------------------------
+    # -- A3 ----------------------------------------------------------------
     def test_execute_action_blocked_when_robot_disconnected(self):
         cap = _CapturingHandler(allow_real_execute=False, traj_dir=self._tmp())
         payload = _build_unity_request(
             ACTION_EXECUTE, self.frames, file_name=self.file_name,
-            job_id="phase2-A4",
+            job_id="phase2-A3",
         )
 
         cap.handler.handle(payload)

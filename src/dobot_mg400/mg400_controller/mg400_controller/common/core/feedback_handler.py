@@ -13,24 +13,40 @@
 import threading
 import socket
 import time
+from typing import Callable
 import numpy as np
 from mg400_protocol.feedback import FEEDBACK_PACKET_SIZE, parse_feedback_packet
 from sensor_msgs.msg import JointState
 from mg400_controller.common.utils.kinematics import KinematicsCalculator
 
 
+SANITY_RESYNC_REJECT_COUNT = 3
+SANITY_RESYNC_STABLE_THRESHOLD_RAD = 0.02
+
+
 class FeedbackHandler:
-    def __init__(self, robot_connection, joint_publisher, clock, logger, stop_event):
+    def __init__(
+        self,
+        robot_connection,
+        joint_publisher,
+        clock,
+        logger,
+        stop_event,
+        feedback_callback: Callable[[dict], None] | None = None,
+    ):
         self.connection = robot_connection
         self.publisher = joint_publisher
         self.clock = clock
         self.logger = logger
         self.stop_event = stop_event
+        self.feedback_callback = feedback_callback
         
         self.kinematics = KinematicsCalculator()
         self.current_position = np.zeros(4)  # Active joints only
         self.target_position = np.zeros(4)
         self.last_valid_joints = np.zeros(4)
+        self._last_rejected_joints = None
+        self._sanity_reject_count = 0
         self.run_queued_cmd = 0
         self.command_id = 0
         
@@ -70,9 +86,12 @@ class FeedbackHandler:
 
         while not self.stop_event.is_set():
             try:
-                # 🔄 Flush buffer to get LATEST packet (As seen in dobot_api.py)
+                # Read all currently available complete packets.  The control
+                # state still ends on the newest packet, while the session CSV
+                # can measure the real 30004 feedback cadence instead of a
+                # decimated control-loop snapshot.
                 self.connection.fb_sock.setblocking(False)
-                latest_packet = None
+                packets = []
                 while True:
                     try:
                         chunk = self.connection.fb_sock.recv(4096)
@@ -83,13 +102,14 @@ class FeedbackHandler:
                     except BlockingIOError:
                         break
                 
-                # Process only the LATEST complete packet from the buffer
+                # Process complete packets in wire order.  Keep any partial
+                # packet in ``buffer`` for the next recv cycle.
                 while len(buffer) >= FEEDBACK_PACKET_SIZE:
-                    latest_packet = buffer[:FEEDBACK_PACKET_SIZE]
+                    packets.append(buffer[:FEEDBACK_PACKET_SIZE])
                     buffer = buffer[FEEDBACK_PACKET_SIZE:]
                 
-                if latest_packet:
-                    self._process_packet(latest_packet)
+                for packet in packets:
+                    self._process_packet(packet)
                 
                 # Small sleep to yield
                 time.sleep(0.001)
@@ -110,6 +130,7 @@ class FeedbackHandler:
     def _process_packet(self, data):
         """ประมวลผล binary packet ผ่าน mg400_protocol feedback parser"""
         try:
+            packet_wall_time = time.time()
             snapshot = parse_feedback_packet(data, allow_mock_zero_test_value=True)
             if snapshot is None:
                 self.logger.warn(
@@ -124,8 +145,28 @@ class FeedbackHandler:
             
             # --- Sanity Check ---
             if not self.kinematics.validate_sanity(self.last_valid_joints, q_rad):
-                self.logger.warn(f"Packet Rejected: Sanity check failed. Jump from {np.degrees(self.last_valid_joints)} to {np.degrees(q_rad)}", throttle_duration_sec=1.0)
-                return
+                stable_reject = (
+                    self._last_rejected_joints is not None
+                    and np.max(np.abs(q_rad - self._last_rejected_joints))
+                    <= SANITY_RESYNC_STABLE_THRESHOLD_RAD
+                )
+                if stable_reject:
+                    self._sanity_reject_count += 1
+                else:
+                    self._last_rejected_joints = q_rad.copy()
+                    self._sanity_reject_count = 1
+
+                if self._sanity_reject_count < SANITY_RESYNC_REJECT_COUNT:
+                    self.logger.warn(f"Packet Rejected: Sanity check failed. Jump from {np.degrees(self.last_valid_joints)} to {np.degrees(q_rad)}", throttle_duration_sec=1.0)
+                    return
+
+                self.logger.warn(
+                    "Feedback sanity resync after stable repeated jump. "
+                    f"Old={np.degrees(self.last_valid_joints)} New={np.degrees(q_rad)}"
+                )
+
+            self._last_rejected_joints = None
+            self._sanity_reject_count = 0
             
             self.last_valid_joints = q_rad
             self.current_position = q_rad
@@ -169,6 +210,23 @@ class FeedbackHandler:
             self.flange_actual = self.kinematics.forward_kinematics(
                 [j1, j2, j3, j4]  # already in degrees from feedback packet
             )
+
+            if self.feedback_callback is not None:
+                try:
+                    self.feedback_callback({
+                        "timestamp": packet_wall_time,
+                        "q_actual_rad": q_rad.copy(),
+                        "q_target_rad": self.target_position.copy(),
+                        "robot_mode": int(self.robot_mode),
+                        "error_status": int(self.error_status),
+                        "collision_state": int(self.collision_state),
+                        "run_queued_cmd": int(self.run_queued_cmd),
+                        "command_id": int(self.command_id),
+                        "tool_vector_actual": self.tool_vector_actual.copy(),
+                        "tool_vector_target": self.tool_vector_target.copy(),
+                    })
+                except Exception as exc:
+                    self.logger.error(f"Feedback callback error: {exc}")
             
         except Exception as e:
             self.logger.error(f"Packet processing error: {e}")

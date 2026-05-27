@@ -5,11 +5,9 @@ import unittest
 from mg400_controller.common.trajectory.teach_job_handler import (
     ACTION_COMPILE,
     ACTION_EXECUTE,
-    ACTION_PREVIEW_SIM,
     ERR_EXECUTE_FORBIDDEN,
     STAGE_COMPILED,
     STAGE_FAILED,
-    STAGE_PREVIEW_READY,
     STAGE_RECEIVED,
     TeachJobHandler,
 )
@@ -122,21 +120,6 @@ class TeachJobAcceptanceTest(unittest.TestCase):
             artifacts[0]["artifact"]["event_commands"][0]["commands"],
         )
 
-        self.assertEqual(self.sent_motion_commands, [])
-        self.assertEqual(self.sent_dashboard_commands, [])
-
-    def test_preview_sim_is_compile_only_for_unity_payload(self):
-        handler = self._make_handler(allow_real_execute=True)
-        handler.handle(self._payload(ACTION_PREVIEW_SIM))
-
-        statuses = self._statuses()
-        self.assertEqual([s["stage"] for s in statuses], [STAGE_RECEIVED, STAGE_PREVIEW_READY])
-        self.assertTrue(statuses[-1]["metadata"]["sim"])
-        self.assertFalse(statuses[-1]["metadata"]["real_robot_moved"])
-
-        artifacts = self._artifacts()
-        self.assertEqual(len(artifacts), 1)
-        self.assertTrue(artifacts[0]["preview_sim"])
         self.assertEqual(self.sent_motion_commands, [])
         self.assertEqual(self.sent_dashboard_commands, [])
 

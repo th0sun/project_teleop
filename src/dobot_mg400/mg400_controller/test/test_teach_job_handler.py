@@ -8,9 +8,6 @@ from mg400_controller.common.trajectory.teach_job_handler import (  # noqa: E402
     ACTION_COMPILE,
     ACTION_EXECUTE,
     ACTION_EXPORT,
-    ACTION_PREVIEW_SIM,
-    ACTION_RECORD_START,
-    ACTION_RECORD_STOP,
     ACTION_STOP,
     ACTION_TUNE,
     ERR_ALREADY_PLAYING,
@@ -28,8 +25,6 @@ from mg400_controller.common.trajectory.teach_job_handler import (  # noqa: E402
     STAGE_DONE,
     STAGE_EXECUTING,
     STAGE_FAILED,
-    STAGE_PREVIEW_READY,
-    STAGE_PREVIEW_STARTED,
     STAGE_RECEIVED,
     STAGE_STOPPED,
     STAGE_TUNED,
@@ -70,8 +65,6 @@ class FakeRecorder:
         self._export_should_raise = False
         self.start_preview_called = 0
         self.stop_all_called_with = None
-        self.start_recording_called = 0
-        self.stop_recording_called = 0
         self.playback_event_callbacks = []
         self._playback_tuning = {}
 
@@ -113,15 +106,6 @@ class FakeRecorder:
 
     def stop_all(self, go_home=False):
         self.stop_all_called_with = go_home
-
-    def start_recording(self):
-        self.start_recording_called += 1
-        self.is_recording = True
-
-    def stop_recording(self):
-        self.stop_recording_called += 1
-        self.is_recording = False
-        return list(self.loaded_frames)
 
     def add_playback_event_callback(self, callback):
         self.playback_event_callbacks.append(callback)
@@ -318,53 +302,6 @@ class TeachJobHandlerTest(unittest.TestCase):
         statuses = self._decoded_status()
         self.assertEqual(statuses[-1]["stage"], STAGE_COMPILED)
 
-    def test_preview_sim_is_compile_only_and_does_not_move_real_robot(self):
-        """preview_sim must publish the compiled artifact + a preview_ready
-        status without ever calling the recorder's start_preview().  Until a
-        dedicated sim backend lands, an action whose name says "sim" must
-        not drive the MG400.
-        """
-        payload = json.dumps({
-            "job_id": "j-sim",
-            "action": ACTION_PREVIEW_SIM,
-            "trajectory": _frames_payload(),
-        })
-        self.handler.handle(payload)
-
-        # The defining safety assertion: real robot was not engaged.
-        self.assertEqual(self.recorder.start_preview_called, 0)
-
-        statuses = self._decoded_status()
-        terminal = statuses[-1]
-        self.assertEqual(terminal["stage"], STAGE_PREVIEW_READY)
-        self.assertTrue(terminal["metadata"]["sim"])
-        self.assertFalse(terminal["metadata"]["real_robot_moved"])
-
-        artifacts = self._decoded_artifact()
-        self.assertEqual(len(artifacts), 1)
-        self.assertEqual(artifacts[0]["job_id"], "j-sim")
-        self.assertTrue(artifacts[0]["preview_sim"])
-        self.assertEqual(
-            artifacts[0]["artifact"]["artifact_kind"],
-            "mg400_compiled_playback_plan",
-        )
-
-    def test_preview_sim_does_not_move_robot_even_when_real_execute_allowed(self):
-        """Even if the operator has the robot connected, preview_sim must
-        stay compile-only.  Guards against an accidental rewire that flips
-        the sim path back into start_preview().
-        """
-        # allow_real_execute defaults to True in this test class, exercising
-        # the code path most likely to regress.
-        payload = json.dumps({
-            "job_id": "j-sim-2",
-            "action": ACTION_PREVIEW_SIM,
-            "trajectory": _frames_payload(),
-        })
-        self.handler.handle(payload)
-        self.assertEqual(self.recorder.start_preview_called, 0)
-        self.assertEqual(self.recorder.stop_all_called_with, None)
-
     def test_execute_starts_playback_when_allowed(self):
         payload = json.dumps({
             "job_id": "j-exec",
@@ -542,20 +479,6 @@ class TeachJobHandlerTest(unittest.TestCase):
         self.assertEqual(self.recorder.stop_all_called_with, True)
         terminal = self._decoded_status()[-1]
         self.assertEqual(terminal["stage"], STAGE_STOPPED)
-
-    def test_record_start_and_stop_round_trip(self):
-        self.recorder.loaded_frames = [
-            {"timeStamp": 0.0, "j1": 0, "j2": 0, "j3": 0, "j4": 0}
-        ]
-        start = json.dumps({"job_id": "rec1", "action": ACTION_RECORD_START})
-        stop = json.dumps({"job_id": "rec1-stop", "action": ACTION_RECORD_STOP})
-        self.handler.handle(start)
-        self.handler.handle(stop)
-        self.assertEqual(self.recorder.start_recording_called, 1)
-        self.assertEqual(self.recorder.stop_recording_called, 1)
-        terminal = self._decoded_status()[-1]
-        self.assertEqual(terminal["stage"], STAGE_DONE)
-        self.assertEqual(terminal["metadata"]["frame_count"], 1)
 
     # -- failure paths --------------------------------------------------
     def test_unknown_action_emits_failed_status(self):
