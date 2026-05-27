@@ -363,18 +363,6 @@ class TrajectoryRecorder:
     # ═════════════════════════════════════════════════════════════════════════
     #  RECORD  (smart-sampled at ~8-10 Hz)
     # ═════════════════════════════════════════════════════════════════════════
-    def start_recording(self):
-        if self.is_playing:
-            self._log.warn("⚠️  Cannot record while playing")
-            return
-        self.is_recording = True
-        self._block_until = 0.0
-        self._frames = []
-        self._events = []
-        self._rec_t0 = self._time_fn()
-        self._last_rec_t = -999.0
-        self._last_rec_q = np.full(4, np.nan)
-        self._log.info("🔴 Recording started (smart-sample ≤10 Hz, Δ≥0.5°)")
 
     def record_tick(self, target_q_rad):
         """Called at ~50 Hz from the control loop.
@@ -416,24 +404,6 @@ class TrajectoryRecorder:
         self._last_rec_t = t
         self._last_rec_q = q_deg.copy()
 
-    def stop_recording(self) -> List[Dict]:
-        """Stop recording.  Appends a final frame if the last stored frame
-        is older than 50 ms (captures the resting position)."""
-        if self.is_recording and self._frames and self._get_pos is not None:
-            try:
-                q = self._get_pos()
-                if q is not None:
-                    now = self._time_fn() - self._rec_t0
-                    if now - self._last_rec_t > 0.05:
-                        self._append_frame(now, np.degrees(q[:4]))
-            except Exception:
-                pass
-
-        self.is_recording = False
-        n = len(self._frames)
-        dur = self._frames[-1]["timeStamp"] if n else 0.0
-        self._log.info(f"⏹️  Recording stopped — {n} frames, {dur:.1f}s")
-        return self._frames
 
     # ═════════════════════════════════════════════════════════════════════════
     #  SAVE / LOAD
@@ -444,15 +414,7 @@ class TrajectoryRecorder:
     # recorder's existing public API stable for callers that import
     # ``TrajectoryRecorder`` directly (Unity adapters, monitor GUI,
     # tests).  Behaviour is identical to the pre-extraction code.
-    def save_temp(self) -> str:
-        """Save last recording to temp_trajectory.json and return the path."""
-        path = os.path.join(self._traj_dir, "temp_trajectory.json")
-        return trajectory_io.save_trajectory(path, self._frames, self._events, self._log)
 
-    def save_as(self, name: str) -> str:
-        """Save last recording with a user-supplied name."""
-        path = trajectory_io.resolve_trajectory_path(self._traj_dir, name)
-        return trajectory_io.save_trajectory(path, self._frames, self._events, self._log)
 
     def load(self, name: str) -> bool:
         """Load a trajectory file by name from TRAJ_DIR."""
@@ -487,9 +449,6 @@ class TrajectoryRecorder:
         self._log.info(f"📂 Loaded {name}: {len(frames)} frames, {dur:.1f}s")
         return True
 
-    def list_files(self) -> List[str]:
-        """Return list of .json trajectory files."""
-        return trajectory_io.list_trajectory_files(self._traj_dir)
 
     # ═════════════════════════════════════════════════════════════════════════
     #  PREVIEW (Temporal Sequencer — NO decimation, uses frames directly)
@@ -521,17 +480,6 @@ class TrajectoryRecorder:
             return
         self._playback_event_cbs.append(callback)
 
-    def set_playback_event_callback(self, callback: Optional[Callable]):
-        """Replace playback event observers.
-
-        Kept for integration code that needs a single owner of playback
-        lifecycle events; most callers should use ``add_playback_event_callback``
-        so measurement/debug observers can coexist with status publishers.
-        """
-        self._playback_event_cb = callback
-        self._playback_event_cbs = []
-        if callback is not None:
-            self._playback_event_cbs.append(callback)
 
     def _emit_playback_event(self, event_name, **payload):
         if not self._playback_event_cbs:
@@ -778,28 +726,13 @@ class TrajectoryRecorder:
         max_l = getattr(motion_config, "SEGMENT_MAX_SPEED_L", 100)
         return int(max(min_l, min(max_l, speed_l)))
 
-    def _tool_pose_reachable(self, xyzr) -> bool:
-        return playback_compiler.tool_pose_reachable(xyzr)
 
     def _line_primitive_reachable(self, seg, samples: int = 12) -> bool:
         return playback_compiler.line_primitive_reachable(seg, samples=samples)
 
-    def _arc_primitive_points(self, seg, samples: int = 16):
-        return playback_compiler.arc_primitive_points(seg, samples=samples)
 
     def _arc_primitive_reachable(self, seg, samples: int = 16) -> bool:
         return playback_compiler.arc_primitive_reachable(seg, samples=samples)
-
-    def _frame_xyzr(self, frame) -> Tuple[float, float, float, float]:
-        """Return MG400 tool pose for one frame in controller coordinates."""
-        return playback_compiler.frame_xyzr(frame)
-
-    @staticmethod
-    def _point_to_polyline_distance(point_xyz, polyline_xyz) -> float:
-        return playback_compiler.point_to_polyline_distance(point_xyz, polyline_xyz)
-
-    def _primitive_path_xyz(self, seg, primitive_type: SegmentType):
-        return playback_compiler.primitive_path_xyz(seg, primitive_type)
 
     def _raw_fit_error_mm(
         self,
@@ -1418,13 +1351,6 @@ class TrajectoryRecorder:
 
         return elapsed >= total_dur + PREVIEW_FINAL_EXTRA_TIMEOUT_SEC
 
-    def _playback_timeout_margin(self, command_count: Optional[int] = None) -> float:
-        return playback_executor.playback_timeout_margin(
-            command_count,
-            absolute_sec=PREVIEW_ABSOLUTE_TIMEOUT_SEC,
-            per_command_sec=PREVIEW_TIMEOUT_PER_COMMAND_SEC,
-            max_margin_sec=PREVIEW_MAX_TIMEOUT_MARGIN_SEC,
-        )
 
     def _playback_timed_out(self, elapsed, total_dur, command_count: Optional[int] = None):
         return playback_executor.playback_timed_out(
@@ -1647,17 +1573,6 @@ class TrajectoryRecorder:
     # ═════════════════════════════════════════════════════════════════════════
     #  INFO
     # ═════════════════════════════════════════════════════════════════════════
-    def get_info(self) -> Dict:
-        frames = self.loaded_frames or self._frames
-        if not frames:
-            return {"loaded": False, "waypoints": 0, "duration": 0.0}
-        dur = frames[-1]["timeStamp"] - frames[0]["timeStamp"]
-        return {
-            "loaded": bool(self.loaded_frames),
-            "name": self.loaded_name,
-            "waypoints": len(frames),
-            "duration": round(dur, 2),
-        }
 
     # ═════════════════════════════════════════════════════════════════════════
     #  INTERNAL
@@ -1668,5 +1583,3 @@ class TrajectoryRecorder:
     # function with the same wire shape); this stub remains as a
     # compatibility shim in case external tooling reached into the
     # recorder for it.  Behaviour is identical.
-    def _save_json(self, path: str, frames: List[Dict]) -> str:
-        return trajectory_io.save_trajectory(path, frames, self._events, self._log)

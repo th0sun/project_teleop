@@ -24,34 +24,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List, Optional, Sequence, Tuple
-
-
-def save_trajectory(
-    path: str,
-    frames: Sequence[Dict],
-    events: Sequence[Dict],
-    logger,
-) -> str:
-    """Write a trajectory JSON file with the recorder's wire shape.
-
-    Returns the written path on success or the empty string on failure.
-    The signature accepts ``logger`` so callers can keep their existing
-    ``info`` / ``error`` plumbing without this module owning a logger.
-    """
-    if not frames:
-        logger.error("No frames to save")
-        return ""
-    try:
-        with open(path, "w") as f:
-            json.dump({"frames": list(frames), "events": list(events)}, f, indent=4)
-        logger.info(
-            f"💾 Saved {len(frames)} frames, {len(events)} events → {path}"
-        )
-        return path
-    except Exception as exc:  # noqa: BLE001 — propagate via logger like recorder did
-        logger.error(f"Save failed: {exc}")
-        return ""
+from typing import Dict, List, Optional, Tuple
 
 
 def load_trajectory(
@@ -82,14 +55,6 @@ def load_trajectory(
     if not isinstance(events, list):
         events = []
     return list(frames), list(events)
-
-
-def list_trajectory_files(traj_dir: str) -> List[str]:
-    """Return sorted ``*.json`` files in ``traj_dir`` (silent on missing dir)."""
-    try:
-        return sorted(f for f in os.listdir(traj_dir) if f.endswith(".json"))
-    except Exception:
-        return []
 
 
 def resolve_trajectory_path(traj_dir: str, name: str) -> str:
