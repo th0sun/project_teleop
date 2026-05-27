@@ -230,7 +230,7 @@ launch_tmux() {
   local mock_compose="${3:-}"
 
   local session="mg400"
-  RUN_LOG_DIR="${REPO_DIR}/log/startup_sessions/$(date +%Y%m%d_%H%M%S)"
+  RUN_LOG_DIR="${REPO_DIR}/logs/startup_sessions/$(date +%Y%m%d_%H%M%S)"
   mkdir -p "${RUN_LOG_DIR}"
   if "${TMUX[@]}" has-session -t "${session}" 2>/dev/null; then
     "${TMUX[@]}" kill-session -t "${session}"

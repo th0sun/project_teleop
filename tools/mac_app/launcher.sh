@@ -20,7 +20,7 @@ REAL_ROBOT_IP="${ROBOT_IP:-192.168.1.6}"
 MOCK_ROBOT_IP="172.10.0.2"
 CONTROL_MODE="${PROJECT_TELEOP_CONTROL_MODE:-${MG400_CONTROL_MODE:-joint_cmd}}"
 
-STATE_DIR="${REPO_DIR}/log/mac_app"
+STATE_DIR="${REPO_DIR}/logs/mac_app"
 CURRENT_SESSION_FILE="${STATE_DIR}/current_session"
 SIM_PID_FILE="${STATE_DIR}/sim.pid"
 SIM_LABEL="${PROJECT_TELEOP_SIM_LABEL:-projectteleop.mg400sim}"
@@ -100,7 +100,7 @@ session_name_from_dir() {
 
 container_log_dir_for_session() {
   local session_dir="$1"
-  printf '/project_teleop_ws/project_teleop/log/startup_sessions/%s' "$(session_name_from_dir "${session_dir}")"
+  printf '/project_teleop_ws/project_teleop/logs/startup_sessions/%s' "$(session_name_from_dir "${session_dir}")"
 }
 
 image_fingerprint() {
@@ -359,8 +359,8 @@ start_stack() {
     exit 1
   fi
 
-  mkdir -p "${STATE_DIR}" "${REPO_DIR}/log/startup_sessions"
-  local session_dir="${REPO_DIR}/log/startup_sessions/$(date +%Y%m%d_%H%M%S)_mac_app_${mode}"
+  mkdir -p "${STATE_DIR}" "${REPO_DIR}/logs/startup_sessions"
+  local session_dir="${REPO_DIR}/logs/startup_sessions/$(date +%Y%m%d_%H%M%S)_mac_app_${mode}"
   mkdir -p "${session_dir}"
   printf '%s\n' "${session_dir}" > "${CURRENT_SESSION_FILE}"
   printf 'ProjectTeleopMac\n' > "${OWNER_FILE}"
