@@ -20,6 +20,7 @@ import time
 import json
 import os
 import queue
+import re
 
 # Import configuration
 from mg400_controller.common.config.robot_config import (
@@ -1137,6 +1138,96 @@ class TeleopNode(Node):
             joints_are_degrees=False,
         )
 
+    # ═════════════════════════════════════════════════════════════════════════
+    # Control-loop phase helpers (extracted from _control_loop_step for
+    # readability). Each one is a self-contained step inside the 50 Hz tick.
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _trigger_smart_suction(self, q_current):
+        """Fire a pending suction command once the robot has settled near
+        ``suction_target_q`` (or is detectably stuck near it).
+        """
+        if not (self.suction_pending and self.suction_target_q is not None):
+            return
+        dist = np.max(np.abs(q_current - self.suction_target_q))
+        # ระยะใกล้ Threshold = ถึงเป้า / หรือ Stuck = ค้าง ก็ยิงเลยกัน hang
+        if dist < SUCTION_ACTIVATION_THRESHOLD or self.controller.stuck_start_time > 0:
+            self._handle_suction_cmd(self.suction_requested_state)
+            self.suction_pending = False
+
+    def _publish_tool_vectors(self):
+        """Publish actual/target tool poses + flange FK; return
+        (tool_act, tool_tgt) so the rest of the tick can reuse them
+        without re-reading the feedback handler (which can move between
+        reads and break frame-by-frame correlation).
+        """
+        tool_act = self.feedback.get_tool_vector()
+        tool_tgt = self.feedback.get_target_tool_vector()
+
+        msg_act = Float64MultiArray()
+        msg_act.data = tool_act.tolist()
+        self.ros_publishers.tool_actual.publish(msg_act)
+
+        msg_tgt = Float64MultiArray()
+        msg_tgt.data = tool_tgt.tolist()
+        self.ros_publishers.tool_target.publish(msg_tgt)
+
+        # Flange actual = FK of actual joints (no tool offset).
+        flange = self.feedback.get_flange_actual()
+        msg_flange = Float64MultiArray()
+        msg_flange.data = flange.tolist()
+        self.ros_publishers.flange_actual.publish(msg_flange)
+
+        return tool_act, tool_tgt
+
+    def _publish_do_status(self):
+        """Publish the robot's Digital Output bitmask and log transitions."""
+        do_status = self.feedback.get_do_status()
+        do_msg = Int64()
+        do_msg.data = int(do_status)
+        self.ros_publishers.do_status.publish(do_msg)
+
+        if do_status != self.last_do_status:
+            self.get_logger().info(
+                f"📣 DO STATUS CHANGED: {bin(do_status)} (Hex: {hex(do_status)})"
+            )
+            self.last_do_status = do_status
+
+    def _periodic_tool_index_query(self):
+        """Every ~5 s (every 250th 50 Hz tick) ask the robot for its
+        currently-selected tool index and publish it. Cheap enough to
+        skip silently on transport errors.
+        """
+        self._tool_query_counter += 1
+        if self._tool_query_counter < 250:
+            return
+        self._tool_query_counter = 0
+        try:
+            resp = self.connection.send_and_wait(get_tool().render(), timeout=1.0)
+            if resp:
+                m = re.search(r'\{(\d+)\}', resp)
+                if m:
+                    ti_msg = Int32()
+                    ti_msg.data = int(m.group(1))
+                    self.ros_publishers.tool_index.publish(ti_msg)
+        except Exception:
+            pass
+
+    def _auto_recover_from_error_mode(self, current_mode, now):
+        """If the robot has entered Mode 9 (error / limit hit), auto-clear
+        the error at most every 3 seconds so the arm doesn't sit frozen.
+        """
+        if current_mode != 9:
+            return
+        if not hasattr(self, 'last_clear_error_time'):
+            self.last_clear_error_time = 0.0
+        if now - self.last_clear_error_time > 3.0:
+            self.get_logger().error(
+                "🛑 Robot is in ERROR STATE (Mode 9). Auto-clearing error..."
+            )
+            self.connection.send_and_wait(clear_error().render())
+            self.last_clear_error_time = now
+
     def _control_loop_step(self):
         """
         Main Control Logic (50Hz) - Called by high-precision thread
@@ -1199,43 +1290,9 @@ class TeleopNode(Node):
                     # Never let telemetry break the control loop.
                     pass
 
-            # === SMART SUCTION TRIGGER ===
-            if self.suction_pending and self.suction_target_q is not None:
-                dist = np.max(np.abs(q_current - self.suction_target_q))
-
-                # ถ้าระยะห่างน้อยกว่า Threshold ที่ตั้งไว้ (ถึงเป้าหมายแล้ว)
-                # หรือถ้าหุ่นยนต์หยุดนิ่งสนิทแล้ว (Stuck/Reached) ก็ให้ยิงคำสั่งได้เลยเหมือนกันป้องกันการค้าง
-                if dist < SUCTION_ACTIVATION_THRESHOLD or self.controller.stuck_start_time > 0:
-                    self._handle_suction_cmd(self.suction_requested_state)
-                    self.suction_pending = False
-
-            # === PUBLISH TOOL VECTORS (XYZ) ===
-            tool_act = self.feedback.get_tool_vector()
-            tool_tgt = self.feedback.get_target_tool_vector()
-
-            msg_act = Float64MultiArray()
-            msg_act.data = tool_act.tolist()
-            self.ros_publishers.tool_actual.publish(msg_act)
-
-            msg_tgt = Float64MultiArray()
-            msg_tgt.data = tool_tgt.tolist()
-            self.ros_publishers.tool_target.publish(msg_tgt)
-
-            # Flange actual = FK of actual joints (no tool offset)
-            flange = self.feedback.get_flange_actual()
-            msg_flange = Float64MultiArray()
-            msg_flange.data = flange.tolist()
-            self.ros_publishers.flange_actual.publish(msg_flange)
-
-            # === PUBLISH DO STATUS (Bitmask) ===
-            do_status = self.feedback.get_do_status()
-            do_msg = Int64()
-            do_msg.data = int(do_status)
-            self.ros_publishers.do_status.publish(do_msg)
-
-            if do_status != self.last_do_status:
-                self.get_logger().info(f"📣 DO STATUS CHANGED: {bin(do_status)} (Hex: {hex(do_status)})")
-                self.last_do_status = do_status
+            self._trigger_smart_suction(q_current)
+            tool_act, tool_tgt = self._publish_tool_vectors()
+            self._publish_do_status()
 
             # === PUBLISH ROBOT MODE & ERROR ===
             current_mode = int(self.feedback.get_robot_mode())
@@ -1303,33 +1360,8 @@ class TeleopNode(Node):
                         unity_sample=command.unity_sample,
                     )
 
-            # === PERIODIC TOOL INDEX QUERY (every ~5s at 50Hz = 250 cycles) ===
-            self._tool_query_counter += 1
-            if self._tool_query_counter >= 250:
-                self._tool_query_counter = 0
-                try:
-                    resp = self.connection.send_and_wait(get_tool().render(), timeout=1.0)
-                    if resp:
-                        import re
-                        m = re.search(r'\{(\d+)\}', resp)
-                        if m:
-                            tidx = int(m.group(1))
-                            ti_msg = Int32()
-                            ti_msg.data = tidx
-                            self.ros_publishers.tool_index.publish(ti_msg)
-                except Exception:
-                    pass
-
-            # === AUTO-RECOVERY (Clear Error) ===
-            # If the robot actually hits a hardware limit or another error, it enters Mode 9.
-            # We auto-clear it so it doesn't stay permanently frozen.
-            if current_mode == 9:
-                if not hasattr(self, 'last_clear_error_time'):
-                    self.last_clear_error_time = 0.0
-                if now - self.last_clear_error_time > 3.0:
-                    self.get_logger().error("🛑 Robot is in ERROR STATE (Mode 9). Auto-clearing error...")
-                    self.connection.send_and_wait(clear_error().render())
-                    self.last_clear_error_time = now
+            self._periodic_tool_index_query()
+            self._auto_recover_from_error_mode(current_mode, now)
 
             # === MOTION TRACKING (Latency Analyzer) ===
             # T4: Motion Start
