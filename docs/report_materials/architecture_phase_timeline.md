@@ -231,7 +231,7 @@ Why this phase matters in the report:
 
 At the current point in time, the key files of this phase are:
 
-- `docs/project_objective.md`
+- `docs/architecture/project_objective.md`
 - `docs/report_materials/architecture_phase_research_log.md`
 - `_supporting_materials/archived_from_project_teleop/docs/` for archived
   handoff drafts

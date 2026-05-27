@@ -4,10 +4,10 @@
 # ==========================================
 # Spins up the project_teleop ROS2 stack inside a docker container plus
 # a tmux session of panes. For a native (host-side) tmux launcher on a
-# Linux box with ROS2 already sourced, use ./start_teleop.sh instead.
+# Linux box with ROS2 already sourced, use ./scripts/start_teleop.sh instead.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_DIR}/.." && pwd)"
 IMAGE="${PROJECT_TELEOP_JAZZY_IMAGE:-project-teleop-ros2-jazzy:latest}"
 CONTAINER_NAME="${PROJECT_TELEOP_CONTAINER:-project_teleop_ros2_mac}"

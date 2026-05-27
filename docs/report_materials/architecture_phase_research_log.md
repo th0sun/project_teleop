@@ -461,7 +461,7 @@ Suggested chapter use:
 
 Use this file together with:
 
-- `docs/project_objective.md`
+- `docs/architecture/project_objective.md`
 - `docs/report_materials/report_writing_guideline.md`
 - `_supporting_materials/archived_from_project_teleop/docs/` for archived
   handoff drafts and historical prompts

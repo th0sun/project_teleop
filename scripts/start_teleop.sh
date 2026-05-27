@@ -5,9 +5,9 @@ set -euo pipefail
 # MG400 Tmux Interactive Launcher (native, no docker)
 # ==========================================
 # Use this on a host with ROS2 already sourced (Linux dev box).
-# For macOS / docker-based dev, use ./startup.sh instead.
+# For macOS / docker-based dev, use ./scripts/startup.sh instead.
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -f "$REPO_DIR/install/setup.bash" ]; then
     # Repo checked out directly as the colcon workspace root.
     WS="$REPO_DIR"
@@ -26,7 +26,7 @@ TMUX=(tmux -f /dev/null -L mg400_teleop)
 
 if [ ! -f "$ROS_SETUP" ]; then
     echo "❌ ROS setup not found: $ROS_SETUP"
-    echo "   Set ROS_DISTRO or ROS_SETUP, e.g. ROS_DISTRO=jazzy ./start_teleop.sh"
+    echo "   Set ROS_DISTRO or ROS_SETUP, e.g. ROS_DISTRO=jazzy ./scripts/start_teleop.sh"
     exit 1
 fi
 

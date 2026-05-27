@@ -103,7 +103,7 @@ project_teleop/
 ├── .claude-handoff/                   ← repo-local progress-report skill
 ├── docs/                              ← architecture + setup + legacy
 ├── tools/
-│   ├── analyze_teleop_session.py      ← offline log analyser
+│   ├── analysis/analyze_teleop_session.py ← offline log analyser
 │   ├── monitor/                       ← PyQt6 operator panel
 │   ├── log_replay/                    ← (after F1) three-layer review pipeline
 │   └── demo_lift/                     ← demo scripts
@@ -175,7 +175,7 @@ export ROBOT_IP=192.168.1.6
 ros2 launch mg400_bringup main.launch.py
 
 # Or via the convenience launcher (tmux panes)
-./start_teleop.sh
+./scripts/start_teleop.sh
 ```
 
 ### MG400 mock (no real hardware)

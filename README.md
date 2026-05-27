@@ -4,8 +4,8 @@ This repository contains a ROS2 workspace for teleoperation and simulation of th
 
 Before going deeper into the runtime details, read the project objective:
 
-- `docs/project_objective.md`
-- `docs/teleop_command_logic.md`
+- `docs/architecture/project_objective.md`
+- `docs/architecture/teleop_command_logic.md`
 
 The workspace integrates:
 - ROS2 control and description packages for MG400
@@ -112,9 +112,9 @@ Unity-like GUI / VR
 
 See:
 
-- `docs/project_objective.md`
-- `docs/teleop_command_logic.md`
-- `docs/setup_guide.md`
+- `docs/architecture/project_objective.md`
+- `docs/architecture/teleop_command_logic.md`
+- `docs/guides/setup_guide.md`
 - `docs/controller_continuation_guide.md`
 - `docs/report_materials/production_vs_experimental_modes.md`
 - `docs/reference_manuals/dobot/README.md`

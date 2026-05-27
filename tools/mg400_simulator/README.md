@@ -75,7 +75,7 @@ Since `rclpy` cannot be easily installed on macOS or Windows, the simulator feat
 Start the complete teleop stack specifying the Unity Frontend:
 ```bash
 cd ~/project_teleop_ws/project_teleop
-./start_teleop.sh
+./scripts/start_teleop.sh
 # Select:
 #   4 = Mock + Unity / ROS-TCP endpoint
 #   3 = Real robot + Unity / ROS-TCP endpoint

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native SwiftUI launcher backend for the same ROS2 stack as ./startup.sh.
+# Native SwiftUI launcher backend for the same ROS2 stack as ./scripts/startup.sh.
 # This script intentionally does not open Terminal or tmux panes.
 set -euo pipefail
 
@@ -63,7 +63,7 @@ clear_stale_tmux_if_safe() {
     return 1
   fi
 
-  echo "Closing stale ./startup.sh tmux session '${TMUX_SESSION}' because no ROS container is running."
+  echo "Closing stale ./scripts/startup.sh tmux session '${TMUX_SESSION}' because no ROS container is running."
   "${TMUX[@]}" kill-session -t "${TMUX_SESSION}" >/dev/null 2>&1 || true
   return 0
 }
@@ -355,7 +355,7 @@ start_stack() {
   fi
 
   if ! clear_stale_tmux_if_safe; then
-    echo "Refusing to replace active ./startup.sh tmux session '${TMUX_SESSION}'. Stop ./startup.sh first, or keep using that terminal session." >&2
+    echo "Refusing to replace active ./scripts/startup.sh tmux session '${TMUX_SESSION}'. Stop ./scripts/startup.sh first, or keep using that terminal session." >&2
     exit 1
   fi
 
@@ -400,7 +400,7 @@ start_stack() {
   else
     {
       echo "RViz noVNC disabled for the Mac app launcher to keep live teleop latency low."
-      echo "Run with PROJECT_TELEOP_START_RVIZ=1 to enable it, or use ./startup.sh for the tmux RViz pane."
+      echo "Run with PROJECT_TELEOP_START_RVIZ=1 to enable it, or use ./scripts/startup.sh for the tmux RViz pane."
       echo "URL when enabled: ${RVIZ_URL}"
     } > "${session_dir}/rviz.log"
     echo "RViz noVNC disabled for low-latency app mode"
@@ -429,8 +429,8 @@ stop_stack() {
   require_tool docker "Install/start Docker Desktop first."
 
   if ! clear_stale_tmux_if_safe; then
-    echo "Active ./startup.sh tmux session detected; app stop will not kill it because the ROS container is still running."
-    echo "Stop that session from Terminal if you are using ./startup.sh."
+    echo "Active ./scripts/startup.sh tmux session detected; app stop will not kill it because the ROS container is still running."
+    echo "Stop that session from Terminal if you are using ./scripts/startup.sh."
     return 0
   fi
 
