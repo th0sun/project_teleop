@@ -247,9 +247,7 @@ class UnifiedTripleLogger:
         self._last_robot_rad: list[float | None] = [None] * JOINT_COUNT
         self._last_ros_command_seq: int | None = None
         self._last_ros_command_uid: str | None = None
-        self._last_dobot_command_id: int | None = None
         self._last_ros_command_wall: float | None = None
-        self._last_robot_feedback_command_id: int | None = None
         self._last_ros_cmd_tool_target: list[float | None] = [None] * 6
         self._last_robot_tool_actual: list[float | None] = [None] * 6
         self._last_robot_tool_target: list[float | None] = [None] * 6
@@ -414,13 +412,10 @@ class UnifiedTripleLogger:
         if event_type == "ros_command":
             self._last_ros_command_wall = ros_ts
 
-        # Dobot / feedback IDs
+        # Dobot / feedback IDs come from `fields` directly each call; no
+        # rolling fallback is read downstream, so we don't snapshot them.
         dobot_command_id = fields.get("dobot_command_id")
-        if dobot_command_id is not None:
-            self._last_dobot_command_id = int(dobot_command_id)
         robot_feedback_command_id = fields.get("robot_feedback_command_id")
-        if robot_feedback_command_id is not None:
-            self._last_robot_feedback_command_id = int(robot_feedback_command_id)
 
         # Command text + hash + feedback diff
         dobot_command_text = fields.get("dobot_command_text")
@@ -713,14 +708,6 @@ class UnifiedTripleLogger:
             if self._unity_sample_count % 100 == 0:
                 self._unity_sample_file.flush()
 
-    def log_unity_only(self, unity_joints, ros_timestamp: float) -> None:
-        """Backward-compatible wrapper. Input is in degrees."""
-        self._write_event(
-            "unity_target",
-            ros_wall_timestamp=ros_timestamp,
-            unity_raw_rad=np.radians(self._joint4(unity_joints)),
-            unity_compensated_rad=np.radians(self._joint4(unity_joints)),
-        )
 
     def log_ros_cmd(
         self,
@@ -1025,16 +1012,6 @@ class UnifiedTripleLogger:
             unity_sample_fields=_sample_log_fields(unity_sample),
         )
 
-    def log_full_sync(self, unity_joints, ros_cmd_joints, robot_joints, ros_timestamp: float) -> None:
-        """Backward-compatible full-sync row. Inputs are in degrees."""
-        self._write_event(
-            "full_sync",
-            ros_wall_timestamp=ros_timestamp,
-            unity_raw_rad=np.radians(self._joint4(unity_joints)),
-            unity_compensated_rad=np.radians(self._joint4(unity_joints)),
-            ros_cmd_rad=np.radians(self._joint4(ros_cmd_joints)),
-            robot_rad=np.radians(self._joint4(robot_joints)),
-        )
 
     def close(self) -> None:
         with self._lock:
