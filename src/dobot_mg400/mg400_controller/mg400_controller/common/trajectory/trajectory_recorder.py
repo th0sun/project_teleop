@@ -1000,19 +1000,71 @@ class TrajectoryRecorder:
         source_frames=None,
         raw_frames=None,
     ) -> list:
-        """Mixed-primitive strategy: LINE→MovL, ARC→Arc, GENERAL→JointMovJ."""
-        joint_points = [self._frame_q_deg(f) for f in frames]
+        """Mixed-primitive strategy: LINE→MovL, ARC→Arc, GENERAL→JointMovJ.
 
+        Orchestrator only — each phase below is its own helper:
+          1. ``_classify_path_segments`` — group joint frames into
+             LINE / ARC / GENERAL segments via the Cartesian
+             classifier.
+          2. Per segment, ``_resolve_primitive_type`` may downgrade
+             LINE/ARC to GENERAL if the primitive isn't IK-feasible
+             or deviates from the raw Unity path beyond
+             ``SEGMENT_RAW_FIT_TOLERANCE_MM``.
+          3. ``_build_line_segment_command`` /
+             ``_build_arc_segment_command`` emit one Cartesian
+             command per segment; ``_build_general_segment_commands``
+             falls back to per-point JointMovJ.
+        """
+        raw_fit_tol = float(getattr(motion_config, "SEGMENT_RAW_FIT_TOLERANCE_MM", 0.0))
+        acc_l = self._stream_acc_l()
+
+        segments = self._classify_path_segments(frames)
+        self._log.info(f"🔀 Mixed-primitive: {segment_summary(segments)}")
+
+        queued_commands = []
+        for seg in segments:
+            end_idx = seg.end_idx
+            is_final = end_idx == len(frames) - 1
+            cp = self._stream_cp(is_final=is_final)
+            primitive_type = self._resolve_primitive_type(
+                seg, source_frames, raw_frames, raw_fit_tol
+            )
+
+            if primitive_type == SegmentType.LINE:
+                queued_commands.append(
+                    self._build_line_segment_command(
+                        seg, frames, target_t, source_target_t, cp, acc_l
+                    )
+                )
+            elif primitive_type == SegmentType.ARC:
+                queued_commands.append(
+                    self._build_arc_segment_command(
+                        seg, frames, target_t, source_target_t, cp, acc_l
+                    )
+                )
+            else:  # GENERAL — fallback per-point JointMovJ
+                queued_commands.extend(
+                    self._build_general_segment_commands(
+                        seg, frames, target_t, source_target_t
+                    )
+                )
+
+        return queued_commands
+
+    def _classify_path_segments(self, frames):
+        """Group ``frames`` into LINE/ARC/GENERAL segments using the
+        Cartesian classifier. All tolerances come from
+        ``motion_config.SEGMENT_*`` so behavior is tunable without
+        touching this file.
+        """
+        joint_points = [self._frame_q_deg(f) for f in frames]
         line_tol = float(getattr(motion_config, "SEGMENT_LINE_TOLERANCE_MM", 2.0))
         arc_tol = float(getattr(motion_config, "SEGMENT_ARC_TOLERANCE_MM", 3.0))
         max_arc_radius = float(getattr(motion_config, "SEGMENT_MAX_ARC_RADIUS_MM", 10000.0))
         r_tol = float(getattr(motion_config, "SEGMENT_R_TOLERANCE_DEG", 10.0))
-        raw_fit_tol = float(getattr(motion_config, "SEGMENT_RAW_FIT_TOLERANCE_MM", 0.0))
         min_arc = int(getattr(motion_config, "SEGMENT_MIN_POINTS_FOR_ARC", 3))
         enable_arc = bool(getattr(motion_config, "SEGMENT_ENABLE_ARC", False))
-        acc_l = self._stream_acc_l()
-
-        segments = classify_segments(
+        return classify_segments(
             joint_points,
             fk_fn=self._fk_for_classifier,
             line_tol_mm=line_tol,
@@ -1023,128 +1075,137 @@ class TrajectoryRecorder:
             enable_arc=enable_arc,
         )
 
-        summary = segment_summary(segments)
-        self._log.info(f"🔀 Mixed-primitive: {summary}")
+    def _resolve_primitive_type(self, seg, source_frames, raw_frames, raw_fit_tol):
+        """Return the primitive type to actually emit for this segment.
 
-        queued_commands = []
-        for seg in segments:
-            end_idx = seg.end_idx
-            end_frame = frames[end_idx]
-            is_final = (end_idx == len(frames) - 1)
-            cp = self._stream_cp(is_final=is_final)
-
-            primitive_type = seg.type
-            if primitive_type == SegmentType.LINE and not self._line_primitive_reachable(seg):
+        Downgrades to GENERAL if:
+          1. The LINE / ARC primitive isn't IK-feasible from the
+             current start pose.
+          2. ``raw_fit_tol > 0`` and the primitive's emitted Cartesian
+             path deviates from the raw Unity path by more than the
+             tolerance.
+        """
+        primitive_type = seg.type
+        if primitive_type == SegmentType.LINE and not self._line_primitive_reachable(seg):
+            self._log.warn(
+                f"⚠️  MovL segment {seg.start_idx}->{seg.end_idx} is not IK-feasible; "
+                "falling back to JointMovJ waypoints"
+            )
+            return SegmentType.GENERAL
+        if primitive_type == SegmentType.ARC and not self._arc_primitive_reachable(seg):
+            self._log.warn(
+                f"⚠️  Arc segment {seg.start_idx}->{seg.end_idx} is not IK-feasible; "
+                "falling back to JointMovJ waypoints"
+            )
+            return SegmentType.GENERAL
+        if raw_fit_tol > 0.0 and primitive_type in {SegmentType.LINE, SegmentType.ARC}:
+            raw_error = self._raw_fit_error_mm(
+                seg, primitive_type, source_frames, raw_frames
+            )
+            if raw_error > raw_fit_tol:
                 self._log.warn(
-                    f"⚠️  MovL segment {seg.start_idx}->{seg.end_idx} is not IK-feasible; "
-                    "falling back to JointMovJ waypoints"
+                    f"⚠️  {primitive_type.name} segment {seg.start_idx}->{seg.end_idx} "
+                    f"deviates {raw_error:.2f}mm from raw Unity path "
+                    f"(limit {raw_fit_tol:.2f}mm); falling back to JointMovJ waypoints"
                 )
-                primitive_type = SegmentType.GENERAL
-            elif primitive_type == SegmentType.ARC and not self._arc_primitive_reachable(seg):
-                self._log.warn(
-                    f"⚠️  Arc segment {seg.start_idx}->{seg.end_idx} is not IK-feasible; "
-                    "falling back to JointMovJ waypoints"
-                )
-                primitive_type = SegmentType.GENERAL
-            elif raw_fit_tol > 0.0 and primitive_type in {SegmentType.LINE, SegmentType.ARC}:
-                raw_error = self._raw_fit_error_mm(
-                    seg,
-                    primitive_type,
-                    source_frames,
-                    raw_frames,
-                )
-                if raw_error > raw_fit_tol:
-                    self._log.warn(
-                        f"⚠️  {primitive_type.name} segment {seg.start_idx}->{seg.end_idx} "
-                        f"deviates {raw_error:.2f}mm from raw Unity path "
-                        f"(limit {raw_fit_tol:.2f}mm); falling back to JointMovJ waypoints"
-                    )
-                    primitive_type = SegmentType.GENERAL
+                return SegmentType.GENERAL
+        return primitive_type
 
-            if primitive_type == SegmentType.LINE:
-                # Single MovL command for the whole line segment.  The CP
-                # threaded into Cartesian primitives is capped by
-                # SEGMENT_CARTESIAN_CP_MAX — see motion_config block comment
-                # for the full reproduction matrix.  In short: high CP +
-                # high SpeedL between Cartesian segments rounds the corner
-                # too aggressively for the servo to track and trips
-                # controller alarm 34322.
-                end_xyzr = seg.end_xyzr
-                speed_j = self._segment_speed_j(frames[seg.start_idx], end_frame)
-                speed_l = self._segment_speed_l(seg, frames)
-                cart_cp_max = int(getattr(motion_config, "SEGMENT_CARTESIAN_CP_MAX", 30))
-                cart_cp = min(int(cp), cart_cp_max)
-                cmd_str = mov_l_cartesian(
-                    target_xyzr=end_xyzr,
-                    speed_l=speed_l,
-                    acc_l=acc_l,
-                    cp=cart_cp,
-                ).render()
-                queued_commands.append(
-                    CompiledPlaybackCommand(
-                        index=end_idx,
-                        target_time_s=float(target_t[end_idx]),
-                        original_target_time_s=float(source_target_t[end_idx]),
-                        joints_deg=tuple(float(v) for v in self._frame_q_deg(end_frame)),
-                        speed_j=int(speed_j),
-                        cp=int(cp),
-                        command=cmd_str,
-                    )
+    def _build_line_segment_command(
+        self, seg, frames, target_t, source_target_t, cp, acc_l
+    ) -> CompiledPlaybackCommand:
+        """Emit a single MovL covering the whole LINE segment.
+
+        Cartesian CP is capped by ``SEGMENT_CARTESIAN_CP_MAX``:
+        high CP + high SpeedL between Cartesian segments rounds
+        corners too aggressively for the servo to track and trips
+        controller alarm 34322.
+        """
+        end_idx = seg.end_idx
+        end_frame = frames[end_idx]
+        speed_j = self._segment_speed_j(frames[seg.start_idx], end_frame)
+        speed_l = self._segment_speed_l(seg, frames)
+        cart_cp = min(
+            int(cp), int(getattr(motion_config, "SEGMENT_CARTESIAN_CP_MAX", 30))
+        )
+        cmd_str = mov_l_cartesian(
+            target_xyzr=seg.end_xyzr,
+            speed_l=speed_l,
+            acc_l=acc_l,
+            cp=cart_cp,
+        ).render()
+        return CompiledPlaybackCommand(
+            index=end_idx,
+            target_time_s=float(target_t[end_idx]),
+            original_target_time_s=float(source_target_t[end_idx]),
+            joints_deg=tuple(float(v) for v in self._frame_q_deg(end_frame)),
+            speed_j=int(speed_j),
+            cp=int(cp),
+            command=cmd_str,
+        )
+
+    def _build_arc_segment_command(
+        self, seg, frames, target_t, source_target_t, cp, acc_l
+    ) -> CompiledPlaybackCommand:
+        """Emit a single Arc (through-point + end-point) for the ARC
+        segment. Same Cartesian CP cap as LINE — see
+        ``_build_line_segment_command``.
+        """
+        end_idx = seg.end_idx
+        end_frame = frames[end_idx]
+        speed_j = self._segment_speed_j(frames[seg.start_idx], end_frame)
+        speed_l = self._segment_speed_l(seg, frames)
+        cart_cp = min(
+            int(cp), int(getattr(motion_config, "SEGMENT_CARTESIAN_CP_MAX", 30))
+        )
+        cmd_str = arc(
+            through_xyzr=seg.through_xyzr,
+            target_xyzr=seg.end_xyzr,
+            speed_l=speed_l,
+            acc_l=acc_l,
+            cp=cart_cp,
+        ).render()
+        return CompiledPlaybackCommand(
+            index=end_idx,
+            target_time_s=float(target_t[end_idx]),
+            original_target_time_s=float(source_target_t[end_idx]),
+            joints_deg=tuple(float(v) for v in self._frame_q_deg(end_frame)),
+            speed_j=int(speed_j),
+            cp=int(cp),
+            command=cmd_str,
+        )
+
+    def _build_general_segment_commands(
+        self, seg, frames, target_t, source_target_t
+    ) -> List[CompiledPlaybackCommand]:
+        """Fallback: emit one JointMovJ per frame inside the segment.
+        Used when LINE / ARC weren't IK-feasible or deviated from the
+        raw Unity path beyond ``SEGMENT_RAW_FIT_TOLERANCE_MM``.
+        """
+        commands = []
+        for idx in range(seg.start_idx + 1, seg.end_idx + 1):
+            frame = frames[idx]
+            prev_frame = frames[idx - 1]
+            speed_j = self._segment_speed_j(prev_frame, frame)
+            pt_cp = self._stream_cp(is_final=idx == len(frames) - 1)
+            joints = self._frame_q_deg(frame)
+            commands.append(
+                CompiledPlaybackCommand(
+                    index=idx,
+                    target_time_s=float(target_t[idx]),
+                    original_target_time_s=float(source_target_t[idx]),
+                    joints_deg=tuple(float(v) for v in joints),
+                    speed_j=int(speed_j),
+                    cp=int(pt_cp),
+                    command=self._build_jointmovj_command(
+                        joints,
+                        speed_j=speed_j,
+                        cp=pt_cp,
+                        acc_j=self._stream_acc_j(),
+                    ),
                 )
-
-            elif primitive_type == SegmentType.ARC:
-                # Single Arc command: through-point + end-point.  Same
-                # CP cap as LINE — see SEGMENT_CARTESIAN_CP_MAX comment.
-                through_xyzr = seg.through_xyzr
-                end_xyzr = seg.end_xyzr
-                speed_j = self._segment_speed_j(frames[seg.start_idx], end_frame)
-                speed_l = self._segment_speed_l(seg, frames)
-                cart_cp_max = int(getattr(motion_config, "SEGMENT_CARTESIAN_CP_MAX", 30))
-                cart_cp = min(int(cp), cart_cp_max)
-                cmd_str = arc(
-                    through_xyzr=through_xyzr,
-                    target_xyzr=end_xyzr,
-                    speed_l=speed_l,
-                    acc_l=acc_l,
-                    cp=cart_cp,
-                ).render()
-                queued_commands.append(
-                    CompiledPlaybackCommand(
-                        index=end_idx,
-                        target_time_s=float(target_t[end_idx]),
-                        original_target_time_s=float(source_target_t[end_idx]),
-                        joints_deg=tuple(float(v) for v in self._frame_q_deg(end_frame)),
-                        speed_j=int(speed_j),
-                        cp=int(cp),
-                        command=cmd_str,
-                    )
-                )
-
-            else:  # GENERAL — fallback per-point JointMovJ
-                for idx in range(seg.start_idx + 1, seg.end_idx + 1):
-                    frame = frames[idx]
-                    prev_frame = frames[idx - 1]
-                    speed_j = self._segment_speed_j(prev_frame, frame)
-                    pt_cp = self._stream_cp(is_final=idx == len(frames) - 1)
-                    joints = self._frame_q_deg(frame)
-                    queued_commands.append(
-                        CompiledPlaybackCommand(
-                            index=idx,
-                            target_time_s=float(target_t[idx]),
-                            original_target_time_s=float(source_target_t[idx]),
-                            joints_deg=tuple(float(v) for v in joints),
-                            speed_j=int(speed_j),
-                            cp=int(pt_cp),
-                            command=self._build_jointmovj_command(
-                                joints,
-                                speed_j=speed_j,
-                                cp=pt_cp,
-                                acc_j=self._stream_acc_j(),
-                            ),
-                        )
-                    )
-
-        return queued_commands
+            )
+        return commands
 
     @staticmethod
     def _fk_for_classifier(j1, j2, j3, j4):
