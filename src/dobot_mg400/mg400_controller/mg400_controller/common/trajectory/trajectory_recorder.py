@@ -730,53 +730,90 @@ class TrajectoryRecorder:
         channel = event.get("channel") or event.get("name") or event.get("tool") or ""
         return str(channel).strip().lower()
 
+    _VACUUM_CHANNELS = frozenset({"vacuum", "suction", "suction_cup"})
+
+    _LIGHT_CHANNEL_PORTS = {
+        "green_light": "GREEN_LIGHT_DO_PORT",
+        "light_green": "GREEN_LIGHT_DO_PORT",
+        "yellow_light": "YELLOW_LIGHT_DO_PORT",
+        "light_yellow": "YELLOW_LIGHT_DO_PORT",
+        "red_light": "RED_LIGHT_DO_PORT",
+        "light_red": "RED_LIGHT_DO_PORT",
+    }
+
     def _translate_digital_event(self, event):
-        """Translate a robot-neutral captured IO event to MG400 dashboard cmds."""
+        """Translate a robot-neutral captured IO event to MG400 dashboard cmds.
+
+        Returns ``(port, immediate_commands, delayed_commands)``:
+          * ``port`` — the DO port the event touched (for diagnostics)
+          * ``immediate_commands`` — tuple of rendered Dobot dashboard
+            commands to send right away
+          * ``delayed_commands`` — tuple of ``(delay_s, rendered_cmd)``
+            pairs to schedule after the immediate commands fire.
+
+        Dispatches by channel:
+          * vacuum / suction / suction_cup → 2-stage release with
+            auto-off blow timer.
+          * green / yellow / red light, or generic ``doN`` → single
+            DO toggle.
+        """
         channel = self._event_channel(event)
         value = self._event_bool_value(event)
         port = self._event_port(event)
 
-        if channel in {"vacuum", "suction", "suction_cup"}:
-            vac_port = motion_config.VACUUM_DO_PORT
-            blow_port = motion_config.BLOW_DO_PORT
-            if vac_port <= 0 or blow_port <= 0:
-                raise ValueError(
-                    f"Vacuum/blow DO ports must be > 0 "
-                    f"(VACUUM_DO_PORT={vac_port}, BLOW_DO_PORT={blow_port}). "
-                    "Check motion_config.py."
-                )
-            if value:
-                return (
-                    vac_port,
-                    (
-                        do_execute(vac_port, True).render(),
-                        do_execute(blow_port, False).render(),
-                    ),
-                    (),
-                )
+        if channel in self._VACUUM_CHANNELS:
+            return self._translate_vacuum_event(value)
+        return self._translate_light_or_generic_event(channel, value, port)
+
+    def _translate_vacuum_event(self, value: bool):
+        """Vacuum / suction release sequence.
+
+        ON  → vacuum DO True + blow DO False, no delayed cleanup.
+        OFF → vacuum DO False + blow DO True, with a delayed
+              ``BLOW_DURATION``-second auto-off pulse so the blow port
+              doesn't idle high.
+        """
+        vac_port = motion_config.VACUUM_DO_PORT
+        blow_port = motion_config.BLOW_DO_PORT
+        if vac_port <= 0 or blow_port <= 0:
+            raise ValueError(
+                f"Vacuum/blow DO ports must be > 0 "
+                f"(VACUUM_DO_PORT={vac_port}, BLOW_DO_PORT={blow_port}). "
+                "Check motion_config.py."
+            )
+        if value:
             return (
                 vac_port,
                 (
-                    do_execute(vac_port, False).render(),
-                    do_execute(blow_port, True).render(),
+                    do_execute(vac_port, True).render(),
+                    do_execute(blow_port, False).render(),
                 ),
-                (
-                    (
-                        float(motion_config.BLOW_DURATION),
-                        do_execute(blow_port, False).render(),
-                    ),
-                ),
+                (),
             )
+        return (
+            vac_port,
+            (
+                do_execute(vac_port, False).render(),
+                do_execute(blow_port, True).render(),
+            ),
+            (
+                (
+                    float(motion_config.BLOW_DURATION),
+                    do_execute(blow_port, False).render(),
+                ),
+            ),
+        )
 
-        channel_ports = {
-            "green_light": motion_config.GREEN_LIGHT_DO_PORT,
-            "light_green": motion_config.GREEN_LIGHT_DO_PORT,
-            "yellow_light": motion_config.YELLOW_LIGHT_DO_PORT,
-            "light_yellow": motion_config.YELLOW_LIGHT_DO_PORT,
-            "red_light": motion_config.RED_LIGHT_DO_PORT,
-            "light_red": motion_config.RED_LIGHT_DO_PORT,
-        }
-        port = port or channel_ports.get(channel, 0)
+    def _translate_light_or_generic_event(self, channel: str, value: bool, port: int):
+        """Single-DO channels: green / yellow / red light, or a
+        generic ``doN`` (e.g. ``do7``) catch-all. Returns the standard
+        ``(port, (cmd,), ())`` tuple shape so the caller can unify
+        vacuum + light bookkeeping.
+        """
+        if port <= 0:
+            port_name = self._LIGHT_CHANNEL_PORTS.get(channel)
+            if port_name is not None:
+                port = getattr(motion_config, port_name, 0)
         if port <= 0 and channel.startswith("do"):
             try:
                 port = int(channel[2:])
@@ -784,7 +821,6 @@ class TrajectoryRecorder:
                 port = 0
         if port <= 0:
             raise ValueError(f"unsupported digital output channel: {channel!r}")
-
         return port, (do_execute(port, value).render(),), ()
 
     def _compile_event_commands(self, source_frames, target_t, source_target_t):
