@@ -339,6 +339,9 @@ class TeachJobHandler:
 
     # ── Action handlers ─────────────────────────────────────────────────────
     def _handle_compile(self, request: JobRequest) -> JobStatus:
+        """Compile the loaded trajectory, publish the artifact, and
+        return the STAGE_COMPILED status with the per-plan metadata
+        summary that Unity / the monitor read."""
         self._apply_request_tuning(request)
         if not self._load_trajectory_or_fail(request):
             return self._last_status
@@ -348,37 +351,50 @@ class TeachJobHandler:
         except Exception as exc:
             return self._fail(request, ERR_BAD_PAYLOAD, f"Compile failed: {exc}")
 
+        self._publish_compile_artifact(request, plan)
         scene_violations = self._scene_safety_violations(plan)
-        artifact = compiled_playback_plan_to_dict(plan)
+        return self._succeed(
+            request,
+            stage=STAGE_COMPILED,
+            message=f"Compiled {len(plan.queued_commands)} commands "
+                    f"({plan.total_duration_s:.2f}s)",
+            metadata=self._build_compile_metadata(plan, scene_violations),
+        )
+
+    def _publish_compile_artifact(self, request: JobRequest, plan) -> None:
+        """Publish the compiled playback plan as a JSON artifact on
+        ``/teach/job_artifact``. Failures are logged at warn level —
+        artifact publishing is best-effort, the status emit is the
+        contract that actually matters.
+        """
         artifact_payload = {
             "job_id": request.job_id,
-            "artifact": artifact,
+            "artifact": compiled_playback_plan_to_dict(plan),
         }
         try:
             self._publish_artifact(json.dumps(artifact_payload, sort_keys=True))
         except Exception as exc:
             self._log.warn(f"Failed to publish compile artifact: {exc}")
 
-        return self._succeed(
-            request,
-            stage=STAGE_COMPILED,
-            message=f"Compiled {len(plan.queued_commands)} commands "
-                    f"({plan.total_duration_s:.2f}s)",
-            metadata={
-                "waypoint_count": len(plan.waypoints),
-                "raw_waypoint_count": int(getattr(plan, "raw_waypoint_count", len(plan.waypoints))),
-                "simplify_tolerance_deg": float(getattr(plan, "simplify_tolerance_deg", 0.0)),
-                "queued_command_count": len(plan.queued_commands),
-                "event_command_count": len(getattr(plan, "event_commands", ())),
-                "total_duration_s": plan.total_duration_s,
-                "time_scale": plan.time_scale,
-                "original_timing_feasible": plan.original_timing_feasible,
-                "playback_tuning": self._current_tuning(),
-                "scene_safety_enabled": self._scene_safety_enabled(),
-                "scene_safety_blocked": bool(scene_violations),
-                "scene_safety_violations": scene_violations[:5],
-            },
-        )
+    def _build_compile_metadata(self, plan, scene_violations) -> Dict[str, Any]:
+        """Per-plan metadata bag attached to the STAGE_COMPILED status
+        emit. Includes the simplification + retiming + scene-safety
+        context the monitor needs to render the post-compile preview.
+        """
+        return {
+            "waypoint_count": len(plan.waypoints),
+            "raw_waypoint_count": int(getattr(plan, "raw_waypoint_count", len(plan.waypoints))),
+            "simplify_tolerance_deg": float(getattr(plan, "simplify_tolerance_deg", 0.0)),
+            "queued_command_count": len(plan.queued_commands),
+            "event_command_count": len(getattr(plan, "event_commands", ())),
+            "total_duration_s": plan.total_duration_s,
+            "time_scale": plan.time_scale,
+            "original_timing_feasible": plan.original_timing_feasible,
+            "playback_tuning": self._current_tuning(),
+            "scene_safety_enabled": self._scene_safety_enabled(),
+            "scene_safety_blocked": bool(scene_violations),
+            "scene_safety_violations": scene_violations[:5],
+        }
 
     def _handle_play(self, request: JobRequest, *, sim: bool) -> JobStatus:
         """Real-robot playback path.
