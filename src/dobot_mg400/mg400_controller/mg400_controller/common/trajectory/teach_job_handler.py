@@ -32,9 +32,12 @@ JobRequest schema (JSON over ``std_msgs/String``)::
         "dry_run": false,
         "export_path": "abs/path.json",
         "auto_play": false
-      },
-      "submitted_at_unity_sec": 12345.6
+      }
     }
+
+Unknown top-level keys are silently ignored, so Unity can keep
+sending optional diagnostic fields (e.g. ``submitted_at_unity_sec``)
+without the parser failing.
 
 JobStatus schema::
 
@@ -108,8 +111,6 @@ class JobRequest:
     target: str
     trajectory: Optional[Dict[str, Any]]
     options: Dict[str, Any]
-    submitted_at_unity_sec: Optional[float]
-    raw: Dict[str, Any]
 
     def frames(self) -> List[Dict[str, Any]]:
         """Return frames list from the embedded trajectory, or []."""
@@ -168,21 +169,12 @@ def parse_job_request(json_str: str) -> JobRequest:
     if not isinstance(options_raw, dict):
         raise ValueError("'options' must be an object when provided")
 
-    submitted = data.get("submitted_at_unity_sec")
-    if submitted is not None:
-        try:
-            submitted = float(submitted)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("'submitted_at_unity_sec' must be a number") from exc
-
     return JobRequest(
         job_id=job_id.strip(),
         action=action.strip(),
         target=target.strip(),
         trajectory=trajectory,
         options=dict(options_raw),
-        submitted_at_unity_sec=submitted,
-        raw=data,
     )
 
 
