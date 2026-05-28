@@ -89,202 +89,258 @@ class JointMonitorNode(Node):
 
 class MonitorGUI:
     def __init__(self, root, node):
+        """Construct the monitor GUI.
+
+        Layout flow (each ``_build_*`` helper owns one UI section so
+        the wall of Tk widget construction stays one screen apiece):
+
+          - prologue: window chrome + ExecutionMonitor + control panel
+            state + manual logger.
+          - left pane:  title / joint table / Cartesian table / tool
+                        index / control panel / execution metrics /
+                        status bar.
+          - right pane: matplotlib graphs.
+
+        After widgets exist, kick off the 20 Hz Tk ``update_gui`` loop
+        and the matplotlib animation.
+        """
         self.root = root
         self.node = node
         self.monitor = ExecutionMonitor()
         self.control_panel = MonitorControlPanelState()
-        
+        self.manual_logger = ManualMonitorLogger()
+        self.error_decoder = RobotErrorDecoder()
+
         self.root.title("MG400 Extended Monitor")
         self.root.configure(bg="#1a1a2e")
-        self.manual_logger = ManualMonitorLogger()
 
-        # ===== MAIN LAYOUT =====
-        # Left panel: existing controls + tables
-        # Right panel: real-time graphs
-        
-        # Use a PanedWindow so the user can drag the separator between GUI and Graphs
-        outer = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg="#1a1a2e", sashwidth=5, sashrelief=tk.RAISED)
+        main_frame, right_frame = self._build_main_layout()
+        self._build_title_row(main_frame)
+        self._build_joint_table(main_frame)
+        self._build_cartesian_table(main_frame)
+        self._build_control_panel(main_frame)
+        self._build_execution_metrics(main_frame)
+        self._build_status_bar(main_frame)
+        self._setup_graphs(right_frame)
+
+        # Start Update Loop
+        self.update_gui()
+
+    def _build_main_layout(self):
+        """Outer PanedWindow split between left controls/tables and
+        right real-time graphs. Returns ``(main_frame, right_frame)``;
+        the left frame's padded interior is the parent every left-side
+        builder writes to.
+        """
+        outer = tk.PanedWindow(
+            self.root, orient=tk.HORIZONTAL, bg="#1a1a2e",
+            sashwidth=5, sashrelief=tk.RAISED,
+        )
         outer.pack(fill=tk.BOTH, expand=True)
-
         left_frame = tk.Frame(outer, bg="#f0f0f0")
         right_frame = tk.Frame(outer, bg="white")
+        outer.add(left_frame, minsize=600, stretch="never")
+        outer.add(right_frame, minsize=400, stretch="always")
 
-        outer.add(left_frame, minsize=600, stretch="never") # Left side stays its natural size or min 600
-        outer.add(right_frame, minsize=400, stretch="always") # Right side takes all extra expanding space
-
-        # ===== LEFT PANEL (existing UI) =====
         main_frame = ttk.Frame(left_frame, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
+        return main_frame, right_frame
 
-        # Title
+    def _build_title_row(self, main_frame):
+        """Title label + Start/Stop logging toggle button. Logging
+        status is tracked on ``self.manual_logger.is_active``; the
+        button only mutates that flag via ``toggle_logging``.
+        """
         title_frame = ttk.Frame(main_frame)
         title_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(title_frame, text="Real-time Monitor & Metrics", font=FONT_HEADER).pack(side=tk.LEFT)
-        
-        # Logging Button (status tracked on self.manual_logger.is_active).
-        self.btn_log = tk.Button(title_frame, text="▶ Start Logging", command=self.toggle_logging, bg="#f0f0f0")
+        ttk.Label(
+            title_frame, text="Real-time Monitor & Metrics", font=FONT_HEADER
+        ).pack(side=tk.LEFT)
+        self.btn_log = tk.Button(
+            title_frame, text="▶ Start Logging",
+            command=self.toggle_logging, bg="#f0f0f0",
+        )
         self.btn_log.pack(side=tk.RIGHT)
 
-        # --- JOINT TABLE ---
-        header_frame = ttk.Frame(main_frame)
-        header_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(header_frame, text="Joint", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Target (°)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Actual (°)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
-        ttk.Label(header_frame, text="Diff (°)", font=FONT_LABEL, width=15).pack(side=tk.LEFT)
+    def _build_joint_table(self, main_frame):
+        """Four-row joint table (J1..J4) showing target / actual /
+        diff in degrees. The text vars are kept on
+        ``self.vars_target / vars_actual / vars_diff`` and the diff
+        labels themselves are kept on ``self.lbls_diff`` so
+        ``update_gui`` can recolour them based on threshold.
+        """
+        header = ttk.Frame(main_frame)
+        header.pack(fill=tk.X, pady=5)
+        for text, width in (("Joint", 10), ("Target (°)", 15), ("Actual (°)", 15), ("Diff (°)", 15)):
+            ttk.Label(header, text=text, font=FONT_LABEL, width=width).pack(side=tk.LEFT)
+        ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=5)
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=5)
+        self.vars_target, self.vars_actual, self.vars_diff, self.lbls_diff = [], [], [], []
+        for name in ("J1", "J2", "J3", "J4"):
+            row = ttk.Frame(main_frame)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=name, font=FONT_LABEL, width=12).pack(side=tk.LEFT)
 
-        self.vars_target = []
-        self.vars_actual = []
-        self.vars_diff = []
-        self.lbls_diff = []
-        
-        joints = ["J1", "J2", "J3", "J4"]
-        
-        for i, name in enumerate(joints):
-            frame = ttk.Frame(main_frame)
-            frame.pack(fill=tk.X, pady=2)
-            ttk.Label(frame, text=name, font=FONT_LABEL, width=12).pack(side=tk.LEFT)
-            
             v_tgt = tk.StringVar(value="0.00")
-            ttk.Label(frame, textvariable=v_tgt, font=FONT_VALUE, foreground="darkgreen", width=12).pack(side=tk.LEFT)
+            ttk.Label(row, textvariable=v_tgt, font=FONT_VALUE, foreground="darkgreen", width=12).pack(side=tk.LEFT)
             self.vars_target.append(v_tgt)
 
             v_act = tk.StringVar(value="0.00")
-            ttk.Label(frame, textvariable=v_act, font=FONT_VALUE, foreground="blue", width=12).pack(side=tk.LEFT)
+            ttk.Label(row, textvariable=v_act, font=FONT_VALUE, foreground="blue", width=12).pack(side=tk.LEFT)
             self.vars_actual.append(v_act)
 
             v_diff = tk.StringVar(value="0.00")
-            lbl_diff = ttk.Label(frame, textvariable=v_diff, font=FONT_VALUE, foreground="black", width=12)
+            lbl_diff = ttk.Label(row, textvariable=v_diff, font=FONT_VALUE, foreground="black", width=12)
             lbl_diff.pack(side=tk.LEFT)
             self.vars_diff.append(v_diff)
             self.lbls_diff.append(lbl_diff)
+        ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=10)
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
+    def _build_cartesian_table(self, main_frame):
+        """X/Y/Z table showing Unity-FK / Flange / TCP / Tool-delta in
+        mm, plus the Active Tool index row underneath. ``vars_xyz_diff``
+        and ``lbls_xyz_diff`` are compat aliases the session logger
+        still reads.
+        """
+        ttk.Label(
+            main_frame, text="Cartesian Coordinates (End Effector)",
+            font=("Helvetica", 12, "bold"),
+        ).pack(anchor=tk.W)
 
-        # --- CARTESIAN MONITOR (XYZ) ---
-        ttk.Label(main_frame, text="Cartesian Coordinates (End Effector)", font=("Helvetica", 12, "bold")).pack(anchor=tk.W)
+        header = ttk.Frame(main_frame)
+        header.pack(fill=tk.X, pady=2)
+        for text, width, fg in (
+            ("Axis", 6, None),
+            ("Unity FK (mm)", 13, "darkorange"),
+            ("Flange (mm)", 13, "royalblue"),
+            ("TCP (mm)", 13, "green4"),
+            ("ToolΔ (mm)", 12, "gray40"),
+        ):
+            kwargs = {"font": FONT_LABEL, "width": width}
+            if fg:
+                kwargs["foreground"] = fg
+            ttk.Label(header, text=text, **kwargs).pack(side=tk.LEFT)
 
-        header_xyz = ttk.Frame(main_frame)
-        header_xyz.pack(fill=tk.X, pady=2)
-        ttk.Label(header_xyz, text="Axis",          font=FONT_LABEL, width=6).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Unity FK (mm)", font=FONT_LABEL, foreground="darkorange",  width=13).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="Flange (mm)",   font=FONT_LABEL, foreground="royalblue",   width=13).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="TCP (mm)",      font=FONT_LABEL, foreground="green4",      width=13).pack(side=tk.LEFT)
-        ttk.Label(header_xyz, text="ToolΔ (mm)",   font=FONT_LABEL, foreground="gray40",      width=12).pack(side=tk.LEFT)
-
-        self.vars_xyz_tgt    = []
-        self.vars_xyz_flange = []
-        self.vars_xyz_act    = []
-        self.vars_xyz_tool   = []
-        self.vars_xyz_diff   = []   # compat alias
-        self.lbls_xyz_diff   = []
-
-        for i, name in enumerate(["X", "Y", "Z"]):
-            frame = ttk.Frame(main_frame)
-            frame.pack(fill=tk.X, pady=2)
-            ttk.Label(frame, text=name, font=FONT_LABEL, width=7).pack(side=tk.LEFT)
+        self.vars_xyz_tgt, self.vars_xyz_flange = [], []
+        self.vars_xyz_act, self.vars_xyz_tool = [], []
+        self.vars_xyz_diff, self.lbls_xyz_diff = [], []  # compat aliases
+        for name in ("X", "Y", "Z"):
+            row = ttk.Frame(main_frame)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=name, font=FONT_LABEL, width=7).pack(side=tk.LEFT)
 
             v_tgt = tk.StringVar(value="0.0")
-            ttk.Label(frame, textvariable=v_tgt, font=FONT_VALUE, foreground="darkorange", width=12).pack(side=tk.LEFT)
+            ttk.Label(row, textvariable=v_tgt, font=FONT_VALUE, foreground="darkorange", width=12).pack(side=tk.LEFT)
             self.vars_xyz_tgt.append(v_tgt)
-
             v_flange = tk.StringVar(value="0.0")
-            ttk.Label(frame, textvariable=v_flange, font=FONT_VALUE, foreground="royalblue", width=12).pack(side=tk.LEFT)
+            ttk.Label(row, textvariable=v_flange, font=FONT_VALUE, foreground="royalblue", width=12).pack(side=tk.LEFT)
             self.vars_xyz_flange.append(v_flange)
-
             v_act = tk.StringVar(value="0.0")
-            ttk.Label(frame, textvariable=v_act, font=FONT_VALUE, foreground="green4", width=12).pack(side=tk.LEFT)
+            ttk.Label(row, textvariable=v_act, font=FONT_VALUE, foreground="green4", width=12).pack(side=tk.LEFT)
             self.vars_xyz_act.append(v_act)
-
             v_tool = tk.StringVar(value="0.0")
-            lbl_tool = ttk.Label(frame, textvariable=v_tool, font=FONT_VALUE, foreground="gray40", width=11)
+            lbl_tool = ttk.Label(row, textvariable=v_tool, font=FONT_VALUE, foreground="gray40", width=11)
             lbl_tool.pack(side=tk.LEFT)
             self.vars_xyz_tool.append(v_tool)
-            # compat aliases for session logger
             self.vars_xyz_diff.append(v_tool)
             self.lbls_xyz_diff.append(lbl_tool)
 
-        # Tool Index label row (below XYZ table)
         tool_idx_row = ttk.Frame(main_frame)
         tool_idx_row.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(tool_idx_row, text="Active Tool:", font=FONT_LABEL, width=14).pack(side=tk.LEFT)
         self.var_tool_index = tk.StringVar(value="— (querying...)")
-        ttk.Label(tool_idx_row, textvariable=self.var_tool_index, font=FONT_VALUE, foreground="gray40").pack(side=tk.LEFT)
+        ttk.Label(
+            tool_idx_row, textvariable=self.var_tool_index,
+            font=FONT_VALUE, foreground="gray40",
+        ).pack(side=tk.LEFT)
+        ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=10)
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
-
-        # --- 🎮 CONTROL PANEL ---
+    def _build_control_panel(self, main_frame):
+        """Suction toggle + per-colour light buttons. Initial button
+        display is seeded from ``self.control_panel.build_initial_sync()``
+        so the GUI doesn't show stale OFF state before the first DO
+        feedback row arrives.
+        """
         control_frame = ttk.LabelFrame(main_frame, text="Robot Direct Control", padding="10")
         control_frame.pack(fill=tk.X, pady=5)
 
         suction_row = ttk.Frame(control_frame)
         suction_row.pack(fill=tk.X, pady=5)
         ttk.Label(suction_row, text="Suction:", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
-        self.btn_suction = tk.Button(suction_row, text="OFF", font=FONT_VALUE, width=10, command=self.toggle_suction)
+        self.btn_suction = tk.Button(
+            suction_row, text="OFF", font=FONT_VALUE, width=10, command=self.toggle_suction,
+        )
         self.btn_suction.pack(side=tk.LEFT, padx=5)
 
         light_row = ttk.Frame(control_frame)
         light_row.pack(fill=tk.X, pady=10)
         ttk.Label(light_row, text="Lights:", font=FONT_LABEL, width=10).pack(side=tk.LEFT)
         self.btns_light = {}
-
         for name, _, _ in LIGHT_SPECS:
-            btn = tk.Button(light_row, text=name, font=("Helvetica", 10, "bold"), width=8, bg=COLOR_OFF, 
-                            command=lambda n=name: self.toggle_light(n))
+            btn = tk.Button(
+                light_row, text=name, font=("Helvetica", 10, "bold"),
+                width=8, bg=COLOR_OFF, command=lambda n=name: self.toggle_light(n),
+            )
             btn.pack(side=tk.LEFT, padx=2)
             self.btns_light[name] = btn
-
         self._apply_control_panel_sync(self.control_panel.build_initial_sync())
+        ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=10)
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
-
-        # --- EXECUTION METRICS ---
+    def _build_execution_metrics(self, main_frame):
+        """STATE / timer row + stats summary row populated by
+        ``self.monitor.update`` each tick.
+        """
         metrics_frame = ttk.LabelFrame(main_frame, text="Execution Metrics", padding="10")
         metrics_frame.pack(fill=tk.X, pady=5)
-        
+
         row1 = ttk.Frame(metrics_frame)
         row1.pack(fill=tk.X)
         self.var_status = tk.StringVar(value="IDLE")
-        self.lbl_status = ttk.Label(row1, textvariable=self.var_status, font=("Helvetica", 12, "bold"), foreground="gray")
+        self.lbl_status = ttk.Label(
+            row1, textvariable=self.var_status,
+            font=("Helvetica", 12, "bold"), foreground="gray",
+        )
         self.lbl_status.pack(side=tk.LEFT)
         self.var_timer = tk.StringVar(value="0.00s")
-        self.lbl_timer = ttk.Label(row1, textvariable=self.var_timer, font=FONT_BIG_VALUE, foreground="black")
+        self.lbl_timer = ttk.Label(
+            row1, textvariable=self.var_timer, font=FONT_BIG_VALUE, foreground="black",
+        )
         self.lbl_timer.pack(side=tk.RIGHT)
-        
+
         row2 = ttk.Frame(metrics_frame)
         row2.pack(fill=tk.X, pady=5)
         self.var_stats = tk.StringVar(value="Avg: 0.00s | Min: 0.00s | Max: 0.00s")
         ttk.Label(row2, textvariable=self.var_stats, font=FONT_STATS).pack(anchor=tk.E)
 
-        # --- STATUS BAR ---
+    def _build_status_bar(self, main_frame):
+        """Bottom status bar: latency text, MODE label, ERR code, and
+        DO hex readout. ``update_gui`` writes each from the
+        ``build_status_display_state`` helper.
+        """
         status_frame = ttk.Frame(main_frame)
         status_frame.pack(fill=tk.X, pady=10)
-        
+
         self.var_latency = tk.StringVar(value="Waiting for data...")
         ttk.Label(status_frame, textvariable=self.var_latency, font=FONT_LATENCY).pack(side=tk.LEFT)
 
         self.var_mode = tk.StringVar(value="MODE: -")
-        tk.Label(status_frame, textvariable=self.var_mode, font=("Arial", 10), bg="#f0f0f0").pack(side=tk.RIGHT, padx=10)
-        
+        tk.Label(
+            status_frame, textvariable=self.var_mode,
+            font=("Arial", 10), bg="#f0f0f0",
+        ).pack(side=tk.RIGHT, padx=10)
+
         self.var_error = tk.StringVar(value="ERR: 00")
-        self.lbl_error = tk.Label(status_frame, textvariable=self.var_error, font=("Arial", 10, "bold"), bg="#f0f0f0", fg="red")
+        self.lbl_error = tk.Label(
+            status_frame, textvariable=self.var_error,
+            font=("Arial", 10, "bold"), bg="#f0f0f0", fg="red",
+        )
         self.lbl_error.pack(side=tk.RIGHT, padx=5)
-        
+
         self.var_do_hex = tk.StringVar(value="DO: 0x0000")
-        ttk.Label(status_frame, textvariable=self.var_do_hex, font=FONT_LATENCY, foreground="gray").pack(anchor=tk.W)
-
-        # Button moved to top title_frame
-
-        # ===== RIGHT PANEL: REAL-TIME GRAPHS =====
-        self._setup_graphs(right_frame)
-
-        # Decoder for error messages
-        self.error_decoder = RobotErrorDecoder()
-
-        # Start Update Loop
-        self.update_gui()
+        ttk.Label(
+            status_frame, textvariable=self.var_do_hex,
+            font=FONT_LATENCY, foreground="gray",
+        ).pack(anchor=tk.W)
 
     def _setup_graphs(self, parent):
         """Create the matplotlib figure with 4 subplots for J1-J4."""
@@ -416,31 +472,64 @@ class MonitorGUI:
             self._apply_button_display(self.btns_light[name], display)
 
     def update_gui(self):
-        # Get latest data
+        """20 Hz Tk refresh tick. Pulls a fresh telemetry snapshot,
+        forwards it to each ``_refresh_*`` helper, logs to CSV, then
+        schedules the next tick.
+        """
         telemetry = self.node.telemetry
         tgt = telemetry.latest_target_joints
         act = telemetry.latest_actual_joints
         joint_rows, total_diff = build_joint_display_rows(tgt, act)
         cartesian_state = build_cartesian_display_state(telemetry)
         status_state = build_status_display_state(telemetry, self.error_decoder)
-        
-        # --- Update Joint Data ---
+
+        self._refresh_joint_table(joint_rows)
+        self._refresh_system_info(status_state)
+        self._refresh_control_panel_sync(telemetry)
+        self._refresh_cartesian_table(cartesian_state)
+        self._refresh_execution_metrics(total_diff)
+        self._refresh_status_bar(status_state)
+
+        self.manual_logger.log_sample(
+            target_xyz=cartesian_state["unity_xyz"],
+            actual_xyz=cartesian_state["tcp_xyz"],
+            target_joints=tgt,
+            actual_joints=act,
+            total_diff=total_diff,
+        )
+        # Session Logger runs in its own background thread internally.
+        self.root.after(50, self.update_gui)  # 20 Hz cadence
+
+    def _refresh_joint_table(self, joint_rows):
+        """Write target / actual / diff text into the joint table and
+        recolour the diff label per row (green/yellow/red based on
+        the build_joint_display_rows threshold).
+        """
         for i, row in enumerate(joint_rows):
             self.vars_target[i].set(row["target"])
             self.vars_actual[i].set(row["actual"])
             self.vars_diff[i].set(row["diff"])
             self.lbls_diff[i].configure(foreground=row["color"])
 
-        # --- Update System Info ---
+    def _refresh_system_info(self, status_state):
+        """MODE label + ERR readout (text + colour)."""
         self.var_mode.set(status_state["mode_text"])
         self.var_error.set(status_state["error_text"])
         self.lbl_error.configure(fg=status_state["error_color"])
-        
-        # --- Update Button States (DO Status Sync) ---
-        do_status = telemetry.latest_do_status
-        self._apply_control_panel_sync(self.control_panel.sync_from_do_status(do_status))
 
-        # --- Update Cartesian Data ---
+    def _refresh_control_panel_sync(self, telemetry):
+        """Push the latest DO status into the suction + light buttons
+        so the GUI mirrors the actual robot state instead of the last
+        operator click.
+        """
+        self._apply_control_panel_sync(
+            self.control_panel.sync_from_do_status(telemetry.latest_do_status)
+        )
+
+    def _refresh_cartesian_table(self, cartesian_state):
+        """Write the four Cartesian columns (Unity FK / Flange / TCP /
+        tool-delta) and the active-tool index label.
+        """
         xyz_unity = cartesian_state["unity_xyz"]
         xyz_flange = cartesian_state["flange_xyz"]
         xyz_tcp = cartesian_state["tcp_xyz"]
@@ -449,11 +538,13 @@ class MonitorGUI:
             self.vars_xyz_flange[i].set(f"{xyz_flange[i]:.1f}")
             self.vars_xyz_act[i].set(f"{xyz_tcp[i]:.1f}")
             self.vars_xyz_tool[i].set(f"{cartesian_state['tool_delta'][i]:+.1f}")
-
-        # Tool index label
         self.var_tool_index.set(cartesian_state["tool_index_text"])
 
-        # --- Execution Monitor ---
+    def _refresh_execution_metrics(self, total_diff):
+        """Push ``total_diff`` into the ExecutionMonitor, then mirror
+        its derived state (MOVING / ARRIVED / IDLE) into the status
+        label + timer colour, plus the rolling Avg/Min/Max summary.
+        """
         self.monitor.update(total_diff)
         if self.monitor.state == "MOVING":
             self.var_status.set("MOVING...")
@@ -468,27 +559,17 @@ class MonitorGUI:
         else:
             self.var_status.set("IDLE")
             self.lbl_status.configure(foreground="gray")
-        
-        avg_t, min_t, max_t = self.monitor.get_stats()
-        self.var_stats.set(f"Avg: {avg_t:.2f}s | Min: {min_t:.2f}s | Max: {max_t:.2f}s | Count: {len(self.monitor.durations)}")
 
-        # --- Latency ---
-        self.var_latency.set(status_state["latency_text"])
-        self.var_do_hex.set(status_state["do_hex_text"])
-            
-        # --- CSV Logging ---
-        self.manual_logger.log_sample(
-            target_xyz=xyz_unity,
-            actual_xyz=xyz_tcp,
-            target_joints=tgt,
-            actual_joints=act,
-            total_diff=total_diff,
+        avg_t, min_t, max_t = self.monitor.get_stats()
+        self.var_stats.set(
+            f"Avg: {avg_t:.2f}s | Min: {min_t:.2f}s | Max: {max_t:.2f}s | "
+            f"Count: {len(self.monitor.durations)}"
         )
 
-        # ✅ Session Logger runs in its own background thread internally
-
-        # Schedule next update at 20Hz
-        self.root.after(50, self.update_gui)
+    def _refresh_status_bar(self, status_state):
+        """Bottom-bar latency text + DO hex readout."""
+        self.var_latency.set(status_state["latency_text"])
+        self.var_do_hex.set(status_state["do_hex_text"])
 
 
 def main():
