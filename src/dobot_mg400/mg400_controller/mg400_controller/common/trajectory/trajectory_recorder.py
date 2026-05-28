@@ -1304,7 +1304,12 @@ class TrajectoryRecorder:
         )
 
     def _play_worker(self):
-        """Execute a precompiled playback job while publishing monitoring data."""
+        """Execute a precompiled playback job while publishing monitoring data.
+
+        Top-level orchestrator. Each numbered phase below is its own
+        helper method; the worker body just sequences them and owns
+        the loop termination + final logging.
+        """
         if not self.loaded_frames:
             return
         plan = self.compile_loaded_plan()
@@ -1317,27 +1322,40 @@ class TrajectoryRecorder:
             f"(compiled from {plan.source_name})"
         )
 
-        target_t = np.array([float(f["timeStamp"]) - float(frames[0]["timeStamp"]) for f in frames])
+        target_t = np.array(
+            [float(f["timeStamp"]) - float(frames[0]["timeStamp"]) for f in frames]
+        )
         target_q = np.array([[f["j1"], f["j2"], f["j3"], f["j4"]] for f in frames])
 
-        # ── 0. Move to trajectory start position before playing ────────────────
-        first = frames[0]
-        arrived_at_start = self._send_go_to_start(first)
-
+        # 0. Move to trajectory start position before playing.
+        arrived_at_start = self._send_go_to_start(frames[0])
         if self._stop_flag.is_set():
             self.is_playing = False
             return
         if not arrived_at_start:
             self.is_playing = False
-            self._log.warn("⚠️  Preview aborted: robot did not reach trajectory start in time")
+            self._log.warn(
+                "⚠️  Preview aborted: robot did not reach trajectory start in time"
+            )
             return
 
-        command_idx = 0
-        event_idx = 0
         t_start = self._time_fn()
+        self._emit_play_start_event(plan, n)
+        command_idx, event_idx = self._run_playback_loop(
+            plan, frames, target_t, target_q, total_dur, t_start
+        )
+
+        finalization = self._finalize_playback(plan, target_q, t_start)
+        self.is_playing = False
+        self._emit_play_complete_event(finalization, target_q)
+        self._log_playback_result(finalization)
+
+    def _emit_play_start_event(self, plan, n: int) -> None:
+        """Emit the ``playback_start`` event with the plan's timing /
+        retiming context so the monitor / bridge can stamp the run."""
         self._emit_playback_event(
             "playback_start",
-            total_duration_s=total_dur,
+            total_duration_s=plan.total_duration_s,
             original_duration_s=plan.original_duration_s,
             retimed_duration_s=plan.retimed_duration_s,
             time_scale=plan.time_scale,
@@ -1346,65 +1364,23 @@ class TrajectoryRecorder:
             execution_model="compiled_queue_plan",
             execution_profile=plan.execution_profile,
         )
+
+    def _run_playback_loop(self, plan, frames, target_t, target_q, total_dur, t_start):
+        """Run the 100 Hz lookahead loop until stop / completion / timeout.
+
+        Returns the final ``(command_idx, event_idx)`` for diagnostics
+        (currently unused by the caller but kept so the loop body is
+        a pure function of ``plan`` and time).
+        """
+        command_idx = 0
+        event_idx = 0
         while not self._stop_flag.is_set():
             elapsed = self._time_fn() - t_start
 
-            while (
-                event_idx < len(plan.event_commands)
-                and plan.event_commands[event_idx].target_time_s <= elapsed
-            ):
-                self._dispatch_event_command(plan.event_commands[event_idx], elapsed)
-                event_idx += 1
-            
-            # 1. Pre-send any waypoints that fall within the current lookahead window
-            sent_this_cycle = 0
-            max_commands_per_cycle = self._max_commands_per_cycle()
-            while (
-                command_idx < len(plan.queued_commands)
-                and plan.queued_commands[command_idx].target_time_s <= elapsed + plan.lookahead_s
-            ):
-                compiled = plan.queued_commands[command_idx]
-                command = self._apply_runtime_tuning_to_command(
-                    compiled.command,
-                    is_final=command_idx == len(plan.queued_commands) - 1,
-                )
-                self._send(command)
-                self._emit_playback_event(
-                    "waypoint_queued",
-                    index=compiled.index,
-                    command=command,
-                    target_time_s=compiled.target_time_s,
-                    original_target_time_s=compiled.original_target_time_s,
-                    elapsed_s=float(elapsed),
-                    speed_j=int(self.playback_tuning().get("speed_j", compiled.speed_j)),
-                    cp=int(self.playback_tuning().get("cp", compiled.cp)),
-                    frame=frames[compiled.index],
-                )
-                
-                # Publish the discrete command sent for the red dots graph
-                if self._waypoint_cb is not None:
-                    try:
-                        self._waypoint_cb(np.radians(compiled.joints_deg))
-                    except Exception:
-                        pass
-                        
-                command_idx += 1
-                sent_this_cycle += 1
-                if sent_this_cycle >= max_commands_per_cycle:
-                    break
-                
-            # 2. Publish smooth real-time target for accurate graphing (like race.py)
-            if self._target_cb is not None:
-                try:
-                    if elapsed <= total_dur:
-                        q_curr = [np.interp(elapsed, target_t, target_q[:, i]) for i in range(4)]
-                    else:
-                        q_curr = target_q[-1]
-                    self._target_cb(np.radians(q_curr))
-                except Exception:
-                    pass
-                    
-            # 3. Check loop termination
+            event_idx = self._dispatch_due_events(plan, elapsed, event_idx)
+            command_idx = self._send_due_waypoints(plan, frames, elapsed, command_idx)
+            self._publish_smooth_target(target_t, target_q, total_dur, elapsed)
+
             if (
                 event_idx >= len(plan.event_commands)
                 and command_idx >= len(plan.queued_commands)
@@ -1413,15 +1389,97 @@ class TrajectoryRecorder:
                 break
             if self._playback_timed_out(elapsed, total_dur, len(plan.queued_commands)):
                 break
-                
-            self._sleep_fn(PREVIEW_POLL_SEC) # 100Hz interpolation and polling loop
 
-        final_max_error, final_error, final_position, final_robot_mode = self._final_target_state(target_q)
-        final_target = np.asarray(target_q[-1], dtype=float)
+            self._sleep_fn(PREVIEW_POLL_SEC)  # 100 Hz interpolation / polling cadence
+
+        return command_idx, event_idx
+
+    def _dispatch_due_events(self, plan, elapsed, event_idx):
+        """Fire any event commands whose ``target_time_s`` has arrived."""
+        while (
+            event_idx < len(plan.event_commands)
+            and plan.event_commands[event_idx].target_time_s <= elapsed
+        ):
+            self._dispatch_event_command(plan.event_commands[event_idx], elapsed)
+            event_idx += 1
+        return event_idx
+
+    def _send_due_waypoints(self, plan, frames, elapsed, command_idx):
+        """Pre-send any waypoints inside ``plan.lookahead_s`` from now.
+
+        Capped by ``_max_commands_per_cycle`` so a long burst can't
+        starve the smooth-target publish (phase 2 in the original
+        loop).
+        """
+        sent_this_cycle = 0
+        max_per_cycle = self._max_commands_per_cycle()
+        while (
+            command_idx < len(plan.queued_commands)
+            and plan.queued_commands[command_idx].target_time_s <= elapsed + plan.lookahead_s
+        ):
+            compiled = plan.queued_commands[command_idx]
+            is_final = command_idx == len(plan.queued_commands) - 1
+            command = self._apply_runtime_tuning_to_command(
+                compiled.command, is_final=is_final
+            )
+            self._send(command)
+            self._emit_playback_event(
+                "waypoint_queued",
+                index=compiled.index,
+                command=command,
+                target_time_s=compiled.target_time_s,
+                original_target_time_s=compiled.original_target_time_s,
+                elapsed_s=float(elapsed),
+                speed_j=int(self.playback_tuning().get("speed_j", compiled.speed_j)),
+                cp=int(self.playback_tuning().get("cp", compiled.cp)),
+                frame=frames[compiled.index],
+            )
+
+            # Discrete waypoint published for the red-dots graph.
+            if self._waypoint_cb is not None:
+                try:
+                    self._waypoint_cb(np.radians(compiled.joints_deg))
+                except Exception:
+                    pass
+
+            command_idx += 1
+            sent_this_cycle += 1
+            if sent_this_cycle >= max_per_cycle:
+                break
+        return command_idx
+
+    def _publish_smooth_target(self, target_t, target_q, total_dur, elapsed):
+        """Linearly-interpolated commanded target between waypoints (the
+        equivalent of race.py's 'target' line). Used by the monitor's
+        yellow trace for accurate per-frame error plots."""
+        if self._target_cb is None:
+            return
+        try:
+            if elapsed <= total_dur:
+                q_curr = [np.interp(elapsed, target_t, target_q[:, i]) for i in range(4)]
+            else:
+                q_curr = target_q[-1]
+            self._target_cb(np.radians(q_curr))
+        except Exception:
+            pass
+
+    def _finalize_playback(self, plan, target_q, t_start):
+        """Compute the per-run summary used by both the playback_complete
+        event and the operator log.
+
+        Returns a dict with: stopped, timed_out, success, queue_flushed,
+        elapsed_s, final_max_error_deg, final_error_deg,
+        final_q_actual_deg, final_target_deg, final_robot_mode.
+        """
+        final_max_error, final_error, final_position, final_robot_mode = (
+            self._final_target_state(target_q)
+        )
         elapsed_total = float(self._time_fn() - t_start)
         timed_out = bool(
             not self._stop_flag.is_set()
-            and self._playback_timed_out(elapsed_total, total_dur, len(plan.queued_commands))
+            and self._playback_timed_out(
+                elapsed_total, plan.total_duration_s, len(plan.queued_commands)
+            )
             and (
                 final_max_error is None
                 or final_max_error > PREVIEW_FINAL_TOLERANCE_DEG
@@ -1431,39 +1489,58 @@ class TrajectoryRecorder:
         success = bool(
             not self._stop_flag.is_set()
             and not timed_out
-            and (
-                final_max_error is None
-                or final_max_error <= PREVIEW_FINAL_TOLERANCE_DEG
-            )
+            and (final_max_error is None or final_max_error <= PREVIEW_FINAL_TOLERANCE_DEG)
             and final_robot_mode != MG400_ROBOT_MODE_RUNNING
         )
         queue_flushed = self._flush_motion_queue_after_timeout() if timed_out else False
+        return {
+            "stopped": bool(self._stop_flag.is_set()),
+            "timed_out": timed_out,
+            "success": success,
+            "queue_flushed": queue_flushed,
+            "elapsed_s": elapsed_total,
+            "final_max_error": final_max_error,
+            "final_error": final_error,
+            "final_position": final_position,
+            "final_robot_mode": final_robot_mode,
+        }
 
-        self.is_playing = False
+    def _emit_play_complete_event(self, fin: dict, target_q) -> None:
+        """Emit ``playback_complete`` with the summary dict from
+        ``_finalize_playback``."""
+        final_max_error = fin["final_max_error"]
+        final_error = fin["final_error"]
+        final_position = fin["final_position"]
+        final_target = np.asarray(target_q[-1], dtype=float)
         self._emit_playback_event(
             "playback_complete",
-            stopped=bool(self._stop_flag.is_set()),
-            timed_out=timed_out,
-            success=success,
-            queue_flushed=queue_flushed,
-            elapsed_s=elapsed_total,
+            stopped=fin["stopped"],
+            timed_out=fin["timed_out"],
+            success=fin["success"],
+            queue_flushed=fin["queue_flushed"],
+            elapsed_s=fin["elapsed_s"],
             final_max_error_deg=None if final_max_error is None else float(final_max_error),
             final_error_deg=None if final_error is None else [float(v) for v in final_error],
             final_q_actual_deg=None if final_position is None else [float(v) for v in final_position],
             final_target_deg=[float(v) for v in final_target],
-            final_robot_mode=final_robot_mode,
+            final_robot_mode=fin["final_robot_mode"],
         )
-        if self._stop_flag.is_set():
+
+    def _log_playback_result(self, fin: dict) -> None:
+        """Operator-facing one-liner summarising the run."""
+        if fin["stopped"]:
             self._log.info("⏹️  Playback stopped")
-        elif timed_out:
+        elif fin["timed_out"]:
             self._log.warn(
                 "⚠️  Preview timed out before final target "
-                f"(max error={final_max_error} deg, robot_mode={final_robot_mode})"
+                f"(max error={fin['final_max_error']} deg, "
+                f"robot_mode={fin['final_robot_mode']})"
             )
-        elif not success:
+        elif not fin["success"]:
             self._log.warn(
                 "⚠️  Preview ended without confirmed final settle "
-                f"(max error={final_max_error} deg, robot_mode={final_robot_mode})"
+                f"(max error={fin['final_max_error']} deg, "
+                f"robot_mode={fin['final_robot_mode']})"
             )
         else:
             self._log.info("✅ Preview complete")
