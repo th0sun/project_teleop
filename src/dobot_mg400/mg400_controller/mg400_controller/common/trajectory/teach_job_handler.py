@@ -345,13 +345,15 @@ class TeachJobHandler:
     def _handle_play(self, request: JobRequest, *, sim: bool) -> JobStatus:
         """Real-robot playback path.
 
-        ``sim`` is retained as a parameter for symmetry but the only caller
-        passes ``sim=False``. Validation is handled by ``compile``.
+        ``sim`` is retained as a parameter for symmetry but the only
+        caller passes ``sim=False``. Validation is handled by
+        ``compile``; this handler does the preflight checks then
+        kicks off the recorder's start_preview() thread.
         """
         if sim:
-            # Defensive: should not happen via the public dispatcher, but if a
-            # future caller wires sim=True back in, fail loudly instead of
-            # silently moving the robot.
+            # Defensive: should not happen via the public dispatcher.
+            # If a future caller wires sim=True back in, fail loudly
+            # instead of silently moving the robot.
             return self._fail(
                 request,
                 ERR_EXECUTE_FORBIDDEN,
@@ -362,34 +364,74 @@ class TeachJobHandler:
         if not self._load_trajectory_or_fail(request):
             return self._last_status
 
+        if (preflight := self._preflight_execute(request)) is not None:
+            return preflight
+
+        plan = self._compile_or_fail(request)
+        if plan is None:
+            return self._last_status
+
+        if (blocked := self._fail_if_scene_safety_blocked(request, plan)) is not None:
+            return blocked
+
+        return self._start_preview_or_fail(request)
+
+    def _preflight_execute(self, request: JobRequest) -> Optional[JobStatus]:
+        """Check the two execute-time gates: another playback already
+        running, or external execute gating (e.g. robot disconnected).
+        Returns the failure status if blocked, ``None`` if clear.
+        """
         if self._recorder.is_playing:
-            return self._fail(request, ERR_ALREADY_PLAYING,
-                              "Playback already in progress")
-
+            return self._fail(
+                request, ERR_ALREADY_PLAYING, "Playback already in progress"
+            )
         if not self._allow_real_execute():
-            return self._fail(request, ERR_EXECUTE_FORBIDDEN,
-                              "Real-robot execute denied (robot disconnected or gated)")
-
-        try:
-            plan = self._recorder.compile_loaded_plan()
-        except Exception as exc:
-            self._active_execute_request = None
-            return self._fail(request, ERR_BAD_PAYLOAD, f"Playback compile failed: {exc}")
-
-        scene_violations = self._scene_safety_violations(plan)
-        if scene_violations:
-            first = scene_violations[0]
             return self._fail(
                 request,
-                ERR_SCENE_SAFETY,
-                "Scene safety blocked execute: "
-                f"{first.get('status')} {first.get('detail')} at {first.get('point_xyzr')}",
-                metadata={
-                    "scene_safety_enabled": True,
-                    "scene_safety_violations": scene_violations[:5],
-                },
+                ERR_EXECUTE_FORBIDDEN,
+                "Real-robot execute denied (robot disconnected or gated)",
             )
+        return None
 
+    def _compile_or_fail(self, request: JobRequest):
+        """Compile the loaded plan via the recorder. On failure clear
+        ``_active_execute_request`` and return None after failing the
+        request; on success returns the compiled plan.
+        """
+        try:
+            return self._recorder.compile_loaded_plan()
+        except Exception as exc:
+            self._active_execute_request = None
+            self._fail(request, ERR_BAD_PAYLOAD, f"Playback compile failed: {exc}")
+            return None
+
+    def _fail_if_scene_safety_blocked(self, request: JobRequest, plan) -> Optional[JobStatus]:
+        """Run the scene-safety guard against the compiled plan; if any
+        violations, fail with ``ERR_SCENE_SAFETY`` carrying the first
+        offender as the human message and up to five entries in the
+        status metadata.
+        """
+        scene_violations = self._scene_safety_violations(plan)
+        if not scene_violations:
+            return None
+        first = scene_violations[0]
+        return self._fail(
+            request,
+            ERR_SCENE_SAFETY,
+            "Scene safety blocked execute: "
+            f"{first.get('status')} {first.get('detail')} at {first.get('point_xyzr')}",
+            metadata={
+                "scene_safety_enabled": True,
+                "scene_safety_violations": scene_violations[:5],
+            },
+        )
+
+    def _start_preview_or_fail(self, request: JobRequest) -> JobStatus:
+        """Mark this request as the active execute, start the recorder's
+        preview thread, and return the success status. Clears the
+        active request on failure so a follow-up execute isn't blocked
+        by stale bookkeeping.
+        """
         try:
             self._active_execute_request = request
             self._recorder.start_preview()
