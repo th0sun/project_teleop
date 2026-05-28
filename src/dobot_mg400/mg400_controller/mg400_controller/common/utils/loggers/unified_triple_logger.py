@@ -523,18 +523,36 @@ class UnifiedTripleLogger:
     ) -> list:
         """Materialise the row that ``_writer.writerow`` consumes.
 
-        Built in five blocks, in column order:
-          A. core columns (event id, layer labels, sequence/uid,
-             command identity + timing markers, decision metrics).
-          B. unity sample fields (per UNITY_SAMPLE_LOG_FIELDS).
-          C. joint groups in rad + deg (raw, comp, cmd, robot,
-             delta_unity_cmd, delta_cmd_robot).
-          D. tool triples (ros_cmd_target, robot_actual, robot_target).
-          E. tool deltas + XYZ errors.
+        Concatenates the five-block schema in column order. Each block
+        has a dedicated builder so the row construction stays
+        grep-able by block. Anything added to one of the schema
+        constants in this module must be appended to the matching
+        block builder in the same position.
+        """
+        row: list = []
+        row.extend(self._build_core_row(event_type, fields, elapsed, ros_ts, identity, metrics))
+        row.extend(self._build_unity_sample_row(fields))
+        row.extend(self._build_joint_groups_row(metrics))
+        row.extend(self._build_tool_triples_row())
+        row.extend(self._build_tool_deltas_row(metrics))
+        return row
+
+    def _build_core_row(
+        self,
+        event_type: str,
+        fields: dict,
+        elapsed: float,
+        ros_ts: float,
+        identity: dict,
+        metrics: dict,
+    ) -> list:
+        """Block A: every scalar / identity / timing-marker column,
+        in the same order as ``_CORE_COLUMNS``. ``identity`` /
+        ``metrics`` come from ``_update_event_snapshots`` and
+        ``_compute_event_metrics``.
         """
         source, target, flow = FLOW_LABELS.get(event_type, ("", "", ""))
-        # Block A: core columns.
-        row = [
+        return [
             self._sample_count,
             event_type,
             fields.get("source_layer") or source,
@@ -602,12 +620,23 @@ class UnifiedTripleLogger:
             self._fmt(fields.get("is_valid_arrival")),
         ]
 
-        # Block B: unity sample fields.
+    def _build_unity_sample_row(self, fields: dict) -> list:
+        """Block B: the Unity teleop-sample protocol fields, looked up
+        from ``fields["unity_sample_fields"]`` in the order declared by
+        ``UNITY_SAMPLE_LOG_FIELDS``. Missing entries serialise as the
+        empty string via ``_fmt``.
+        """
         unity_sample_fields = fields.get("unity_sample_fields") or {}
-        for field_name in UNITY_SAMPLE_LOG_FIELDS:
-            row.append(self._fmt(unity_sample_fields.get(field_name)))
+        return [
+            self._fmt(unity_sample_fields.get(field_name))
+            for field_name in UNITY_SAMPLE_LOG_FIELDS
+        ]
 
-        # Block C: joint groups (rad + deg).
+    def _build_joint_groups_row(self, metrics: dict) -> list:
+        """Block C: the six joint snapshots (Unity raw / Unity
+        compensated / ROS cmd / robot / delta_unity_cmd /
+        delta_cmd_robot) each expanded in radians and degrees.
+        """
         joint_groups = [
             self._last_unity_raw_rad,
             self._last_unity_comp_rad,
@@ -616,14 +645,20 @@ class UnifiedTripleLogger:
             metrics["delta_unity_cmd"],
             metrics["delta_cmd_robot"],
         ]
+        row: list = []
         for group in joint_groups:
             row.extend(self._fmt(v, 6) for v in group)
             row.extend(self._fmt(v, 4) for v in self._deg(group))
+        return row
 
-        # Block D: tool triples. ToolVectorActual/Target comes directly
-        # from the Dobot feedback packet — first four values are
-        # [X, Y, Z, R]; the last two are preserved as aux fields rather
-        # than getting unsupported semantic names.
+    def _build_tool_triples_row(self) -> list:
+        """Block D: the three tool-vector triples (ros_cmd_target,
+        robot_actual, robot_target). ToolVectorActual/Target comes
+        directly from the Dobot feedback packet — first four values
+        are [X, Y, Z, R]; the last two are preserved as aux fields
+        rather than getting unsupported semantic names.
+        """
+        row: list = []
         for tool in (
             self._last_ros_cmd_tool_target,
             self._last_robot_tool_actual,
@@ -638,15 +673,22 @@ class UnifiedTripleLogger:
                 self._fmt(aux5, 6),
                 self._fmt(aux6, 6),
             ])
+        return row
 
-        # Block E: tool deltas + XYZ errors.
-        for group in (metrics["delta_ros_tool_robot"], metrics["delta_robot_target_actual"]):
+    def _build_tool_deltas_row(self, metrics: dict) -> list:
+        """Block E: the two tool-delta vectors plus the two scalar
+        XYZ-error mm metrics.
+        """
+        row: list = []
+        for group in (
+            metrics["delta_ros_tool_robot"],
+            metrics["delta_robot_target_actual"],
+        ):
             row.extend(self._fmt(v, 6) for v in group)
         row.extend([
             self._fmt(metrics["error_ros_tool_robot"], 6),
             self._fmt(metrics["error_robot_target_actual"], 6),
         ])
-
         return row
 
     def log_unity_target(
