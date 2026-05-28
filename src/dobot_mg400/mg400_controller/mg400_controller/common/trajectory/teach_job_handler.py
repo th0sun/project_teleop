@@ -43,7 +43,7 @@ JobStatus schema::
       "stage": "received|compiled|executing|tuned|done|failed|stopped",
       "progress": 0.0..1.0,
       "message": "...",
-      "error_code": null | "BAD_PAYLOAD" | "EMPTY_TRAJECTORY" | "ROBOT_DISCONNECTED" | "EXECUTE_FORBIDDEN" | "ALREADY_PLAYING" | "EXPORT_FAILED" | "UNKNOWN_ACTION" | "PLAYBACK_TIMEOUT" | "PLAYBACK_FAILED",
+      "error_code": null | "BAD_PAYLOAD" | "EMPTY_TRAJECTORY" | "EXECUTE_FORBIDDEN" | "ALREADY_PLAYING" | "EXPORT_FAILED" | "UNKNOWN_ACTION" | "PLAYBACK_TIMEOUT" | "PLAYBACK_FAILED",
       "ros_time_sec": 1234.5,
       "metadata": {...}
     }
@@ -89,7 +89,6 @@ STAGE_STOPPED = "stopped"
 # Error codes used in JobStatus.error_code.
 ERR_BAD_PAYLOAD = "BAD_PAYLOAD"
 ERR_EMPTY_TRAJECTORY = "EMPTY_TRAJECTORY"
-ERR_ROBOT_DISCONNECTED = "ROBOT_DISCONNECTED"
 ERR_EXECUTE_FORBIDDEN = "EXECUTE_FORBIDDEN"
 ERR_ALREADY_PLAYING = "ALREADY_PLAYING"
 ERR_EXPORT_FAILED = "EXPORT_FAILED"
