@@ -93,14 +93,62 @@ def retime_joint_path(
 ) -> RetimedTrajectory:
     """Preserve timestamps when possible; stretch impossible segments.
 
-    The geometric path is unchanged: every output point has the same joint
-    position as the input.  Only the timestamps may move later.
-    """
+    The geometric path is unchanged: every output point has the same
+    joint position as the input.  Only the timestamps may move later.
 
+    Pipeline:
+      1. Normalise the inputs (tuple-ise, validate DoF, resolve the
+         effective per-joint velocity limit and min-segment duration).
+      2. Walk the points, emitting one ``SegmentTiming`` per gap and
+         one ``TimedJointPoint`` per output.
+      3. Wrap everything in a ``RetimedTrajectory``.
+    """
+    pts, dof, effective_velocity, min_dt = _prepare_retime_inputs(points, limits)
+    first_t = float(pts[0].time_s)
+    out = [TimedJointPoint(time_s=0.0, position=_as_tuple(pts[0].position))]
+    segments: list[SegmentTiming] = []
+    previous_original_t = first_t
+    previous_retimed_t = 0.0
+
+    for index, point in enumerate(pts[1:], start=1):
+        segment, current_original_t = _retime_one_segment(
+            index=index,
+            point=point,
+            prev_pos=out[-1].position,
+            previous_original_t=previous_original_t,
+            dof=dof,
+            effective_velocity=effective_velocity,
+            min_dt=min_dt,
+        )
+        previous_retimed_t += segment.retimed_dt_s
+        out.append(TimedJointPoint(
+            time_s=previous_retimed_t,
+            position=_as_tuple(point.position),
+        ))
+        segments.append(segment)
+        previous_original_t = current_original_t
+
+    original_duration = max(float(pts[-1].time_s) - first_t, 0.0)
+    return RetimedTrajectory(
+        points=tuple(out),
+        segments=tuple(segments),
+        original_duration_s=original_duration,
+        retimed_duration_s=out[-1].time_s,
+    )
+
+
+def _prepare_retime_inputs(
+    points: Iterable[TimedJointPoint],
+    limits: JointTimingLimits,
+):
+    """Return ``(pts_tuple, dof, effective_velocity, min_dt)`` after
+    validating the input is non-empty, the first point has at least
+    one joint, the limits' DoF matches that joint count, and every
+    per-joint velocity is finite and positive.
+    """
     pts = tuple(points)
     if not pts:
         raise ValueError("retime_joint_path requires at least one point")
-
     dof = len(pts[0].position)
     if dof == 0:
         raise ValueError("joint points must contain at least one joint")
@@ -114,53 +162,54 @@ def retime_joint_path(
         raise ValueError("all max_velocity values must be finite and > 0")
 
     min_dt = max(float(limits.min_segment_duration_s), 1e-9)
-    first_t = float(pts[0].time_s)
-    previous_original_t = first_t
-    previous_retimed_t = 0.0
-    out = [TimedJointPoint(time_s=0.0, position=_as_tuple(pts[0].position))]
-    segments = []
+    return pts, dof, effective_velocity, min_dt
 
-    for index, point in enumerate(pts[1:], start=1):
-        current_original_t = float(point.time_s)
-        original_dt = current_original_t - previous_original_t
-        if original_dt <= 0.0:
-            raise ValueError("joint point timestamps must be strictly increasing")
-        original_dt = max(original_dt, min_dt)
 
-        prev_pos = out[-1].position
-        curr_pos = _as_tuple(point.position)
-        if len(curr_pos) != dof:
-            raise ValueError(
-                f"point {index} DOF mismatch: got {len(curr_pos)}, expected {dof}"
-            )
+def _retime_one_segment(
+    *,
+    index: int,
+    point: TimedJointPoint,
+    prev_pos: tuple,
+    previous_original_t: float,
+    dof: int,
+    effective_velocity: tuple,
+    min_dt: float,
+) -> tuple[SegmentTiming, float]:
+    """Compute the ``SegmentTiming`` for one input-to-input gap.
 
-        delta = tuple(abs(curr_pos[j] - prev_pos[j]) for j in range(dof))
-        required_velocity = tuple(delta[j] / original_dt for j in range(dof))
-        required_dt = max(
-            (delta[j] / effective_velocity[j]) if delta[j] > 0.0 else 0.0
-            for j in range(dof)
+    Returns ``(segment, current_original_t)`` so the caller can
+    update its ``previous_original_t`` cursor without re-reading
+    ``point.time_s``. The original dt is floored at ``min_dt`` and
+    the retimed dt is the per-joint speed-limited stretch.
+    """
+    current_original_t = float(point.time_s)
+    original_dt = current_original_t - previous_original_t
+    if original_dt <= 0.0:
+        raise ValueError("joint point timestamps must be strictly increasing")
+    original_dt = max(original_dt, min_dt)
+
+    curr_pos = _as_tuple(point.position)
+    if len(curr_pos) != dof:
+        raise ValueError(
+            f"point {index} DOF mismatch: got {len(curr_pos)}, expected {dof}"
         )
-        retimed_dt = max(original_dt, required_dt, min_dt)
-        previous_retimed_t += retimed_dt
 
-        segments.append(
-            SegmentTiming(
-                index=index,
-                original_dt_s=original_dt,
-                retimed_dt_s=retimed_dt,
-                required_velocity=required_velocity,
-                limit_velocity=effective_velocity,
-            )
-        )
-        out.append(TimedJointPoint(time_s=previous_retimed_t, position=curr_pos))
-        previous_original_t = current_original_t
-
-    original_duration = float(pts[-1].time_s) - first_t
-    return RetimedTrajectory(
-        points=tuple(out),
-        segments=tuple(segments),
-        original_duration_s=max(original_duration, 0.0),
-        retimed_duration_s=out[-1].time_s,
+    delta = tuple(abs(curr_pos[j] - prev_pos[j]) for j in range(dof))
+    required_velocity = tuple(delta[j] / original_dt for j in range(dof))
+    required_dt = max(
+        (delta[j] / effective_velocity[j]) if delta[j] > 0.0 else 0.0
+        for j in range(dof)
+    )
+    retimed_dt = max(original_dt, required_dt, min_dt)
+    return (
+        SegmentTiming(
+            index=index,
+            original_dt_s=original_dt,
+            retimed_dt_s=retimed_dt,
+            required_velocity=required_velocity,
+            limit_velocity=effective_velocity,
+        ),
+        current_original_t,
     )
 
 
