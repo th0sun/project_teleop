@@ -324,14 +324,6 @@ def _truthy(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
-def _latest_session_file(log_root: Path) -> Path | None:
-    root = log_root.expanduser()
-    if root.name != "teleop_sessions" and (root / "teleop_sessions").is_dir():
-        root = root / "teleop_sessions"
-    candidates = sorted(root.glob("teleop_session_*.csv"), key=lambda path: path.stat().st_mtime)
-    return candidates[-1] if candidates else None
-
-
 def _unity_sample_path_for_main(main_path: Path) -> Path | None:
     stem = main_path.stem.replace("teleop_session_", "", 1)
     candidates = [
