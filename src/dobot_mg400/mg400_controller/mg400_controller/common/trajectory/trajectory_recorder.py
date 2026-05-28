@@ -849,100 +849,46 @@ class TrajectoryRecorder:
     def compile_loaded_plan(self) -> CompiledPlaybackPlan:
         """Compile the loaded trajectory into a pre-timed MG400 playback job.
 
-        This is the boundary we want for teach-and-repeat: compile the full job
-        once, then let execution focus on dispatch/monitoring instead of
-        recomputing waypoint timing inside the playback loop.
+        Compile-once / execute-many: the playback loop should focus on
+        dispatch + monitoring, not re-derive timing or strategy. This
+        method orchestrates the compile pipeline:
 
-        When ``motion_config.USE_MIXED_PRIMITIVES`` is True, the pipeline
-        classifies segments as LINE/ARC/GENERAL after RDP simplification
-        and emits the most efficient MG400 command for each segment type:
-          LINE    → single ``MovL``   (Cartesian linear)
-          ARC     → single ``Arc``    (Cartesian arc via 3 defining points)
-          GENERAL → per-waypoint ``JointMovJ`` chain (fallback)
+          1. Simplify the raw recording (RDP) — collapses dense
+             waypoints to the points that actually shape the motion.
+          2. Decide playback timing — recorded-rate retime or
+             operator-interval mode.
+          3. Schedule each waypoint's target time according to the
+             active execution profile (recorded / operator / fastest-
+             repeat).
+          4. Compile per-waypoint MG400 commands — mixed-primitive
+             (LINE/ARC/GENERAL) when ``USE_MIXED_PRIMITIVES`` is on,
+             else JointMovJ chain.
+          5. Compile event commands (DO toggles etc.) and stretch the
+             total duration to cover any events / fast-repeat budget.
         """
         if not self.loaded_frames:
             raise ValueError("No trajectory loaded for playback compilation")
 
         raw_frames = list(self.loaded_frames)
         raw_count = len(raw_frames)
-
-        # Path simplification (RDP) — collapse dense recorded waypoints to the
-        # critical points that actually shape the motion so the MG400 motion
-        # queue does not back up while playing back long teach-and-repeat
-        # trajectories.  Configured by motion_config.PATH_SIMPLIFY_TOLERANCE_DEG;
-        # set to 0.0 to disable when a path must replay verbatim.
         tolerance = float(getattr(motion_config, "PATH_SIMPLIFY_TOLERANCE_DEG", 0.0))
-        source_frames = self._simplify_loaded_frames(raw_frames, tolerance)
-        if len(source_frames) < raw_count:
-            self._log.info(
-                f"📐 Path simplified: {raw_count} → {len(source_frames)} waypoints "
-                f"(RDP @ {tolerance:.2f}°)"
-            )
+        source_frames = self._simplify_with_log(raw_frames, tolerance)
 
-        if self._use_recorded_timing():
-            frames, timing = self._retime_frames_for_playback(source_frames)
-        else:
-            frames = [dict(frame) for frame in source_frames]
-            original_duration = float(source_frames[-1]["timeStamp"] - source_frames[0]["timeStamp"])
-            operator_duration = max(
-                0.0,
-                (len(frames) - 1)
-                * float(self.playback_tuning().get(
-                    "command_interval_s",
-                    PLAYBACK_DEFAULT_COMMAND_INTERVAL_SEC,
-                )),
-            )
-            timing = type("OperatorTiming", (), {
-                "original_duration_s": original_duration,
-                "retimed_duration_s": operator_duration,
-                "time_scale": 1.0,
-                "is_original_timing_feasible": True,
-            })()
-        source_t0_traj = float(source_frames[0]["timeStamp"])
-        t0_traj = float(frames[0]["timeStamp"])
-        total_dur = float(frames[-1]["timeStamp"] - t0_traj)
-        target_t = np.array([float(f["timeStamp"]) - t0_traj for f in frames])
-        source_target_t = np.array(
-            [float(f["timeStamp"]) - source_t0_traj for f in source_frames]
+        frames, timing = self._compute_playback_timing(source_frames)
+        target_t, source_target_t, total_dur, execution_profile = (
+            self._build_schedule_times(frames, source_frames)
         )
-        execution_profile = self._playback_execution_profile()
-        if not self._use_recorded_timing():
-            target_t = self._operator_schedule_times(frames)
-            total_dur = float(target_t[-1]) if len(target_t) else 0.0
-        else:
-            target_t = self._fast_repeat_schedule_times(frames, target_t)
-        if self._use_recorded_timing() and execution_profile == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT:
-            total_dur = max(total_dur, float(target_t[-1]) if len(target_t) else 0.0)
         lookahead = self._lookahead_seconds(target_t)
 
-        # ── Mixed-primitive classification ────────────────────────────
-        use_mixed = bool(getattr(motion_config, "USE_MIXED_PRIMITIVES", False))
-
-        if use_mixed:
-            queued_commands = self._compile_mixed_commands(
-                frames,
-                target_t,
-                source_target_t,
-                source_frames=source_frames,
-                raw_frames=raw_frames,
-            )
-        else:
-            queued_commands = self._compile_jointmovj_commands(
-                frames, target_t, source_target_t,
-            )
-
-        event_commands = self._compile_event_commands(
-            source_frames,
-            target_t,
-            source_target_t,
+        queued_commands = self._compile_waypoint_commands(
+            frames, target_t, source_target_t, source_frames, raw_frames
         )
-        if event_commands:
-            total_dur = max(total_dur, max(e.target_time_s for e in event_commands))
-        if execution_profile == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT:
-            timeout_budget = len(queued_commands) * float(
-                getattr(motion_config, "FAST_REPEAT_TIMEOUT_PER_COMMAND_SEC", 1.0)
-            )
-            total_dur = max(total_dur, timeout_budget)
+        event_commands = self._compile_event_commands(
+            source_frames, target_t, source_target_t
+        )
+        total_dur = self._extend_total_duration(
+            total_dur, event_commands, queued_commands, execution_profile
+        )
 
         return CompiledPlaybackPlan(
             source_name=self.loaded_name or "inline_trajectory",
@@ -959,6 +905,121 @@ class TrajectoryRecorder:
             simplify_tolerance_deg=tolerance,
             execution_profile=execution_profile,
         )
+
+    def _simplify_with_log(self, raw_frames, tolerance: float):
+        """RDP-simplify ``raw_frames`` at ``tolerance`` degrees and log
+        the reduction if any. ``tolerance=0`` disables simplification —
+        the caller will get the raw frames back unchanged so a
+        verbatim-replay path can be requested by setting
+        ``PATH_SIMPLIFY_TOLERANCE_DEG`` to zero.
+        """
+        source_frames = self._simplify_loaded_frames(raw_frames, tolerance)
+        if len(source_frames) < len(raw_frames):
+            self._log.info(
+                f"📐 Path simplified: {len(raw_frames)} → {len(source_frames)} "
+                f"waypoints (RDP @ {tolerance:.2f}°)"
+            )
+        return source_frames
+
+    def _compute_playback_timing(self, source_frames):
+        """Return ``(frames, timing)``.
+
+        * Recorded-timing mode uses ``_retime_frames_for_playback`` to
+          stretch/compress the demonstrator's stamps into joint-limit
+          feasibility.
+        * Operator mode copies the source frames as-is and synthesises
+          a duck-typed ``OperatorTiming`` namespace so downstream code
+          can treat both modes uniformly (every CompiledPlaybackPlan
+          field maps cleanly).
+        """
+        if self._use_recorded_timing():
+            return self._retime_frames_for_playback(source_frames)
+
+        frames = [dict(frame) for frame in source_frames]
+        original_duration = float(
+            source_frames[-1]["timeStamp"] - source_frames[0]["timeStamp"]
+        )
+        operator_duration = max(
+            0.0,
+            (len(frames) - 1)
+            * float(self.playback_tuning().get(
+                "command_interval_s",
+                PLAYBACK_DEFAULT_COMMAND_INTERVAL_SEC,
+            )),
+        )
+        timing = type("OperatorTiming", (), {
+            "original_duration_s": original_duration,
+            "retimed_duration_s": operator_duration,
+            "time_scale": 1.0,
+            "is_original_timing_feasible": True,
+        })()
+        return frames, timing
+
+    def _build_schedule_times(self, frames, source_frames):
+        """Per-waypoint target times for the live execution loop.
+
+        Returns ``(target_t, source_target_t, total_dur,
+        execution_profile)``. Three execution profiles share this
+        path: recorded (default), operator (fixed interval), and
+        fastest-path-repeat (each command granted a per-cmd budget
+        instead of replaying the recorded gaps).
+        """
+        source_t0 = float(source_frames[0]["timeStamp"])
+        t0 = float(frames[0]["timeStamp"])
+        total_dur = float(frames[-1]["timeStamp"] - t0)
+        target_t = np.array([float(f["timeStamp"]) - t0 for f in frames])
+        source_target_t = np.array(
+            [float(f["timeStamp"]) - source_t0 for f in source_frames]
+        )
+        execution_profile = self._playback_execution_profile()
+
+        if not self._use_recorded_timing():
+            target_t = self._operator_schedule_times(frames)
+            total_dur = float(target_t[-1]) if len(target_t) else 0.0
+        else:
+            target_t = self._fast_repeat_schedule_times(frames, target_t)
+            if execution_profile == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT:
+                total_dur = max(
+                    total_dur, float(target_t[-1]) if len(target_t) else 0.0
+                )
+        return target_t, source_target_t, total_dur, execution_profile
+
+    def _compile_waypoint_commands(
+        self, frames, target_t, source_target_t, source_frames, raw_frames
+    ):
+        """Dispatch between mixed-primitive (LINE/ARC/GENERAL) and
+        legacy JointMovJ-only compilation. Mixed mode is opt-in via
+        ``motion_config.USE_MIXED_PRIMITIVES`` so the production path
+        stays JointMovJ-only until validated.
+        """
+        if bool(getattr(motion_config, "USE_MIXED_PRIMITIVES", False)):
+            return self._compile_mixed_commands(
+                frames,
+                target_t,
+                source_target_t,
+                source_frames=source_frames,
+                raw_frames=raw_frames,
+            )
+        return self._compile_jointmovj_commands(frames, target_t, source_target_t)
+
+    def _extend_total_duration(
+        self, total_dur, event_commands, queued_commands, execution_profile
+    ):
+        """Stretch ``total_dur`` so the playback budget covers:
+          * Any event commands scheduled past the last waypoint.
+          * The per-command timeout budget when running the fastest-
+            path-repeat profile (each command gets a hard per-cmd
+            cap, so the run can legitimately last longer than the
+            recorded path).
+        """
+        if event_commands:
+            total_dur = max(total_dur, max(e.target_time_s for e in event_commands))
+        if execution_profile == PLAYBACK_PROFILE_FASTEST_PATH_REPEAT:
+            per_cmd = float(
+                getattr(motion_config, "FAST_REPEAT_TIMEOUT_PER_COMMAND_SEC", 1.0)
+            )
+            total_dur = max(total_dur, len(queued_commands) * per_cmd)
+        return total_dur
 
     # ── Command compilation strategies ───────────────────────────────
 
