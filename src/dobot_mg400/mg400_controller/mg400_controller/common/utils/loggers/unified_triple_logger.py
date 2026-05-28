@@ -289,208 +289,321 @@ class UnifiedTripleLogger:
         return str(value)
 
     def _write_event(self, event_type: str, **fields) -> None:
+        """Write one CSV row for a teleop event.
+
+        Pipeline:
+          1. Increment sample counter + resolve event timestamp.
+          2. Update the rolling "last-seen" snapshots (joints, command
+             identity, tool vectors) so events that don't carry a
+             field can still emit a row using the most recent value.
+          3. Compute per-event metrics (deltas, error mm, clock
+             offsets, active-command age).
+          4. Build the row + write it.
+
+        Each phase is its own helper so the row schema is decoupled
+        from the bookkeeping rules.
+        """
         with self._lock:
             self._sample_count += 1
             elapsed = time.time() - self._start_time
-            ros_ts = fields.get("ros_wall_timestamp")
-            if ros_ts is None:
-                ros_ts = time.time()
+            ros_ts = fields.get("ros_wall_timestamp") or time.time()
 
-            raw = fields.get("unity_raw_rad")
-            comp = fields.get("unity_compensated_rad")
-            cmd = fields.get("ros_cmd_rad")
-            robot = fields.get("robot_rad")
-
-            if raw is not None:
-                self._last_unity_raw_rad = self._joint4(raw)
-            if comp is not None:
-                self._last_unity_comp_rad = self._joint4(comp)
-            if cmd is not None:
-                self._last_ros_cmd_rad = self._joint4(cmd)
-            if robot is not None:
-                self._last_robot_rad = self._joint4(robot)
-
-            control_command_seq = fields.get("control_command_seq")
-            if control_command_seq is not None:
-                self._last_ros_command_seq = int(control_command_seq)
-            elif event_type == "ros_command":
-                # Keep old call sites analyzable even if they do not pass a seq yet.
-                self._last_ros_command_seq = (self._last_ros_command_seq or 0) + 1
-                control_command_seq = self._last_ros_command_seq
-
-            ros_command_uid = fields.get("ros_command_uid")
-            if ros_command_uid is None and event_type == "ros_command" and control_command_seq is not None:
-                ros_command_uid = f"ros_cmd_{int(control_command_seq):06d}"
-            if ros_command_uid is not None:
-                self._last_ros_command_uid = str(ros_command_uid)
-
-            if event_type == "ros_command":
-                self._last_ros_command_wall = ros_ts
-
-            dobot_command_id = fields.get("dobot_command_id")
-            if dobot_command_id is not None:
-                self._last_dobot_command_id = int(dobot_command_id)
-
-            robot_feedback_command_id = fields.get("robot_feedback_command_id")
-            if robot_feedback_command_id is not None:
-                self._last_robot_feedback_command_id = int(robot_feedback_command_id)
-
-            dobot_command_text = fields.get("dobot_command_text")
-            dobot_command_hash = fields.get("dobot_command_hash") or _hash_command(dobot_command_text)
-            feedback_before_send = fields.get("feedback_command_id_before_send")
-            feedback_at_result = fields.get("feedback_command_id_at_result")
-            if feedback_at_result is None and event_type in ("latency_arrival", "command_result"):
-                feedback_at_result = robot_feedback_command_id
-            feedback_id_changed = fields.get("feedback_command_id_changed")
-            if (
-                feedback_id_changed is None
-                and feedback_before_send is not None
-                and feedback_at_result is not None
-            ):
-                feedback_id_changed = int(feedback_before_send) != int(feedback_at_result)
-
-            ros_cmd_tool_target = fields.get("ros_cmd_tool_target")
-            robot_tool_actual = fields.get("robot_tool_actual")
-            robot_tool_target = fields.get("robot_tool_target")
-            if ros_cmd_tool_target is not None:
-                self._last_ros_cmd_tool_target = self._tool6(ros_cmd_tool_target)
-            if robot_tool_actual is not None:
-                self._last_robot_tool_actual = self._tool6(robot_tool_actual)
-            if robot_tool_target is not None:
-                self._last_robot_tool_target = self._tool6(robot_tool_target)
-
-            delta_unity_cmd = self._delta(self._last_unity_comp_rad, self._last_ros_cmd_rad)
-            delta_cmd_robot = self._delta(self._last_ros_cmd_rad, self._last_robot_rad)
-            delta_ros_tool_robot = self._tool_delta4(self._last_robot_tool_actual, self._last_ros_cmd_tool_target)
-            delta_robot_target_actual = self._tool_delta4(self._last_robot_tool_actual, self._last_robot_tool_target)
-            error_ros_tool_robot = self._xyz_error_mm(self._last_robot_tool_actual, self._last_ros_cmd_tool_target)
-            error_robot_target_actual = self._xyz_error_mm(self._last_robot_tool_actual, self._last_robot_tool_target)
-            active_age_ms = None
-            if self._last_ros_command_wall is not None:
-                active_age_ms = (ros_ts - self._last_ros_command_wall) * 1000.0
-                if active_age_ms < 0.0:
-                    # Worker threads can write events after a newer command row even
-                    # when the event's original ROS timestamp is earlier.
-                    active_age_ms = None
-            source, target, flow = FLOW_LABELS.get(event_type, ("", "", ""))
-            unity_raw_ts = fields.get("unity_raw_timestamp")
-            t1_unity_send = fields.get("t1_unity_send_ros_wall")
-            t2_ros_recv = fields.get("t2_ros_recv_wall")
-            unity_clock_offset_ms = fields.get("unity_clock_offset_ms")
-            if (
-                unity_clock_offset_ms is None
-                and unity_raw_ts is not None
-                and t1_unity_send is not None
-            ):
-                unity_clock_offset_ms = (t1_unity_send - unity_raw_ts) * 1000.0
-            unity_to_ros_raw_offset_ms = fields.get("unity_to_ros_raw_offset_ms")
-            if (
-                unity_to_ros_raw_offset_ms is None
-                and unity_raw_ts is not None
-                and t2_ros_recv is not None
-            ):
-                unity_to_ros_raw_offset_ms = (t2_ros_recv - unity_raw_ts) * 1000.0
-
-            row = [
-                self._sample_count,
-                event_type,
-                fields.get("source_layer") or source,
-                fields.get("target_layer") or target,
-                fields.get("flow_label") or flow,
-                fields.get("operation_mode") or "",
-                fields.get("notes") or "",
-                self._fmt(elapsed, 6),
-                self._fmt(ros_ts, 6),
-                self._fmt(control_command_seq if control_command_seq is not None else self._last_ros_command_seq, 0),
-                self._fmt(ros_command_uid if ros_command_uid is not None else self._last_ros_command_uid),
-                self._fmt(dobot_command_id, 0),
-                self._fmt(robot_feedback_command_id, 0),
-                fields.get("command_result_status") or "",
-                self._fmt(fields.get("command_id_match")),
-                fields.get("dobot_command_response") or "",
-                dobot_command_text or "",
-                dobot_command_hash or "",
-                fields.get("command_tracking_source") or "",
-                fields.get("command_tracking_confidence") or "",
-                self._fmt(feedback_before_send, 0),
-                self._fmt(feedback_at_result, 0),
-                self._fmt(feedback_id_changed),
-                fields.get("settle_match_method") or "",
-                self._fmt(fields.get("settle_match_ambiguous")),
-                self._fmt(fields.get("settle_candidate_count"), 0),
-                self._fmt(fields.get("settle_match_error_rad"), 6),
-                self._fmt(fields.get("settle_second_best_error_rad"), 6),
-                self._fmt(fields.get("settle_match_age_ms"), 3),
-                self._fmt(fields.get("pending_command_count"), 0),
-                self._fmt(active_age_ms, 3),
-                self._fmt(unity_raw_ts, 6),
-                self._fmt(t1_unity_send, 6),
-                self._fmt(t2_ros_recv, 6),
-                self._fmt(fields.get("t3_cmd_send_wall"), 6),
-                self._fmt(fields.get("t4_motion_start_wall"), 6),
-                self._fmt(fields.get("t5_target_reached_wall"), 6),
-                self._fmt(fields.get("network_delay_ms"), 3),
-                self._fmt(unity_clock_offset_ms, 3),
-                self._fmt(unity_to_ros_raw_offset_ms, 3),
-                self._fmt(fields.get("decision_delay_ms"), 3),
-                self._fmt(fields.get("command_latency_ms"), 3),
-                self._fmt(fields.get("robot_response_ms"), 3),
-                self._fmt(fields.get("motion_time_ms"), 3),
-                self._fmt(fields.get("motion_execution_ms"), 3),
-                self._fmt(fields.get("true_end_to_end_ms"), 3),
-                fields.get("send_reason") or "",
-                self._fmt(fields.get("robot_mode"), 0),
-                self._fmt(fields.get("error_status"), 0),
-                self._fmt(fields.get("queue_backlog_rad"), 6),
-                self._fmt(fields.get("run_queued_cmd"), 0),
-                self._fmt(fields.get("time_since_last_cmd_ms"), 3),
-                self._fmt(fields.get("velocity_mag_rad_s"), 6),
-                self._fmt(fields.get("final_error_rad"), 6),
-                self._fmt(fields.get("max_joint_error_rad"), 6),
-                self._fmt(fields.get("is_valid_arrival")),
-            ]
-
-            unity_sample_fields = fields.get("unity_sample_fields") or {}
-            for field_name in UNITY_SAMPLE_LOG_FIELDS:
-                row.append(self._fmt(unity_sample_fields.get(field_name)))
-
-            groups = [
-                self._last_unity_raw_rad,
-                self._last_unity_comp_rad,
-                self._last_ros_cmd_rad,
-                self._last_robot_rad,
-                delta_unity_cmd,
-                delta_cmd_robot,
-            ]
-            for group in groups:
-                row.extend(self._fmt(v, 6) for v in group)
-                row.extend(self._fmt(v, 4) for v in self._deg(group))
-
-            # ToolVectorActual/Target comes directly from the Dobot feedback packet.
-            # For MG400 4-axis logs, the first four values are [X, Y, Z, R].
-            # The last two packet values are preserved as aux fields instead
-            # of assigning unsupported semantic names.
-            for tool in (self._last_ros_cmd_tool_target, self._last_robot_tool_actual, self._last_robot_tool_target):
-                x, y, z, r, aux5, aux6 = tool
-                row.extend([
-                    self._fmt(x, 6),
-                    self._fmt(y, 6),
-                    self._fmt(z, 6),
-                    self._fmt(r, 6),
-                    self._fmt(aux5, 6),
-                    self._fmt(aux6, 6),
-                ])
-
-            for group in (delta_ros_tool_robot, delta_robot_target_actual):
-                row.extend(self._fmt(v, 6) for v in group)
-            row.extend([
-                self._fmt(error_ros_tool_robot, 6),
-                self._fmt(error_robot_target_actual, 6),
-            ])
+            identity = self._update_event_snapshots(event_type, fields, ros_ts)
+            metrics = self._compute_event_metrics(fields, identity, ros_ts)
+            row = self._build_csv_row(
+                event_type, fields, elapsed, ros_ts, identity, metrics
+            )
 
             self._writer.writerow(row)
             if self._sample_count % 100 == 0:
                 self._file.flush()
+
+    def _update_event_snapshots(self, event_type: str, fields: dict, ros_ts: float) -> dict:
+        """Update every ``self._last_*`` rolling snapshot from ``fields``
+        and return a dict of identity values resolved for this row
+        (control_command_seq, ros_command_uid, dobot_command_id,
+        robot_feedback_command_id, dobot_command_text + hash,
+        feedback_before_send / at_result / changed).
+
+        Pulling this out of _write_event removes a wall of
+        ``if x is not None: self._last_x = ...`` from the row-building
+        code path and gives the caller a single dict to thread into
+        ``_build_csv_row``.
+        """
+        # Joint snapshots
+        raw = fields.get("unity_raw_rad")
+        comp = fields.get("unity_compensated_rad")
+        cmd = fields.get("ros_cmd_rad")
+        robot = fields.get("robot_rad")
+        if raw is not None:
+            self._last_unity_raw_rad = self._joint4(raw)
+        if comp is not None:
+            self._last_unity_comp_rad = self._joint4(comp)
+        if cmd is not None:
+            self._last_ros_cmd_rad = self._joint4(cmd)
+        if robot is not None:
+            self._last_robot_rad = self._joint4(robot)
+
+        # Command sequence + uid: ros_command events auto-allocate a
+        # sequence if the caller didn't pass one (legacy call sites).
+        control_command_seq = fields.get("control_command_seq")
+        if control_command_seq is not None:
+            self._last_ros_command_seq = int(control_command_seq)
+        elif event_type == "ros_command":
+            self._last_ros_command_seq = (self._last_ros_command_seq or 0) + 1
+            control_command_seq = self._last_ros_command_seq
+
+        ros_command_uid = fields.get("ros_command_uid")
+        if (
+            ros_command_uid is None
+            and event_type == "ros_command"
+            and control_command_seq is not None
+        ):
+            ros_command_uid = f"ros_cmd_{int(control_command_seq):06d}"
+        if ros_command_uid is not None:
+            self._last_ros_command_uid = str(ros_command_uid)
+        if event_type == "ros_command":
+            self._last_ros_command_wall = ros_ts
+
+        # Dobot / feedback IDs
+        dobot_command_id = fields.get("dobot_command_id")
+        if dobot_command_id is not None:
+            self._last_dobot_command_id = int(dobot_command_id)
+        robot_feedback_command_id = fields.get("robot_feedback_command_id")
+        if robot_feedback_command_id is not None:
+            self._last_robot_feedback_command_id = int(robot_feedback_command_id)
+
+        # Command text + hash + feedback diff
+        dobot_command_text = fields.get("dobot_command_text")
+        dobot_command_hash = (
+            fields.get("dobot_command_hash") or _hash_command(dobot_command_text)
+        )
+        feedback_before_send = fields.get("feedback_command_id_before_send")
+        feedback_at_result = fields.get("feedback_command_id_at_result")
+        if feedback_at_result is None and event_type in ("latency_arrival", "command_result"):
+            feedback_at_result = robot_feedback_command_id
+        feedback_id_changed = fields.get("feedback_command_id_changed")
+        if (
+            feedback_id_changed is None
+            and feedback_before_send is not None
+            and feedback_at_result is not None
+        ):
+            feedback_id_changed = int(feedback_before_send) != int(feedback_at_result)
+
+        # Tool snapshots
+        if (val := fields.get("ros_cmd_tool_target")) is not None:
+            self._last_ros_cmd_tool_target = self._tool6(val)
+        if (val := fields.get("robot_tool_actual")) is not None:
+            self._last_robot_tool_actual = self._tool6(val)
+        if (val := fields.get("robot_tool_target")) is not None:
+            self._last_robot_tool_target = self._tool6(val)
+
+        return {
+            "control_command_seq": control_command_seq,
+            "ros_command_uid": ros_command_uid,
+            "dobot_command_id": dobot_command_id,
+            "robot_feedback_command_id": robot_feedback_command_id,
+            "dobot_command_text": dobot_command_text,
+            "dobot_command_hash": dobot_command_hash,
+            "feedback_before_send": feedback_before_send,
+            "feedback_at_result": feedback_at_result,
+            "feedback_id_changed": feedback_id_changed,
+        }
+
+    def _compute_event_metrics(self, fields: dict, identity: dict, ros_ts: float) -> dict:
+        """Derive per-row metrics that aren't direct ``fields`` entries:
+        joint + tool deltas, XYZ error mm, active-command age, clock-
+        offset estimates inferred from unity_raw_timestamp /
+        t1_unity_send_ros_wall / t2_ros_recv_wall.
+        """
+        delta_unity_cmd = self._delta(self._last_unity_comp_rad, self._last_ros_cmd_rad)
+        delta_cmd_robot = self._delta(self._last_ros_cmd_rad, self._last_robot_rad)
+        delta_ros_tool_robot = self._tool_delta4(
+            self._last_robot_tool_actual, self._last_ros_cmd_tool_target
+        )
+        delta_robot_target_actual = self._tool_delta4(
+            self._last_robot_tool_actual, self._last_robot_tool_target
+        )
+        error_ros_tool_robot = self._xyz_error_mm(
+            self._last_robot_tool_actual, self._last_ros_cmd_tool_target
+        )
+        error_robot_target_actual = self._xyz_error_mm(
+            self._last_robot_tool_actual, self._last_robot_tool_target
+        )
+
+        active_age_ms = None
+        if self._last_ros_command_wall is not None:
+            active_age_ms = (ros_ts - self._last_ros_command_wall) * 1000.0
+            # Worker threads can write events after a newer command row even
+            # when the event's original ROS timestamp is earlier.
+            if active_age_ms < 0.0:
+                active_age_ms = None
+
+        unity_raw_ts = fields.get("unity_raw_timestamp")
+        t1_unity_send = fields.get("t1_unity_send_ros_wall")
+        t2_ros_recv = fields.get("t2_ros_recv_wall")
+        unity_clock_offset_ms = fields.get("unity_clock_offset_ms")
+        if unity_clock_offset_ms is None and unity_raw_ts is not None and t1_unity_send is not None:
+            unity_clock_offset_ms = (t1_unity_send - unity_raw_ts) * 1000.0
+        unity_to_ros_raw_offset_ms = fields.get("unity_to_ros_raw_offset_ms")
+        if (
+            unity_to_ros_raw_offset_ms is None
+            and unity_raw_ts is not None
+            and t2_ros_recv is not None
+        ):
+            unity_to_ros_raw_offset_ms = (t2_ros_recv - unity_raw_ts) * 1000.0
+
+        return {
+            "delta_unity_cmd": delta_unity_cmd,
+            "delta_cmd_robot": delta_cmd_robot,
+            "delta_ros_tool_robot": delta_ros_tool_robot,
+            "delta_robot_target_actual": delta_robot_target_actual,
+            "error_ros_tool_robot": error_ros_tool_robot,
+            "error_robot_target_actual": error_robot_target_actual,
+            "active_age_ms": active_age_ms,
+            "unity_raw_ts": unity_raw_ts,
+            "t1_unity_send": t1_unity_send,
+            "t2_ros_recv": t2_ros_recv,
+            "unity_clock_offset_ms": unity_clock_offset_ms,
+            "unity_to_ros_raw_offset_ms": unity_to_ros_raw_offset_ms,
+        }
+
+    def _build_csv_row(
+        self,
+        event_type: str,
+        fields: dict,
+        elapsed: float,
+        ros_ts: float,
+        identity: dict,
+        metrics: dict,
+    ) -> list:
+        """Materialise the row that ``_writer.writerow`` consumes.
+
+        Built in five blocks, in column order:
+          A. core columns (event id, layer labels, sequence/uid,
+             command identity + timing markers, decision metrics).
+          B. unity sample fields (per UNITY_SAMPLE_LOG_FIELDS).
+          C. joint groups in rad + deg (raw, comp, cmd, robot,
+             delta_unity_cmd, delta_cmd_robot).
+          D. tool triples (ros_cmd_target, robot_actual, robot_target).
+          E. tool deltas + XYZ errors.
+        """
+        source, target, flow = FLOW_LABELS.get(event_type, ("", "", ""))
+        # Block A: core columns.
+        row = [
+            self._sample_count,
+            event_type,
+            fields.get("source_layer") or source,
+            fields.get("target_layer") or target,
+            fields.get("flow_label") or flow,
+            fields.get("operation_mode") or "",
+            fields.get("notes") or "",
+            self._fmt(elapsed, 6),
+            self._fmt(ros_ts, 6),
+            self._fmt(
+                identity["control_command_seq"]
+                if identity["control_command_seq"] is not None
+                else self._last_ros_command_seq,
+                0,
+            ),
+            self._fmt(
+                identity["ros_command_uid"]
+                if identity["ros_command_uid"] is not None
+                else self._last_ros_command_uid
+            ),
+            self._fmt(identity["dobot_command_id"], 0),
+            self._fmt(identity["robot_feedback_command_id"], 0),
+            fields.get("command_result_status") or "",
+            self._fmt(fields.get("command_id_match")),
+            fields.get("dobot_command_response") or "",
+            identity["dobot_command_text"] or "",
+            identity["dobot_command_hash"] or "",
+            fields.get("command_tracking_source") or "",
+            fields.get("command_tracking_confidence") or "",
+            self._fmt(identity["feedback_before_send"], 0),
+            self._fmt(identity["feedback_at_result"], 0),
+            self._fmt(identity["feedback_id_changed"]),
+            fields.get("settle_match_method") or "",
+            self._fmt(fields.get("settle_match_ambiguous")),
+            self._fmt(fields.get("settle_candidate_count"), 0),
+            self._fmt(fields.get("settle_match_error_rad"), 6),
+            self._fmt(fields.get("settle_second_best_error_rad"), 6),
+            self._fmt(fields.get("settle_match_age_ms"), 3),
+            self._fmt(fields.get("pending_command_count"), 0),
+            self._fmt(metrics["active_age_ms"], 3),
+            self._fmt(metrics["unity_raw_ts"], 6),
+            self._fmt(metrics["t1_unity_send"], 6),
+            self._fmt(metrics["t2_ros_recv"], 6),
+            self._fmt(fields.get("t3_cmd_send_wall"), 6),
+            self._fmt(fields.get("t4_motion_start_wall"), 6),
+            self._fmt(fields.get("t5_target_reached_wall"), 6),
+            self._fmt(fields.get("network_delay_ms"), 3),
+            self._fmt(metrics["unity_clock_offset_ms"], 3),
+            self._fmt(metrics["unity_to_ros_raw_offset_ms"], 3),
+            self._fmt(fields.get("decision_delay_ms"), 3),
+            self._fmt(fields.get("command_latency_ms"), 3),
+            self._fmt(fields.get("robot_response_ms"), 3),
+            self._fmt(fields.get("motion_time_ms"), 3),
+            self._fmt(fields.get("motion_execution_ms"), 3),
+            self._fmt(fields.get("true_end_to_end_ms"), 3),
+            fields.get("send_reason") or "",
+            self._fmt(fields.get("robot_mode"), 0),
+            self._fmt(fields.get("error_status"), 0),
+            self._fmt(fields.get("queue_backlog_rad"), 6),
+            self._fmt(fields.get("run_queued_cmd"), 0),
+            self._fmt(fields.get("time_since_last_cmd_ms"), 3),
+            self._fmt(fields.get("velocity_mag_rad_s"), 6),
+            self._fmt(fields.get("final_error_rad"), 6),
+            self._fmt(fields.get("max_joint_error_rad"), 6),
+            self._fmt(fields.get("is_valid_arrival")),
+        ]
+
+        # Block B: unity sample fields.
+        unity_sample_fields = fields.get("unity_sample_fields") or {}
+        for field_name in UNITY_SAMPLE_LOG_FIELDS:
+            row.append(self._fmt(unity_sample_fields.get(field_name)))
+
+        # Block C: joint groups (rad + deg).
+        joint_groups = [
+            self._last_unity_raw_rad,
+            self._last_unity_comp_rad,
+            self._last_ros_cmd_rad,
+            self._last_robot_rad,
+            metrics["delta_unity_cmd"],
+            metrics["delta_cmd_robot"],
+        ]
+        for group in joint_groups:
+            row.extend(self._fmt(v, 6) for v in group)
+            row.extend(self._fmt(v, 4) for v in self._deg(group))
+
+        # Block D: tool triples. ToolVectorActual/Target comes directly
+        # from the Dobot feedback packet — first four values are
+        # [X, Y, Z, R]; the last two are preserved as aux fields rather
+        # than getting unsupported semantic names.
+        for tool in (
+            self._last_ros_cmd_tool_target,
+            self._last_robot_tool_actual,
+            self._last_robot_tool_target,
+        ):
+            x, y, z, r, aux5, aux6 = tool
+            row.extend([
+                self._fmt(x, 6),
+                self._fmt(y, 6),
+                self._fmt(z, 6),
+                self._fmt(r, 6),
+                self._fmt(aux5, 6),
+                self._fmt(aux6, 6),
+            ])
+
+        # Block E: tool deltas + XYZ errors.
+        for group in (metrics["delta_ros_tool_robot"], metrics["delta_robot_target_actual"]):
+            row.extend(self._fmt(v, 6) for v in group)
+        row.extend([
+            self._fmt(metrics["error_ros_tool_robot"], 6),
+            self._fmt(metrics["error_robot_target_actual"], 6),
+        ])
+
+        return row
 
     def log_unity_target(
         self,
