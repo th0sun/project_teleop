@@ -88,6 +88,130 @@ def _log_timestamp() -> str:
     return now.strftime("%Y%m%d_%H%M%S")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CSV schema — keep these tables in sync with _build_csv_row's five blocks
+# (A core, B unity sample, C joints rad+deg, D tool triples, E tool deltas /
+# XYZ errors). Anything added here must also be appended to the row in the
+# same position, or analysis tooling that reads columns by name will misalign.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CORE_COLUMNS: tuple[str, ...] = (
+    "sample_id",
+    "event_type",
+    "source_layer",
+    "target_layer",
+    "flow_label",
+    "operation_mode",
+    "notes",
+    "elapsed_sec",
+    "ros_wall_timestamp",
+    "control_command_seq",
+    "ros_command_uid",
+    "dobot_command_id",
+    "robot_feedback_command_id",
+    "command_result_status",
+    "command_id_match",
+    "dobot_command_response",
+    "dobot_command_text",
+    "dobot_command_hash",
+    "command_tracking_source",
+    "command_tracking_confidence",
+    "feedback_command_id_before_send",
+    "feedback_command_id_at_result",
+    "feedback_command_id_changed",
+    "settle_match_method",
+    "settle_match_ambiguous",
+    "settle_candidate_count",
+    "settle_match_error_rad",
+    "settle_second_best_error_rad",
+    "settle_match_age_ms",
+    "pending_command_count",
+    "active_ros_command_age_ms",
+    "unity_raw_timestamp",
+    "t1_unity_send_ros_wall",
+    "t2_ros_recv_wall",
+    "t3_cmd_send_wall",
+    "t4_motion_start_wall",
+    "t5_target_reached_wall",
+    "network_delay_ms",
+    "unity_clock_offset_ms",
+    "unity_to_ros_raw_offset_ms",
+    "decision_delay_ms",
+    "command_latency_ms",
+    "robot_response_ms",
+    "motion_time_ms",
+    "motion_execution_ms",
+    "true_end_to_end_ms",
+    "send_reason",
+    "robot_mode",
+    "error_status",
+    "queue_backlog_rad",
+    "run_queued_cmd",
+    "time_since_last_cmd_ms",
+    "velocity_mag_rad_s",
+    "final_error_rad",
+    "max_joint_error_rad",
+    "is_valid_arrival",
+)
+
+_JOINT_GROUP_PREFIXES: tuple[str, ...] = (
+    "unity_raw",
+    "unity_compensated",
+    "ros_cmd",
+    "robot",
+    "delta_unity_comp_to_ros_cmd",
+    "delta_ros_cmd_to_robot",
+)
+
+_TOOL_TRIPLE_PREFIXES: tuple[str, ...] = (
+    "ros_cmd_tool_target",
+    "robot_tool_actual",
+    "robot_tool_target",
+)
+_TOOL_TRIPLE_FIELDS: tuple[str, ...] = ("x_mm", "y_mm", "z_mm", "r_deg", "aux5", "aux6")
+
+_TOOL_DELTA_PREFIXES: tuple[str, ...] = (
+    "delta_ros_cmd_tool_to_robot_actual",
+    "delta_robot_tool_target_to_actual",
+)
+_TOOL_DELTA_FIELDS: tuple[str, ...] = ("x_mm", "y_mm", "z_mm", "r_deg")
+
+_TOOL_METRIC_COLUMNS: tuple[str, ...] = (
+    "error_ros_cmd_tool_to_robot_actual_mm",
+    "error_robot_tool_target_to_actual_mm",
+)
+
+
+def _joint_group_columns() -> list[str]:
+    """Block C column names: each joint snapshot expanded in both
+    radians and degrees, JOINT_COUNT joints per snapshot."""
+    cols: list[str] = []
+    for prefix in _JOINT_GROUP_PREFIXES:
+        for unit in ("rad", "deg"):
+            for idx in range(1, JOINT_COUNT + 1):
+                cols.append(f"{prefix}_j{idx}_{unit}")
+    return cols
+
+
+def _tool_group_columns() -> list[str]:
+    """Block D column names: three tool-vector triples
+    (ros_cmd_target, robot_actual, robot_target) × six fields each."""
+    return [
+        f"{prefix}_{name}"
+        for prefix in _TOOL_TRIPLE_PREFIXES
+        for name in _TOOL_TRIPLE_FIELDS
+    ]
+
+
+def _tool_delta_columns() -> list[str]:
+    """Block E column names: two tool-delta vectors × four fields each."""
+    return [
+        f"{prefix}_{name}"
+        for prefix in _TOOL_DELTA_PREFIXES
+        for name in _TOOL_DELTA_FIELDS
+    ]
+
+
 class UnifiedTripleLogger:
     """Canonical one-file logger for Unity -> ROS -> MG400 experiments."""
 
@@ -137,93 +261,18 @@ class UnifiedTripleLogger:
 
     @staticmethod
     def _header() -> list[str]:
-        common = [
-            "sample_id",
-            "event_type",
-            "source_layer",
-            "target_layer",
-            "flow_label",
-            "operation_mode",
-            "notes",
-            "elapsed_sec",
-            "ros_wall_timestamp",
-            "control_command_seq",
-            "ros_command_uid",
-            "dobot_command_id",
-            "robot_feedback_command_id",
-            "command_result_status",
-            "command_id_match",
-            "dobot_command_response",
-            "dobot_command_text",
-            "dobot_command_hash",
-            "command_tracking_source",
-            "command_tracking_confidence",
-            "feedback_command_id_before_send",
-            "feedback_command_id_at_result",
-            "feedback_command_id_changed",
-            "settle_match_method",
-            "settle_match_ambiguous",
-            "settle_candidate_count",
-            "settle_match_error_rad",
-            "settle_second_best_error_rad",
-            "settle_match_age_ms",
-            "pending_command_count",
-            "active_ros_command_age_ms",
-            "unity_raw_timestamp",
-            "t1_unity_send_ros_wall",
-            "t2_ros_recv_wall",
-            "t3_cmd_send_wall",
-            "t4_motion_start_wall",
-            "t5_target_reached_wall",
-            "network_delay_ms",
-            "unity_clock_offset_ms",
-            "unity_to_ros_raw_offset_ms",
-            "decision_delay_ms",
-            "command_latency_ms",
-            "robot_response_ms",
-            "motion_time_ms",
-            "motion_execution_ms",
-            "true_end_to_end_ms",
-            "send_reason",
-            "robot_mode",
-            "error_status",
-            "queue_backlog_rad",
-            "run_queued_cmd",
-            "time_since_last_cmd_ms",
-            "velocity_mag_rad_s",
-            "final_error_rad",
-            "max_joint_error_rad",
-            "is_valid_arrival",
-        ]
-        unity_protocol = list(UNITY_SAMPLE_LOG_FIELDS)
-        joint_groups = []
-        for prefix in (
-            "unity_raw",
-            "unity_compensated",
-            "ros_cmd",
-            "robot",
-            "delta_unity_comp_to_ros_cmd",
-            "delta_ros_cmd_to_robot",
-        ):
-            for unit in ("rad", "deg"):
-                for idx in range(1, JOINT_COUNT + 1):
-                    joint_groups.append(f"{prefix}_j{idx}_{unit}")
-        tool_groups = []
-        for prefix in ("ros_cmd_tool_target", "robot_tool_actual", "robot_tool_target"):
-            for name in ("x_mm", "y_mm", "z_mm", "r_deg", "aux5", "aux6"):
-                tool_groups.append(f"{prefix}_{name}")
-        tool_delta_groups = []
-        for prefix in (
-            "delta_ros_cmd_tool_to_robot_actual",
-            "delta_robot_tool_target_to_actual",
-        ):
-            for name in ("x_mm", "y_mm", "z_mm", "r_deg"):
-                tool_delta_groups.append(f"{prefix}_{name}")
-        tool_metrics = [
-            "error_ros_cmd_tool_to_robot_actual_mm",
-            "error_robot_tool_target_to_actual_mm",
-        ]
-        return common + unity_protocol + joint_groups + tool_groups + tool_delta_groups + tool_metrics
+        """CSV header in the same five-block order as _build_csv_row:
+        core columns, unity sample fields, joint groups (rad+deg),
+        tool triples, tool deltas + XYZ errors.
+        """
+        return (
+            list(_CORE_COLUMNS)
+            + list(UNITY_SAMPLE_LOG_FIELDS)
+            + _joint_group_columns()
+            + _tool_group_columns()
+            + _tool_delta_columns()
+            + list(_TOOL_METRIC_COLUMNS)
+        )
 
     @staticmethod
     def _joint4(values: Optional[Iterable[float]]) -> list[float | None]:
