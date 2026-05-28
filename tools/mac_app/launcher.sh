@@ -72,6 +72,43 @@ docker_usable() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
 }
 
+# Best-effort: ask Docker Desktop to start and block until the daemon
+# accepts API calls. macOS only — Linux uses systemd / native daemon.
+# Returns 0 if Docker became usable within ``DOCKER_START_TIMEOUT_SEC``
+# (default 60), non-zero otherwise so the caller can fall through to
+# the existing "not running" error.
+ensure_docker_running() {
+  if docker_usable; then
+    return 0
+  fi
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    return 1  # macOS-only auto-start; other platforms surface the original error.
+  fi
+  if ! command -v open >/dev/null 2>&1; then
+    return 1
+  fi
+  if [[ ! -d "/Applications/Docker.app" ]]; then
+    echo "Docker Desktop not found at /Applications/Docker.app." >&2
+    return 1
+  fi
+
+  echo "Starting Docker Desktop (this may take ~30s on a cold launch)..."
+  open -ga Docker >/dev/null 2>&1 || true
+
+  local timeout="${DOCKER_START_TIMEOUT_SEC:-60}"
+  local waited=0
+  while (( waited < timeout )); do
+    if docker_usable; then
+      echo "Docker is ready."
+      return 0
+    fi
+    sleep 2
+    waited=$(( waited + 2 ))
+  done
+  echo "Timed out waiting ${timeout}s for Docker Desktop to become ready." >&2
+  return 1
+}
+
 container_running() {
   local running
   running="$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
@@ -350,8 +387,14 @@ start_stack() {
 
   require_tool docker "Install/start Docker Desktop first."
   if ! docker_usable; then
-    echo "Docker is not running. Start Docker Desktop first." >&2
-    exit 1
+    # Try to wake Docker Desktop ourselves before bailing out. The
+    # operator clicked Start in ProjectTeleopMac; pop up Docker so the
+    # daemon is ready by the time the rest of the launcher pipeline
+    # tries to docker-build / docker-run.
+    if ! ensure_docker_running; then
+      echo "Docker is not running. Start Docker Desktop first." >&2
+      exit 1
+    fi
   fi
 
   if ! clear_stale_tmux_if_safe; then
