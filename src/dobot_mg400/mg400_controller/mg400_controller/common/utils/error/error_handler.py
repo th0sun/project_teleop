@@ -151,24 +151,7 @@ class ErrorHandler:
             if len(self.error_history) > self.max_history:
                 self.error_history = self.error_history[-self.max_history:]
     
-    def get_error_history(self, count: Optional[int] = None) -> List[Dict]:
-        """
-        Get recent error history
-        
-        Args:
-            count: Number of recent errors to return (None = all)
-            
-        Returns:
-            List of formatted error dicts
-        """
-        if count is None:
-            return self.error_history
-        return self.error_history[-count:]
     
-    def clear_history(self) -> None:
-        """Clear error history"""
-        self.error_history = []
-        self.logger.info("Error history cleared")
     
     def get_highest_severity(self, errors: List[Dict]) -> int:
         """

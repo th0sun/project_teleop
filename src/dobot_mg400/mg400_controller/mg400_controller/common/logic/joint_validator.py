@@ -56,19 +56,4 @@ class JointValidator:
 
         return result.q_safe, result.was_clamped
 
-    def is_within_limits(self, q_rad):
-        """Return whether each provided MG400 joint is inside configured limits."""
-        q_deg = np.degrees(q_rad)
 
-        for index, q_value_deg in enumerate(q_deg):
-            if index not in self.limits:
-                continue
-            min_deg, max_deg = self.limits[index]
-            if q_value_deg < min_deg or q_value_deg > max_deg:
-                return False
-
-        return True
-
-    def get_limits(self, joint_index):
-        """Return configured degree limits for an MG400 joint."""
-        return self.limits.get(joint_index, (-180, 180))

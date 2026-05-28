@@ -82,10 +82,3 @@ class RobotErrorDecoder:
                 )
 
         return (f"Unknown Error ID: {error_id}", "", "")
-
-    def parse_error_status_binary(self, error_status_bytes):
-        """
-        Parse the ErrorStatus byte array (if raw access is available)
-        Start from some simpler logic if we just have the ID from GetError()
-        """
-        pass

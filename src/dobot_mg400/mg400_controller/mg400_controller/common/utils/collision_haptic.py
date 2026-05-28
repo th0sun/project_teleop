@@ -101,16 +101,3 @@ class CollisionHaptic:
         intensity = self.COLLISION_HAPTIC_INTENSITY * (1.0 - elapsed / self.COLLISION_HAPTIC_DURATION)
         return max(0.0, min(1.0, intensity))
     
-    def get_haptic_message_format(self) -> Dict:
-        """
-        Get example haptic message format for documentation
-        
-        Returns:
-            Example haptic message dictionary
-        """
-        return {
-            'collision_detected': False,
-            'collision_state': 0,
-            'haptic_intensity': 0.0,
-            'timestamp': 1738138200.0
-        }
