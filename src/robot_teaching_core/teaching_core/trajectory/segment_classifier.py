@@ -616,63 +616,100 @@ def _select_arc_through(
     Returns ``None`` if no candidate satisfies the separation rule —
     callers should reject the arc and fall back to a simpler primitive.
     """
-    start_xyz = cart[start].xyz()
-    end_xyz = cart[end].xyz()
     z_values = [float(cart[i].z) for i in range(start, end + 1)]
     z_span = max(z_values) - min(z_values)
     best_idx: Optional[int] = None
     best_score = math.inf
     for i in range(start + 1, end):
-        through_xyz = cart[i].xyz()
-        if float(np.linalg.norm(through_xyz - start_xyz)) < min_chord_mm:
-            continue
-        if float(np.linalg.norm(through_xyz - end_xyz)) < min_chord_mm:
-            continue
-
-        arc = _command_arc_from_points(start_xyz, through_xyz, end_xyz)
-        if arc is None:
-            continue
-        if arc.radius > max_radius_mm:
-            continue
-        if arc.leg_ratio < (1.0 / _ARC_MAX_LEG_IMBALANCE) and z_span > _ARC_VERTICAL_IMBALANCE_ZSPAN_MM:
-            continue
-        if not (_ARC_MIN_THROUGH_FRACTION <= arc.through_fraction <= _ARC_MAX_THROUGH_FRACTION):
-            continue
-        if not _r_matches_arc_interpolation(cart, start, i, end, arc.through_fraction, r_tolerance_deg):
-            continue
-
-        max_error = 0.0
-        fractions: List[float] = []
-        valid = True
-        for j in range(start + 1, end):
-            distance, fraction = _point_to_command_arc_distance(cart[j].xyz(), arc)
-            if fraction is None or distance > tolerance_mm:
-                valid = False
-                break
-            max_error = max(max_error, distance)
-            fractions.append(fraction)
-        if not valid:
-            continue
-        if any(b < a - 0.05 for a, b in zip(fractions, fractions[1:])):
-            continue
-        if _better_as_split(
-            cart,
-            start,
-            end,
-            full_arc_error=max_error,
+        score = _score_arc_through_candidate(
+            cart, start, i, end,
             tolerance_mm=tolerance_mm,
             max_radius_mm=max_radius_mm,
             r_tolerance_deg=r_tolerance_deg,
-        ):
+            min_chord_mm=min_chord_mm,
+            z_span=z_span,
+        )
+        if score is None:
             continue
-
-        balance_penalty = (1.0 - arc.leg_ratio) * 0.25
-        sweep_penalty = max(0.0, arc.sweep_rad - math.pi) * 0.1
-        score = max_error + balance_penalty + sweep_penalty
         if score < best_score:
             best_score = score
             best_idx = i
     return best_idx
+
+
+def _score_arc_through_candidate(
+    cart: Sequence[CartesianPoint],
+    start: int,
+    through: int,
+    end: int,
+    *,
+    tolerance_mm: float,
+    max_radius_mm: float,
+    r_tolerance_deg: float,
+    min_chord_mm: float,
+    z_span: float,
+) -> Optional[float]:
+    """Score one through-point candidate, or return ``None`` to reject.
+
+    Rejects in priority order — first failure wins so we skip the
+    expensive arc-fit work when an early geometric test rules the
+    candidate out:
+
+      1. Chord separation from either endpoint < ``min_chord_mm``.
+      2. Three points collinear / arc radius > ``max_radius_mm`` /
+         leg imbalance with large Z span / through-fraction outside
+         ``[_ARC_MIN_, _ARC_MAX_]``.
+      3. R/yaw doesn't follow the arc interpolation within
+         ``r_tolerance_deg``.
+      4. Any intermediate point sits more than ``tolerance_mm`` from
+         the fitted arc, or the per-point progress fractions go
+         non-monotonic.
+      5. Splitting into two sub-arcs would fit substantially better.
+
+    The accepted score blends the worst per-point error with two
+    soft penalties (leg-balance, sweep > π) so a slightly-worse but
+    geometrically cleaner arc beats a borderline 180° one.
+    """
+    start_xyz = cart[start].xyz()
+    end_xyz = cart[end].xyz()
+    through_xyz = cart[through].xyz()
+    if float(np.linalg.norm(through_xyz - start_xyz)) < min_chord_mm:
+        return None
+    if float(np.linalg.norm(through_xyz - end_xyz)) < min_chord_mm:
+        return None
+
+    arc = _command_arc_from_points(start_xyz, through_xyz, end_xyz)
+    if arc is None or arc.radius > max_radius_mm:
+        return None
+    if arc.leg_ratio < (1.0 / _ARC_MAX_LEG_IMBALANCE) and z_span > _ARC_VERTICAL_IMBALANCE_ZSPAN_MM:
+        return None
+    if not (_ARC_MIN_THROUGH_FRACTION <= arc.through_fraction <= _ARC_MAX_THROUGH_FRACTION):
+        return None
+    if not _r_matches_arc_interpolation(cart, start, through, end, arc.through_fraction, r_tolerance_deg):
+        return None
+
+    max_error = 0.0
+    fractions: List[float] = []
+    for j in range(start + 1, end):
+        distance, fraction = _point_to_command_arc_distance(cart[j].xyz(), arc)
+        if fraction is None or distance > tolerance_mm:
+            return None
+        max_error = max(max_error, distance)
+        fractions.append(fraction)
+    if any(b < a - 0.05 for a, b in zip(fractions, fractions[1:])):
+        return None
+    if _better_as_split(
+        cart, start, end,
+        full_arc_error=max_error,
+        tolerance_mm=tolerance_mm,
+        max_radius_mm=max_radius_mm,
+        r_tolerance_deg=r_tolerance_deg,
+    ):
+        return None
+
+    balance_penalty = (1.0 - arc.leg_ratio) * 0.25
+    sweep_penalty = max(0.0, arc.sweep_rad - math.pi) * 0.1
+    return max_error + balance_penalty + sweep_penalty
 
 
 def _is_arc_segment(
