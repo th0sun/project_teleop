@@ -1071,6 +1071,52 @@ def _write_flat_report_rows(writer, prefix: str, data) -> None:
 
 
 def analyze_file(path: Path, out_root: Path | None = None) -> Path:
+    """Run the full teleop-session analysis pipeline for ``path``.
+
+    Pipeline (each phase is its own helper):
+      1. Load CSV + matching Unity sample file, prepare output dir.
+      2. Build joint/XYZ matrices for every layer; determine which
+         feedback source the robot TCP trace came from.
+      3. Aggregate latency / accuracy / motion metrics.
+      4. Count event and operation_mode rows for the markdown summary.
+      5. Render every figure (joint, latency, cartesian, report
+         posters, plate pairs, contact sheet).
+      6. Build the prose session report.
+      7. Write CSV / JSON / markdown artefacts.
+    """
+    rows, unity_path, unity_rows, out_dir, t = _load_session_data(path, out_root)
+    joints, xyz, robot_tcp_source = _build_position_matrices(rows)
+    metrics = _compute_session_metrics(rows, joints, xyz, t)
+    event_counts, mode_counts = _count_events_and_modes(rows)
+
+    figures, plate_summaries = _render_all_figures(
+        out_dir, t, rows, joints, xyz, metrics, robot_tcp_source
+    )
+    report = _build_session_report(path, rows, t, unity_path, unity_rows)
+
+    _write_session_artifacts(
+        out_dir=out_dir,
+        path=path,
+        rows=rows,
+        unity_path=unity_path,
+        t=t,
+        xyz=xyz,
+        metrics=metrics,
+        report=report,
+        figures=figures,
+        robot_tcp_source=robot_tcp_source,
+        event_counts=event_counts,
+        mode_counts=mode_counts,
+        plate_summaries=plate_summaries,
+    )
+    return out_dir
+
+
+def _load_session_data(path: Path, out_root: Path | None):
+    """Read the session CSV (and the matching Unity sample CSV when one
+    exists), allocate the output directory, and compute the shared
+    time axis. Raises if the session CSV is empty.
+    """
     rows = _read_csv(path)
     if not rows:
         raise ValueError(f"{path} has no rows")
@@ -1079,8 +1125,19 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     unity_path = _unity_sample_path_for_main(path)
     unity_rows = _read_csv(unity_path) if unity_path else []
-
     t = _time_axis(rows)
+    return rows, unity_path, unity_rows, out_dir, t
+
+
+def _build_position_matrices(rows):
+    """Joint-angle and Cartesian XYZ matrices for every analysis layer.
+
+    Returns ``(joints, xyz, robot_tcp_source)``. The robot TCP layer
+    prefers (in order):
+      1. MG400 ToolVectorActual feedback when finite values exist.
+      2. Legacy robot X/Y/Z log columns when present in the first row.
+      3. FK of the QActual joint columns as the fallback.
+    """
     joints = {layer: _fill_forward(_joint_matrix(rows, layer)) for layer in LAYERS}
     xyz = {layer: _fk_xyz(values) for layer, values in joints.items()}
     robot_tool_actual_xyz = _tool_xyz_matrix(rows, "robot_tool_actual")
@@ -1096,7 +1153,17 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
             dtype=float,
         )
         robot_tcp_source = "legacy robot X/Y/Z log columns"
+    return joints, xyz, robot_tcp_source
 
+
+def _compute_session_metrics(rows, joints, xyz, t):
+    """All scalar metrics the markdown summary + JSON output expose.
+
+    Includes per-column latency stats, joint + Cartesian errors at
+    target-reached events, the cmd-to-robot tracking errors, the
+    robot TCP path length / speed / per-axis range, and the joint-
+    speed extreme when VJ feedback columns are available.
+    """
     metrics: dict[str, dict] = {}
     for col in LATENCY_COLUMNS:
         stat = _summary_stats(_metric_values(rows, col))
@@ -1105,18 +1172,18 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
 
     arrival_mask = _event_mask(rows, {"latency_arrival"})
     arrival_joint_error_rad = np.asarray(
-        [_float(row.get("max_joint_error_rad")) for row in rows],
-        dtype=float,
+        [_float(row.get("max_joint_error_rad")) for row in rows], dtype=float
     )
     stat = _summary_stats(np.degrees(arrival_joint_error_rad[arrival_mask]))
     stat["unit"] = "deg"
     metrics["target_reached_joint_error"] = stat
 
-    cmd_robot_mask = _finite_rows(joints["ros_cmd"], joints["robot"])
     robot_sample_mask = _event_mask(rows, {"robot_feedback", "legacy_triple"})
-    cmd_robot_mask &= robot_sample_mask
+    cmd_robot_mask = _finite_rows(joints["ros_cmd"], joints["robot"]) & robot_sample_mask
     if cmd_robot_mask.any():
-        joint_err_deg = np.degrees(joints["ros_cmd"][cmd_robot_mask] - joints["robot"][cmd_robot_mask])
+        joint_err_deg = np.degrees(
+            joints["ros_cmd"][cmd_robot_mask] - joints["robot"][cmd_robot_mask]
+        )
         stat = _summary_stats(np.max(np.abs(joint_err_deg), axis=1))
         stat["unit"] = "deg"
         metrics["max_joint_error_ros_cmd_to_robot"] = stat
@@ -1125,8 +1192,7 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
         ("unity_compensated", "robot", "cartesian_error_unity_to_robot"),
         ("ros_cmd", "robot", "cartesian_error_ros_cmd_to_robot"),
     ):
-        mask = _finite_rows(xyz[a], xyz[b])
-        mask &= robot_sample_mask
+        mask = _finite_rows(xyz[a], xyz[b]) & robot_sample_mask
         stat = _summary_stats(_norm_rows(xyz[a][mask] - xyz[b][mask]) if mask.any() else np.array([]))
         stat["unit"] = "mm"
         metrics[name] = stat
@@ -1136,48 +1202,67 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
         ("ros_cmd", "robot", "target_reached_tcp_error_ros_cmd_to_robot"),
         ("robot_tool_target", "robot", "target_reached_tcp_error_tool_target_to_actual"),
     ):
-        mask = _finite_rows(xyz[a], xyz[b])
-        mask &= arrival_mask
+        mask = _finite_rows(xyz[a], xyz[b]) & arrival_mask
         stat = _summary_stats(_norm_rows(xyz[a][mask] - xyz[b][mask]) if mask.any() else np.array([]))
         stat["unit"] = "mm"
         metrics[name] = stat
 
-    mask = _finite_rows(xyz["robot_tool_target"], xyz["robot"])
-    mask &= robot_sample_mask
-    stat = _summary_stats(_norm_rows(xyz["robot_tool_target"][mask] - xyz["robot"][mask]) if mask.any() else np.array([]))
+    mask = _finite_rows(xyz["robot_tool_target"], xyz["robot"]) & robot_sample_mask
+    stat = _summary_stats(
+        _norm_rows(xyz["robot_tool_target"][mask] - xyz["robot"][mask])
+        if mask.any() else np.array([])
+    )
     stat["unit"] = "mm"
     metrics["tracking_tcp_error_tool_target_to_actual"] = stat
 
-    robot_xyz_mask = np.isfinite(xyz["robot"]).all(axis=1)
-    robot_xyz_mask &= robot_sample_mask
-    if robot_xyz_mask.any():
-        robot_xyz = xyz["robot"][robot_xyz_mask]
-        robot_t = t[robot_xyz_mask]
-        if len(robot_xyz) > 1:
-            segment_len = _norm_rows(np.diff(robot_xyz, axis=0))
-            dt = np.diff(robot_t)
-            valid_dt = dt > 1e-4
-            speed = segment_len[valid_dt] / dt[valid_dt]
-            metrics["robot_tcp_path_length"] = _single_stat(float(np.sum(segment_len)), "mm")
-            stat = _summary_stats(speed)
-            stat["unit"] = "mm/s"
-            metrics["robot_tcp_speed"] = stat
-        x_range = float(np.nanmax(robot_xyz[:, 0]) - np.nanmin(robot_xyz[:, 0]))
-        y_range = float(np.nanmax(robot_xyz[:, 1]) - np.nanmin(robot_xyz[:, 1]))
-        z_range = float(np.nanmax(robot_xyz[:, 2]) - np.nanmin(robot_xyz[:, 2]))
-        metrics["robot_tcp_x_range"] = _single_stat(x_range, "mm")
-        metrics["robot_tcp_y_range"] = _single_stat(y_range, "mm")
-        metrics["robot_tcp_z_range"] = _single_stat(z_range, "mm")
+    _add_robot_tcp_motion_metrics(metrics, xyz, t, robot_sample_mask)
+    _add_robot_joint_speed_metric(metrics, rows)
+    return metrics
 
-    if all(f"VJ{i}" in rows[0] for i in range(1, 5)):
-        joint_speed = np.asarray(
-            [max(abs(_float(row.get(f"VJ{i}"))) for i in range(1, 5)) for row in rows],
-            dtype=float,
-        )
-        stat = _summary_stats(joint_speed)
-        stat["unit"] = "deg/s"
-        metrics["robot_max_joint_speed"] = stat
 
+def _add_robot_tcp_motion_metrics(metrics, xyz, t, robot_sample_mask):
+    """TCP path length, speed, and per-axis range — only added when the
+    robot XYZ trace has at least one finite point after the
+    robot_sample_mask is applied.
+    """
+    robot_xyz_mask = np.isfinite(xyz["robot"]).all(axis=1) & robot_sample_mask
+    if not robot_xyz_mask.any():
+        return
+    robot_xyz = xyz["robot"][robot_xyz_mask]
+    robot_t = t[robot_xyz_mask]
+    if len(robot_xyz) > 1:
+        segment_len = _norm_rows(np.diff(robot_xyz, axis=0))
+        dt = np.diff(robot_t)
+        valid_dt = dt > 1e-4
+        speed = segment_len[valid_dt] / dt[valid_dt]
+        metrics["robot_tcp_path_length"] = _single_stat(float(np.sum(segment_len)), "mm")
+        stat = _summary_stats(speed)
+        stat["unit"] = "mm/s"
+        metrics["robot_tcp_speed"] = stat
+    for axis_idx, label in ((0, "x"), (1, "y"), (2, "z")):
+        rng = float(np.nanmax(robot_xyz[:, axis_idx]) - np.nanmin(robot_xyz[:, axis_idx]))
+        metrics[f"robot_tcp_{label}_range"] = _single_stat(rng, "mm")
+
+
+def _add_robot_joint_speed_metric(metrics, rows):
+    """Max-axis joint speed across the session, only added when the
+    feedback CSV carries VJ1..VJ4 columns.
+    """
+    if not all(f"VJ{i}" in rows[0] for i in range(1, 5)):
+        return
+    joint_speed = np.asarray(
+        [max(abs(_float(row.get(f"VJ{i}"))) for i in range(1, 5)) for row in rows],
+        dtype=float,
+    )
+    stat = _summary_stats(joint_speed)
+    stat["unit"] = "deg/s"
+    metrics["robot_max_joint_speed"] = stat
+
+
+def _count_events_and_modes(rows):
+    """Tally ``event_type`` and ``operation_mode`` occurrences for the
+    markdown summary tables.
+    """
     event_counts: dict[str, int] = {}
     mode_counts: dict[str, int] = {}
     for row in rows:
@@ -1185,7 +1270,17 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
         event_counts[event] = event_counts.get(event, 0) + 1
         mode = row.get("operation_mode") or "unknown"
         mode_counts[mode] = mode_counts.get(mode, 0) + 1
+    return event_counts, mode_counts
 
+
+def _render_all_figures(out_dir, t, rows, joints, xyz, metrics, robot_tcp_source):
+    """Render every PNG the analysis emits and return the ``figures``
+    path map alongside the per-plate KPI summaries.
+
+    The plate-pair plots also return summary dicts (one per pair)
+    that the CSV / JSON / markdown writers stitch into the
+    `plate_clean_solid_summary` table.
+    """
     figures = {
         "joint_positions": out_dir / "joint_positions_by_layer.png",
         "joint_error": out_dir / "joint_error_ros_to_robot.png",
@@ -1224,13 +1319,38 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
         _plot_plate_pair(t, rows, xyz, "ros_cmd", "robot", "PLOT_ROS_VS_ROBOT_MANUAL", figures["plate_ros_vs_robot"]),
     ]
     _plot_plate_contact_sheet(figures, figures["plate_contact_sheet"])
+    return figures, plate_summaries
 
-    report = _build_session_report(path, rows, t, unity_path, unity_rows)
 
+def _write_session_artifacts(
+    *,
+    out_dir: Path,
+    path: Path,
+    rows,
+    unity_path,
+    t,
+    xyz,
+    metrics,
+    report,
+    figures,
+    robot_tcp_source,
+    event_counts,
+    mode_counts,
+    plate_summaries,
+) -> None:
+    """Write every non-figure artefact: cartesian samples CSV, the
+    summary metrics CSV / JSON, the plate KPI CSV, the all-metrics
+    rollup CSV, and the markdown summary.
+
+    Kwargs-only so the long argument list at the call site reads as
+    a labelled bag rather than positional soup.
+    """
     _write_cartesian_csv(out_dir / "cartesian_samples.csv", t, xyz)
     _save_summary_csv(out_dir / "summary_metrics.csv", metrics)
     _write_plate_summary_csv(out_dir / "plate_clean_solid_summary.csv", plate_summaries)
-    _write_all_metrics_csv(out_dir / "summary_all_metrics.csv", report, metrics, plate_summaries)
+    _write_all_metrics_csv(
+        out_dir / "summary_all_metrics.csv", report, metrics, plate_summaries
+    )
     with (out_dir / "summary_metrics.json").open("w") as fh:
         json.dump(
             {
@@ -1245,9 +1365,18 @@ def analyze_file(path: Path, out_root: Path | None = None) -> Path:
             fh,
             indent=2,
         )
-
-    _write_markdown_summary(out_dir / "summary.md", path, rows, event_counts, mode_counts, metrics, figures, robot_tcp_source, report, plate_summaries)
-    return out_dir
+    _write_markdown_summary(
+        out_dir / "summary.md",
+        path,
+        rows,
+        event_counts,
+        mode_counts,
+        metrics,
+        figures,
+        robot_tcp_source,
+        report,
+        plate_summaries,
+    )
 
 
 def _metric_line(metrics: dict, key: str, label: str) -> str:
