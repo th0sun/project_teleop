@@ -1411,7 +1411,26 @@ def _stat_line(report: dict, path_keys: tuple[str, ...], label: str, unit: str =
     )
 
 
-def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_counts, metrics, figures, robot_tcp_source: str, report: dict, plate_summaries: list[dict]) -> None:
+def _write_markdown_summary(
+    path: Path,
+    source: Path,
+    rows,
+    event_counts,
+    mode_counts,
+    metrics,
+    figures,
+    robot_tcp_source: str,
+    report: dict,
+    plate_summaries: list[dict],
+) -> None:
+    """Write the human-facing markdown report.
+
+    Composes the file from per-section helpers in the same order the
+    reader expects: input files -> layer flow -> log size -> event
+    counts -> unity integrity -> command/latency -> accuracy ->
+    status/anomalies -> plate KPIs -> poster metrics -> tables ->
+    figures.
+    """
     main = report.get("main", {})
     unity = report.get("unity", {})
     feedback = main.get("robot_feedback", {})
@@ -1419,9 +1438,32 @@ def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_c
     latency = main.get("latency_arrival", {})
     anomalies = main.get("anomalies", {})
     unity_window = main.get("unity_window_in_main", {})
-    lines = [
-        "# Teleop Session Analysis",
-        "",
+
+    lines: list[str] = ["# Teleop Session Analysis", ""]
+    lines += _md_input_files_section(
+        source, unity, rows, event_counts, mode_counts, robot_tcp_source
+    )
+    lines += _MD_LAYER_FLOW_SECTION
+    lines += _md_log_size_section(main, unity, feedback, event_counts)
+    lines += _md_event_counts_section(event_counts)
+    lines += _md_unity_integrity_section(unity)
+    lines += _md_command_latency_section(commands, latency)
+    lines += _md_accuracy_section(main)
+    lines += _md_status_anomalies_section(feedback, anomalies, unity_window)
+    lines += _md_plate_kpi_section(plate_summaries)
+    lines += _md_poster_metrics_section(metrics)
+    lines += _MD_REPORT_TABLES_SECTION
+    lines += _md_figures_section(figures)
+    path.write_text("\n".join(lines))
+
+
+def _md_input_files_section(
+    source: Path, unity: dict, rows, event_counts, mode_counts, robot_tcp_source: str
+) -> list[str]:
+    """Top of the report: source file paths, row count, event /
+    mode counts, and which feedback source seeded the robot TCP trace.
+    """
+    return [
         "## Input Files",
         "",
         f"- Input: `{source}`",
@@ -1431,15 +1473,27 @@ def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_c
         f"- Operation modes: {mode_counts}",
         f"- Robot TCP source: {robot_tcp_source}",
         "",
-        "## Layer Flow",
-        "",
-        "- Layer 1 Unity sample: `/unity/teleop_sample` protocol rows from Unity controller/IK/filter output.",
-        "- Layer 2 Unity target: ROS receives valid Unity target and applies timing/compensation context.",
-        "- Layer 3 ROS command: adaptive gate converts target into robot command only when movement is needed.",
-        "- Layer 4 Dobot/MG400 command result: command ID/result and target-reached matching rows.",
-        "- Layer 5 Robot feedback: high-rate actual joint/tool/mode/error feedback from controller.",
-        "- Layer 6 Analysis/match: offline comparison of Unity target, ROS command, and robot actual TCP/joints.",
-        "",
+    ]
+
+
+_MD_LAYER_FLOW_SECTION: list[str] = [
+    "## Layer Flow",
+    "",
+    "- Layer 1 Unity sample: `/unity/teleop_sample` protocol rows from Unity controller/IK/filter output.",
+    "- Layer 2 Unity target: ROS receives valid Unity target and applies timing/compensation context.",
+    "- Layer 3 ROS command: adaptive gate converts target into robot command only when movement is needed.",
+    "- Layer 4 Dobot/MG400 command result: command ID/result and target-reached matching rows.",
+    "- Layer 5 Robot feedback: high-rate actual joint/tool/mode/error feedback from controller.",
+    "- Layer 6 Analysis/match: offline comparison of Unity target, ROS command, and robot actual TCP/joints.",
+    "",
+]
+
+
+def _md_log_size_section(main: dict, unity: dict, feedback: dict, event_counts: dict) -> list[str]:
+    """Main / robot-feedback / Unity row counts + effective rates +
+    per-channel inter-sample gap distributions.
+    """
+    return [
         "## Log Size / Rate",
         "",
         _value_line("Main rows", main.get("rows")),
@@ -1448,81 +1502,164 @@ def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_c
         _value_line("Main effective rate", (main.get("duration_rate") or {}).get("effective_hz"), "Hz"),
         _stat_line(main, ("gap_ms",), "Main row gap", "ms"),
         _value_line("Robot feedback rows", event_counts.get("robot_feedback", 0)),
-        _value_line("Robot feedback effective rate", (feedback.get("duration_rate") or {}).get("effective_hz"), "Hz"),
+        _value_line(
+            "Robot feedback effective rate",
+            (feedback.get("duration_rate") or {}).get("effective_hz"),
+            "Hz",
+        ),
         _value_line("Unity rows", unity.get("rows")),
         _value_line("Unity effective rate", (unity.get("duration_rate") or {}).get("effective_hz"), "Hz"),
         _stat_line(unity, ("gap_ms",), "Unity sample gap", "ms"),
         "",
-        "## Event Counts",
+    ]
+
+
+def _md_event_counts_section(event_counts: dict) -> list[str]:
+    """Per-event-type tally — one bullet per ``event_type``."""
+    lines = ["## Event Counts", ""]
+    lines.extend(f"- {key}: {value}" for key, value in event_counts.items())
+    lines.append("")
+    return lines
+
+
+def _md_unity_integrity_section(unity: dict) -> list[str]:
+    """Unity seq range, gaps/duplicates, valid rows, and cross-file
+    matching plus control-mode and filter-status tallies.
+    """
+    return [
+        "## Unity Integrity",
+        "",
+        _value_line("Unity seq min", unity.get("seq_min")),
+        _value_line("Unity seq max", unity.get("seq_max")),
+        _value_line("Unity missing seq", unity.get("missing_seq")),
+        _value_line("Unity duplicate seq", unity.get("duplicates")),
+        _value_line("Unity valid true rows", unity.get("valid_true_rows")),
+        _value_line("Unity seq matched across files", unity.get("seq_cross_file_matched")),
+        _value_line("Unity seq missing across files", unity.get("seq_cross_file_missing")),
+        f"- Unity control modes: {unity.get('control_mode_counts', {})}",
+        f"- Unity filter statuses: {unity.get('filter_status_counts', {})}",
         "",
     ]
-    lines.extend(f"- {key}: {value}" for key, value in event_counts.items())
-    lines.extend(
-        [
-            "",
-            "## Unity Integrity",
-            "",
-            _value_line("Unity seq min", unity.get("seq_min")),
-            _value_line("Unity seq max", unity.get("seq_max")),
-            _value_line("Unity missing seq", unity.get("missing_seq")),
-            _value_line("Unity duplicate seq", unity.get("duplicates")),
-            _value_line("Unity valid true rows", unity.get("valid_true_rows")),
-            _value_line("Unity seq matched across files", unity.get("seq_cross_file_matched")),
-            _value_line("Unity seq missing across files", unity.get("seq_cross_file_missing")),
-            f"- Unity control modes: {unity.get('control_mode_counts', {})}",
-            f"- Unity filter statuses: {unity.get('filter_status_counts', {})}",
-            "",
-            "## Command / Latency",
-            "",
-            _value_line("ROS commands", commands.get("count")),
-            f"- Send reasons: {commands.get('send_reason_counts', {})}",
-            _stat_line(commands, ("time_since_last_cmd_ms",), "Command gap / time since last command", "ms"),
-            _stat_line(commands, ("network_delay_ms",), "Network / Unity-to-ROS excess delay", "ms"),
-            _stat_line(commands, ("decision_delay_ms",), "ROS decision delay", "ms"),
-            _value_line("Latency-arrival rows", latency.get("count")),
-            _stat_line(latency, ("command_latency_ms",), "Command latency", "ms"),
-            _stat_line(latency, ("robot_response_ms",), "Robot response", "ms"),
-            _stat_line(latency, ("true_end_to_end_ms",), "True end-to-end", "ms"),
-            "",
-            "## Accuracy / Error",
-            "",
-            _stat_line(main, ("accuracy", "final_error_rad"), "Final/match joint error", "rad"),
-            _stat_line(main, ("accuracy", "max_joint_error_rad"), "Max joint error", "rad"),
-            _stat_line(main, ("accuracy", "match_tool_error_ros_cmd_to_robot_actual_mm"), "Match TCP error ROS command to robot actual", "mm"),
-            _stat_line(main, ("accuracy", "robot_target_to_actual_error_mm"), "Robot internal target-to-actual TCP error", "mm"),
-            _stat_line(main, ("accuracy", "active_ros_cmd_to_actual_tool_error_mm"), "Active ROS command-to-actual TCP error", "mm"),
-            "",
-            "## Status / Anomalies",
-            "",
-            f"- Robot mode counts: {feedback.get('robot_mode_counts', {})}",
-            f"- Error status counts: {feedback.get('error_status_counts', {})}",
-            _value_line("Nonzero error_status rows", feedback.get("nonzero_error_status_rows")),
-            _value_line("Stale Unity sample age >100ms rows", anomalies.get("stale_unity_sample_age_gt_100ms_rows")),
-            _value_line("Ambiguous settle rows", anomalies.get("ambiguous_settle_rows")),
-            _value_line("Pending command rows", anomalies.get("pending_command_rows")),
-            _value_line("Max pending command count", anomalies.get("max_pending_command_count")),
-            _value_line("Queue backlog >0.01rad rows", anomalies.get("queue_backlog_gt_0p01rad_rows")),
-            _value_line("Robot internal target error >10mm rows", anomalies.get("robot_internal_target_error_gt_10mm_rows")),
-            _value_line("Rows before first Unity event", unity_window.get("main_rows_before_first_unity")),
-            _value_line("Seconds before first Unity event", unity_window.get("sec_before_first_unity"), "s"),
-            _value_line("Rows after last Unity event", unity_window.get("main_rows_after_last_unity")),
-            _value_line("Seconds after last Unity event", unity_window.get("sec_after_last_unity"), "s"),
-            f"- Events after last Unity event: {unity_window.get('events_after_last_unity', {})}",
-            "",
-            "## Plate-View KPI Plots",
-            "",
-        ]
-    )
+
+
+def _md_command_latency_section(commands: dict, latency: dict) -> list[str]:
+    """ROS-command counts, send-reason tally, gap/decision/network
+    delay stats, plus T4/T5 arrival latency (command latency, robot
+    response, true end-to-end).
+    """
+    return [
+        "## Command / Latency",
+        "",
+        _value_line("ROS commands", commands.get("count")),
+        f"- Send reasons: {commands.get('send_reason_counts', {})}",
+        _stat_line(commands, ("time_since_last_cmd_ms",), "Command gap / time since last command", "ms"),
+        _stat_line(commands, ("network_delay_ms",), "Network / Unity-to-ROS excess delay", "ms"),
+        _stat_line(commands, ("decision_delay_ms",), "ROS decision delay", "ms"),
+        _value_line("Latency-arrival rows", latency.get("count")),
+        _stat_line(latency, ("command_latency_ms",), "Command latency", "ms"),
+        _stat_line(latency, ("robot_response_ms",), "Robot response", "ms"),
+        _stat_line(latency, ("true_end_to_end_ms",), "True end-to-end", "ms"),
+        "",
+    ]
+
+
+def _md_accuracy_section(main: dict) -> list[str]:
+    """Joint + tool error stats at target-reached events and the
+    cmd-to-actual tracking errors that feed the poster.
+    """
+    return [
+        "## Accuracy / Error",
+        "",
+        _stat_line(main, ("accuracy", "final_error_rad"), "Final/match joint error", "rad"),
+        _stat_line(main, ("accuracy", "max_joint_error_rad"), "Max joint error", "rad"),
+        _stat_line(
+            main,
+            ("accuracy", "match_tool_error_ros_cmd_to_robot_actual_mm"),
+            "Match TCP error ROS command to robot actual",
+            "mm",
+        ),
+        _stat_line(
+            main,
+            ("accuracy", "robot_target_to_actual_error_mm"),
+            "Robot internal target-to-actual TCP error",
+            "mm",
+        ),
+        _stat_line(
+            main,
+            ("accuracy", "active_ros_cmd_to_actual_tool_error_mm"),
+            "Active ROS command-to-actual TCP error",
+            "mm",
+        ),
+        "",
+    ]
+
+
+def _md_status_anomalies_section(
+    feedback: dict, anomalies: dict, unity_window: dict
+) -> list[str]:
+    """Robot-mode / error-status tally, stale-sample + pending-command
+    anomalies, and the pre/post-Unity window summary that flags
+    out-of-band activity.
+    """
+    return [
+        "## Status / Anomalies",
+        "",
+        f"- Robot mode counts: {feedback.get('robot_mode_counts', {})}",
+        f"- Error status counts: {feedback.get('error_status_counts', {})}",
+        _value_line("Nonzero error_status rows", feedback.get("nonzero_error_status_rows")),
+        _value_line(
+            "Stale Unity sample age >100ms rows",
+            anomalies.get("stale_unity_sample_age_gt_100ms_rows"),
+        ),
+        _value_line("Ambiguous settle rows", anomalies.get("ambiguous_settle_rows")),
+        _value_line("Pending command rows", anomalies.get("pending_command_rows")),
+        _value_line("Max pending command count", anomalies.get("max_pending_command_count")),
+        _value_line(
+            "Queue backlog >0.01rad rows", anomalies.get("queue_backlog_gt_0p01rad_rows")
+        ),
+        _value_line(
+            "Robot internal target error >10mm rows",
+            anomalies.get("robot_internal_target_error_gt_10mm_rows"),
+        ),
+        _value_line(
+            "Rows before first Unity event", unity_window.get("main_rows_before_first_unity")
+        ),
+        _value_line(
+            "Seconds before first Unity event", unity_window.get("sec_before_first_unity"), "s"
+        ),
+        _value_line(
+            "Rows after last Unity event", unity_window.get("main_rows_after_last_unity")
+        ),
+        _value_line(
+            "Seconds after last Unity event", unity_window.get("sec_after_last_unity"), "s"
+        ),
+        f"- Events after last Unity event: {unity_window.get('events_after_last_unity', {})}",
+        "",
+    ]
+
+
+def _md_plate_kpi_section(plate_summaries: list[dict]) -> list[str]:
+    """One bullet per plate pair: row count, KPI threshold violations,
+    peak vector error and per-axis dXYZ peak.
+    """
+    lines = ["## Plate-View KPI Plots", ""]
     for item in plate_summaries:
         lines.append(
             f"- {item.get('file')}: rows={item.get('row_count')}, "
             f"points>KPI={item.get('points_over_kpi_5mm')}, "
             f"peak={_fmt(item.get('peak_vector_error_mm'))} mm, "
-            f"peak dXYZ=({_fmt(item.get('peak_dx_mm'))}, {_fmt(item.get('peak_dy_mm'))}, {_fmt(item.get('peak_dz_mm'))}) mm"
+            f"peak dXYZ=({_fmt(item.get('peak_dx_mm'))}, {_fmt(item.get('peak_dy_mm'))}, "
+            f"{_fmt(item.get('peak_dz_mm'))}) mm"
         )
-    lines.extend(
-        [
-            "",
+    lines.append("")
+    return lines
+
+
+def _md_poster_metrics_section(metrics: dict) -> list[str]:
+    """Headline metrics for the poster summary — latency split, target-
+    reached errors, tracking errors, and the robot motion envelope.
+    """
+    return [
         "## Poster Metrics",
         "",
         _metric_line(metrics, "network_delay_ms", "Unity -> ROS excess delay after clock calibration"),
@@ -1532,9 +1669,19 @@ def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_c
         _metric_line(metrics, "true_end_to_end_ms", "Unity -> robot target reached"),
         _metric_line(metrics, "target_reached_joint_error", "Target reached joint error"),
         _metric_line(metrics, "target_reached_tcp_error_ros_cmd_to_robot", "Target reached TCP error"),
-        _metric_line(metrics, "target_reached_tcp_error_tool_target_to_actual", "Target reached MG400 ToolVectorTarget -> ToolVectorActual error"),
-        _metric_line(metrics, "max_joint_error_ros_cmd_to_robot", "Tracking joint error during feedback"),
-        _metric_line(metrics, "tracking_tcp_error_tool_target_to_actual", "Tracking MG400 ToolVectorTarget -> ToolVectorActual error"),
+        _metric_line(
+            metrics,
+            "target_reached_tcp_error_tool_target_to_actual",
+            "Target reached MG400 ToolVectorTarget -> ToolVectorActual error",
+        ),
+        _metric_line(
+            metrics, "max_joint_error_ros_cmd_to_robot", "Tracking joint error during feedback"
+        ),
+        _metric_line(
+            metrics,
+            "tracking_tcp_error_tool_target_to_actual",
+            "Tracking MG400 ToolVectorTarget -> ToolVectorActual error",
+        ),
         _metric_line(metrics, "cartesian_error_unity_to_robot", "Tracking Unity target -> robot TCP error"),
         _metric_line(metrics, "cartesian_error_ros_cmd_to_robot", "Tracking ROS command -> robot TCP error"),
         _metric_line(metrics, "robot_tcp_path_length", "Robot TCP path length"),
@@ -1542,22 +1689,28 @@ def _write_markdown_summary(path: Path, source: Path, rows, event_counts, mode_c
         _metric_line(metrics, "robot_max_joint_speed", "Robot max joint speed"),
         _metric_line(metrics, "robot_tcp_z_range", "Robot TCP Z travel range"),
         "",
-        "## Report-Ready Tables",
-        "",
-        "- `summary_all_metrics.csv`: flattened table with all layer numbers for reports.",
-        "- `summary_metrics.json`: structured JSON with full report, metrics, and plate summaries.",
-        "- `summary_metrics.csv`: compact metric table.",
-        "- `plate_clean_solid_summary.csv`: KPI/peak table matching the old plate-view workflow.",
-        "- `cartesian_samples.csv`: time-aligned XYZ samples and Cartesian errors.",
-        "",
-        "## Generated Figures",
-        "",
-        ]
-    )
+    ]
+
+
+_MD_REPORT_TABLES_SECTION: list[str] = [
+    "## Report-Ready Tables",
+    "",
+    "- `summary_all_metrics.csv`: flattened table with all layer numbers for reports.",
+    "- `summary_metrics.json`: structured JSON with full report, metrics, and plate summaries.",
+    "- `summary_metrics.csv`: compact metric table.",
+    "- `plate_clean_solid_summary.csv`: KPI/peak table matching the old plate-view workflow.",
+    "- `cartesian_samples.csv`: time-aligned XYZ samples and Cartesian errors.",
+    "",
+]
+
+
+def _md_figures_section(figures: dict) -> list[str]:
+    """One bullet per generated PNG, keyed by the figure label."""
+    lines = ["## Generated Figures", ""]
     for label, fig_path in figures.items():
         lines.append(f"- {label}: `{fig_path.name}`")
     lines.append("")
-    path.write_text("\n".join(lines))
+    return lines
 
 
 def _select_files_with_dialog() -> list[Path]:
