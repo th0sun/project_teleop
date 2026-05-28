@@ -120,7 +120,6 @@ class _CommandArc:
     through_fraction: float
     start_to_through_mm: float
     through_to_end_mm: float
-    chord_mm: float
 
     @property
     def sweep_rad(self) -> float:
@@ -303,7 +302,6 @@ def _command_arc_from_points(
         through_fraction=float(through_fraction),
         start_to_through_mm=float(np.linalg.norm(through_xyz - start_xyz)),
         through_to_end_mm=float(np.linalg.norm(end_xyz - through_xyz)),
-        chord_mm=float(np.linalg.norm(end_xyz - start_xyz)),
     )
 
 
