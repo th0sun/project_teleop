@@ -949,101 +949,238 @@ def _build_session_report(
     unity_path: Path | None,
     unity_rows: list[dict[str, str]],
 ) -> dict:
+    """Assemble the full ``report`` dict consumed by the markdown
+    summary, the JSON output, and the all-metrics CSV.
+
+    The result has two top-level keys:
+      ``main``  — derived from the session CSV (rows + event-type
+                  subsets + anomalies + the Unity-event window in
+                  main time).
+      ``unity`` — derived from the matching Unity sample CSV (seq
+                  integrity + cross-file seq matching + control /
+                  filter status tallies).
+    """
+    feedback_rows = _rows_with_event(rows, "robot_feedback")
+    feedback_t = _time_axis(feedback_rows) if feedback_rows else np.array([], dtype=float)
+    unity_event_rows = _rows_with_event(rows, "unity_sample")
+    unity_event_t = (
+        _time_axis(unity_event_rows) if unity_event_rows else np.array([], dtype=float)
+    )
+    command_rows = _rows_with_event(rows, "ros_command")
+    arrival_rows = _rows_with_event(rows, "latency_arrival")
+
+    main_report = _main_report_metadata(main_path, rows, t)
+    main_report["robot_feedback"] = _main_report_robot_feedback(feedback_rows, feedback_t)
+    main_report["commands"] = _main_report_commands(command_rows)
+    main_report["latency_arrival"] = _main_report_latency_arrival(arrival_rows)
+    main_report["accuracy"] = _main_report_accuracy(rows, feedback_rows)
+    main_report["anomalies"] = _main_report_anomalies(rows, feedback_rows)
+    if unity_event_t.size:
+        main_report["unity_window_in_main"] = _main_report_unity_window(
+            t, unity_event_t, rows
+        )
+
+    return {"main": main_report, "unity": _build_unity_report(unity_path, unity_rows, rows)}
+
+
+def _main_report_metadata(main_path: Path, rows, t: np.ndarray) -> dict:
+    """File info + row/column counts + duration/rate + per-row gap
+    stats + event-type tally sorted by descending frequency.
+    """
     event_counts = dict(collections.Counter(_event_type(row) for row in rows))
     event_counts = dict(sorted(event_counts.items(), key=lambda item: (-item[1], item[0])))
-    main_report = {
+    return {
         "file": _file_info(main_path),
         "rows": len(rows),
         "columns": len(rows[0]) if rows else 0,
         "duration_rate": _duration_rate_from_t(t, len(rows)),
         "gap_ms": _gap_stats_from_t(t),
         "event_counts": event_counts,
-        "unique_ros_command_uid": len({r.get("ros_command_uid") for r in rows if r.get("ros_command_uid")}),
+        "unique_ros_command_uid": len(
+            {r.get("ros_command_uid") for r in rows if r.get("ros_command_uid")}
+        ),
     }
-    feedback_rows = _rows_with_event(rows, "robot_feedback")
-    feedback_t = _time_axis(feedback_rows) if feedback_rows else np.array([], dtype=float)
-    unity_event_rows = _rows_with_event(rows, "unity_sample")
-    unity_event_t = _time_axis(unity_event_rows) if unity_event_rows else np.array([], dtype=float)
-    command_rows = _rows_with_event(rows, "ros_command")
-    arrival_rows = _rows_with_event(rows, "latency_arrival")
-    main_report["robot_feedback"] = {
+
+
+def _main_report_robot_feedback(feedback_rows, feedback_t) -> dict:
+    """Robot-feedback rate + robot_mode / error_status tallies +
+    nonzero-error row count.
+    """
+    return {
         "duration_rate": _duration_rate_from_t(feedback_t, len(feedback_rows)),
         "robot_mode_counts": _counter(feedback_rows, "robot_mode"),
         "error_status_counts": _counter(feedback_rows, "error_status"),
-        "nonzero_error_status_rows": sum(1 for row in feedback_rows if row.get("error_status") not in ("", "0", "0.0")),
+        "nonzero_error_status_rows": sum(
+            1 for row in feedback_rows if row.get("error_status") not in ("", "0", "0.0")
+        ),
     }
-    main_report["commands"] = {
+
+
+def _main_report_commands(command_rows) -> dict:
+    """Command count + send_reason tally + time-since-last /
+    network-delay / decision-delay stats.
+    """
+    return {
         "count": len(command_rows),
         "send_reason_counts": _counter(command_rows, "send_reason"),
-        "time_since_last_cmd_ms": _stats_dict(_column_values(command_rows, "time_since_last_cmd_ms"), "ms"),
+        "time_since_last_cmd_ms": _stats_dict(
+            _column_values(command_rows, "time_since_last_cmd_ms"), "ms"
+        ),
         "network_delay_ms": _stats_dict(_column_values(command_rows, "network_delay_ms"), "ms"),
-        "decision_delay_ms": _stats_dict(_column_values(command_rows, "decision_delay_ms"), "ms"),
+        "decision_delay_ms": _stats_dict(
+            _column_values(command_rows, "decision_delay_ms"), "ms"
+        ),
     }
-    main_report["latency_arrival"] = {
+
+
+def _main_report_latency_arrival(arrival_rows) -> dict:
+    """T4/T5 arrival latency: command_latency + robot_response +
+    true_end_to_end.
+    """
+    return {
         "count": len(arrival_rows),
-        "command_latency_ms": _stats_dict(_column_values(arrival_rows, "command_latency_ms"), "ms"),
-        "robot_response_ms": _stats_dict(_column_values(arrival_rows, "robot_response_ms"), "ms"),
-        "true_end_to_end_ms": _stats_dict(_column_values(arrival_rows, "true_end_to_end_ms"), "ms"),
+        "command_latency_ms": _stats_dict(
+            _column_values(arrival_rows, "command_latency_ms"), "ms"
+        ),
+        "robot_response_ms": _stats_dict(
+            _column_values(arrival_rows, "robot_response_ms"), "ms"
+        ),
+        "true_end_to_end_ms": _stats_dict(
+            _column_values(arrival_rows, "true_end_to_end_ms"), "ms"
+        ),
     }
-    main_report["accuracy"] = {
+
+
+def _main_report_accuracy(rows, feedback_rows) -> dict:
+    """Joint + tool error stats (full row set + feedback-only subset).
+
+    The two "feedback-only" tool errors use the same column as a
+    full-row scan because the column is only populated on
+    robot_feedback events, but reading from the smaller list keeps
+    the stats correct when other event types accumulate NaNs.
+    """
+    return {
         "final_error_rad": _stats_dict(_column_values(rows, "final_error_rad"), "rad"),
         "max_joint_error_rad": _stats_dict(_column_values(rows, "max_joint_error_rad"), "rad"),
-        "match_tool_error_ros_cmd_to_robot_actual_mm": _stats_dict(_column_values(rows, "error_ros_cmd_tool_to_robot_actual_mm"), "mm"),
-        "robot_target_to_actual_error_mm": _stats_dict(_column_values(feedback_rows, "error_robot_tool_target_to_actual_mm"), "mm"),
-        "active_ros_cmd_to_actual_tool_error_mm": _stats_dict(_column_values(feedback_rows, "error_ros_cmd_tool_to_robot_actual_mm"), "mm"),
+        "match_tool_error_ros_cmd_to_robot_actual_mm": _stats_dict(
+            _column_values(rows, "error_ros_cmd_tool_to_robot_actual_mm"), "mm"
+        ),
+        "robot_target_to_actual_error_mm": _stats_dict(
+            _column_values(feedback_rows, "error_robot_tool_target_to_actual_mm"), "mm"
+        ),
+        "active_ros_cmd_to_actual_tool_error_mm": _stats_dict(
+            _column_values(feedback_rows, "error_ros_cmd_tool_to_robot_actual_mm"), "mm"
+        ),
     }
+
+
+def _main_report_anomalies(rows, feedback_rows) -> dict:
+    """Threshold-violation counts the markdown summary flags: stale
+    Unity samples, ambiguous settle matches, pending-command depth,
+    queue backlog, and the >10mm robot internal target error.
+    """
     queue_backlog = _column_values(rows, "queue_backlog_rad")
     pending = _column_values(rows, "pending_command_count")
     stale_age = _column_values(rows, "unity_sample_age_ms")
-    main_report["anomalies"] = {
-        "stale_unity_sample_age_gt_100ms_rows": int(np.count_nonzero(stale_age[np.isfinite(stale_age)] > 100.0)),
-        "ambiguous_settle_rows": sum(1 for row in rows if _truthy(row.get("settle_match_ambiguous"))),
+    feedback_target_err = (
+        _column_values(feedback_rows, "error_robot_tool_target_to_actual_mm")
+        if feedback_rows else np.array([], dtype=float)
+    )
+    return {
+        "stale_unity_sample_age_gt_100ms_rows": int(
+            np.count_nonzero(stale_age[np.isfinite(stale_age)] > 100.0)
+        ),
+        "ambiguous_settle_rows": sum(
+            1 for row in rows if _truthy(row.get("settle_match_ambiguous"))
+        ),
         "pending_command_rows": int(np.count_nonzero(pending[np.isfinite(pending)] > 0)),
-        "max_pending_command_count": float(np.nanmax(pending)) if np.isfinite(pending).any() else None,
-        "queue_backlog_gt_0p01rad_rows": int(np.count_nonzero(queue_backlog[np.isfinite(queue_backlog)] > 0.01)),
-        "robot_internal_target_error_gt_10mm_rows": int(np.count_nonzero(_column_values(feedback_rows, "error_robot_tool_target_to_actual_mm")[np.isfinite(_column_values(feedback_rows, "error_robot_tool_target_to_actual_mm"))] > 10.0)) if feedback_rows else 0,
+        "max_pending_command_count": (
+            float(np.nanmax(pending)) if np.isfinite(pending).any() else None
+        ),
+        "queue_backlog_gt_0p01rad_rows": int(
+            np.count_nonzero(queue_backlog[np.isfinite(queue_backlog)] > 0.01)
+        ),
+        "robot_internal_target_error_gt_10mm_rows": (
+            int(np.count_nonzero(feedback_target_err[np.isfinite(feedback_target_err)] > 10.0))
+            if feedback_rows else 0
+        ),
     }
-    if unity_event_t.size:
-        before = t < float(np.min(unity_event_t))
-        after = t > float(np.max(unity_event_t))
-        main_report["unity_window_in_main"] = {
-            "main_rows_before_first_unity": int(np.count_nonzero(before)),
-            "sec_before_first_unity": float(np.min(unity_event_t) - np.min(t[np.isfinite(t)])) if np.isfinite(t).any() else None,
-            "main_rows_after_last_unity": int(np.count_nonzero(after)),
-            "sec_after_last_unity": float(np.max(t[np.isfinite(t)]) - np.max(unity_event_t)) if np.isfinite(t).any() else None,
-            "events_after_last_unity": dict(collections.Counter(_event_type(rows[i]) for i in np.flatnonzero(after))),
-        }
-    unity_report = {"file": _file_info(unity_path), "rows": len(unity_rows), "columns": len(unity_rows[0]) if unity_rows else 0}
-    if unity_rows:
-        unity_t = _column_values(unity_rows, "unity_send_ts")
-        if not np.isfinite(unity_t).any():
-            unity_t = _column_values(unity_rows, "controller_capture_ts")
-        seq = _column_values(unity_rows, "unity_seq_id")
-        valid_seq = seq[np.isfinite(seq)].astype(int)
-        seq_missing = 0
-        duplicates = 0
-        if valid_seq.size:
-            seq_missing = int((int(np.max(valid_seq)) - int(np.min(valid_seq)) + 1) - len(set(valid_seq.tolist())))
-            duplicates = int(valid_seq.size - len(set(valid_seq.tolist())))
-        main_seq = {_float(row.get("unity_seq_id")) for row in rows if row.get("unity_seq_id") not in (None, "")}
-        main_seq_int = {int(v) for v in main_seq if np.isfinite(v)}
-        unity_seq_int = set(valid_seq.tolist())
-        unity_report.update(
-            {
-                "duration_rate": _duration_rate_from_t(unity_t, len(unity_rows)),
-                "gap_ms": _gap_stats_from_t(unity_t),
-                "seq_min": int(np.min(valid_seq)) if valid_seq.size else None,
-                "seq_max": int(np.max(valid_seq)) if valid_seq.size else None,
-                "missing_seq": seq_missing,
-                "duplicates": duplicates,
-                "valid_true_rows": sum(1 for row in unity_rows if _truthy(row.get("is_valid", "true"))),
-                "control_mode_counts": _counter(unity_rows, "control_mode"),
-                "filter_status_counts": _counter(unity_rows, "unity_filter_status"),
-                "seq_cross_file_matched": len(main_seq_int & unity_seq_int),
-                "seq_cross_file_missing": len(unity_seq_int - main_seq_int),
-            }
+
+
+def _main_report_unity_window(t: np.ndarray, unity_event_t: np.ndarray, rows) -> dict:
+    """How much of the main log sits outside the [first, last] Unity-
+    sample window, plus a tally of which event types fall after the
+    last Unity sample. Used to flag teleop activity that drifted past
+    the Unity session.
+    """
+    before = t < float(np.min(unity_event_t))
+    after = t > float(np.max(unity_event_t))
+    t_finite_any = np.isfinite(t).any()
+    return {
+        "main_rows_before_first_unity": int(np.count_nonzero(before)),
+        "sec_before_first_unity": (
+            float(np.min(unity_event_t) - np.min(t[np.isfinite(t)])) if t_finite_any else None
+        ),
+        "main_rows_after_last_unity": int(np.count_nonzero(after)),
+        "sec_after_last_unity": (
+            float(np.max(t[np.isfinite(t)]) - np.max(unity_event_t)) if t_finite_any else None
+        ),
+        "events_after_last_unity": dict(
+            collections.Counter(_event_type(rows[i]) for i in np.flatnonzero(after))
+        ),
+    }
+
+
+def _build_unity_report(unity_path: Path | None, unity_rows, rows) -> dict:
+    """Unity CSV summary: row count + (when rows exist) duration rate,
+    seq integrity, control/filter status tallies, and the cross-file
+    seq matching against the main log.
+    """
+    unity_report = {
+        "file": _file_info(unity_path),
+        "rows": len(unity_rows),
+        "columns": len(unity_rows[0]) if unity_rows else 0,
+    }
+    if not unity_rows:
+        return unity_report
+
+    unity_t = _column_values(unity_rows, "unity_send_ts")
+    if not np.isfinite(unity_t).any():
+        unity_t = _column_values(unity_rows, "controller_capture_ts")
+    seq = _column_values(unity_rows, "unity_seq_id")
+    valid_seq = seq[np.isfinite(seq)].astype(int)
+    seq_missing = 0
+    duplicates = 0
+    if valid_seq.size:
+        seq_missing = int(
+            (int(np.max(valid_seq)) - int(np.min(valid_seq)) + 1) - len(set(valid_seq.tolist()))
         )
-    return {"main": main_report, "unity": unity_report}
+        duplicates = int(valid_seq.size - len(set(valid_seq.tolist())))
+    main_seq = {
+        _float(row.get("unity_seq_id"))
+        for row in rows
+        if row.get("unity_seq_id") not in (None, "")
+    }
+    main_seq_int = {int(v) for v in main_seq if np.isfinite(v)}
+    unity_seq_int = set(valid_seq.tolist())
+    unity_report.update(
+        {
+            "duration_rate": _duration_rate_from_t(unity_t, len(unity_rows)),
+            "gap_ms": _gap_stats_from_t(unity_t),
+            "seq_min": int(np.min(valid_seq)) if valid_seq.size else None,
+            "seq_max": int(np.max(valid_seq)) if valid_seq.size else None,
+            "missing_seq": seq_missing,
+            "duplicates": duplicates,
+            "valid_true_rows": sum(
+                1 for row in unity_rows if _truthy(row.get("is_valid", "true"))
+            ),
+            "control_mode_counts": _counter(unity_rows, "control_mode"),
+            "filter_status_counts": _counter(unity_rows, "unity_filter_status"),
+            "seq_cross_file_matched": len(main_seq_int & unity_seq_int),
+            "seq_cross_file_missing": len(unity_seq_int - main_seq_int),
+        }
+    )
+    return unity_report
 
 
 def _write_all_metrics_csv(path: Path, report: dict, metrics: dict, plate_summaries: list[dict]) -> None:
