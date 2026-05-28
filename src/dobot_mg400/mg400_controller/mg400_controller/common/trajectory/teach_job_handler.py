@@ -251,20 +251,50 @@ class TeachJobHandler:
 
     # ── Public entry point ──────────────────────────────────────────────────
     def handle(self, json_str: str) -> JobStatus:
+        """Top-level job_request handler.
+
+        Pipeline:
+          1. Parse — emit ERR_BAD_PAYLOAD on malformed JSON.
+          2. Ack receipt — emit STAGE_RECEIVED so Unity knows the
+             request landed before the heavy work starts.
+          3. Validate action + target — ERR_UNKNOWN_ACTION /
+             ERR_TARGET_MISMATCH.
+          4. Dispatch to the per-action handler via _ACTION_HANDLERS
+             with a defensive catch-all so an exception in a handler
+             surfaces as ERR_BAD_PAYLOAD rather than crashing the node.
+        """
         try:
             request = parse_job_request(json_str)
         except ValueError as exc:
-            status = self._build_status(
-                job_id="",
-                stage=STAGE_FAILED,
-                message=f"Bad job_request payload: {exc}",
-                error_code=ERR_BAD_PAYLOAD,
-                action=None,
-            )
-            self._emit(status)
-            return status
+            return self._emit_bad_payload(exc)
 
-        # Acknowledge receipt early so Unity knows the request landed.
+        self._emit_received(request)
+
+        if (rejected := self._reject_invalid_dispatch(request)) is not None:
+            return rejected
+
+        try:
+            return self._dispatch_action(request)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log.error(f"Unhandled error in teach job '{request.action}': {exc}")
+            return self._fail(request, ERR_BAD_PAYLOAD, str(exc))
+
+    def _emit_bad_payload(self, exc: ValueError) -> JobStatus:
+        """Emit the synthetic 'no job_id' failure status used when the
+        request JSON itself is malformed."""
+        status = self._build_status(
+            job_id="",
+            stage=STAGE_FAILED,
+            message=f"Bad job_request payload: {exc}",
+            error_code=ERR_BAD_PAYLOAD,
+            action=None,
+        )
+        self._emit(status)
+        return status
+
+    def _emit_received(self, request: JobRequest) -> None:
+        """Acknowledge receipt early so Unity sees the request landed
+        before the per-action handler does its work."""
         self._emit(self._build_status(
             job_id=request.job_id,
             stage=STAGE_RECEIVED,
@@ -273,31 +303,39 @@ class TeachJobHandler:
             metadata={"target": request.target, "filename": request.filename()},
         ))
 
+    def _reject_invalid_dispatch(self, request: JobRequest) -> Optional[JobStatus]:
+        """Pre-dispatch validation: unknown action or wrong target.
+        Returns the failure status if rejected, ``None`` if clear.
+        """
         if request.action not in VALID_ACTIONS:
-            return self._fail(request, ERR_UNKNOWN_ACTION,
-                              f"Unknown action '{request.action}'")
-
+            return self._fail(
+                request, ERR_UNKNOWN_ACTION, f"Unknown action '{request.action}'"
+            )
         if request.target and request.target not in self._accepted_targets:
-            return self._fail(request, ERR_TARGET_MISMATCH,
-                              f"Target '{request.target}' not handled by this node")
+            return self._fail(
+                request,
+                ERR_TARGET_MISMATCH,
+                f"Target '{request.target}' not handled by this node",
+            )
+        return None
 
-        try:
-            if request.action == ACTION_COMPILE:
-                return self._handle_compile(request)
-            if request.action == ACTION_EXECUTE:
-                return self._handle_play(request, sim=False)
-            if request.action == ACTION_TUNE:
-                return self._handle_tune(request)
-            if request.action == ACTION_EXPORT:
-                return self._handle_export(request)
-            if request.action == ACTION_STOP:
-                return self._handle_stop(request)
-        except Exception as exc:  # pragma: no cover - defensive
-            self._log.error(f"Unhandled error in teach job '{request.action}': {exc}")
-            return self._fail(request, ERR_BAD_PAYLOAD, str(exc))
-
-        # Unreachable.
-        return self._fail(request, ERR_UNKNOWN_ACTION, "no dispatch")
+    def _dispatch_action(self, request: JobRequest) -> JobStatus:
+        """Look up the per-action handler and call it. Falls through to
+        an ERR_UNKNOWN_ACTION failure for actions that pass
+        VALID_ACTIONS but lack an entry here (defensive — only
+        possible if VALID_ACTIONS drifts from the dispatch table).
+        """
+        action_handlers = {
+            ACTION_COMPILE: self._handle_compile,
+            ACTION_EXECUTE: lambda req: self._handle_play(req, sim=False),
+            ACTION_TUNE: self._handle_tune,
+            ACTION_EXPORT: self._handle_export,
+            ACTION_STOP: self._handle_stop,
+        }
+        handler = action_handlers.get(request.action)
+        if handler is None:
+            return self._fail(request, ERR_UNKNOWN_ACTION, "no dispatch")
+        return handler(request)
 
     # ── Action handlers ─────────────────────────────────────────────────────
     def _handle_compile(self, request: JobRequest) -> JobStatus:
