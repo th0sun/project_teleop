@@ -516,7 +516,22 @@ show_logs() {
         tail -n 160 "${session_dir}/status.log"
       fi
       ;;
-    teleop|endpoint|sim|unity|rviz|mock|container|build)
+    mock)
+      # mock.log is captured once at start (docker compose logs --tail 80).
+      # That snapshot is empty if the container hadn't logged yet by then,
+      # so re-fetch live from docker compose each time the operator
+      # opens the Mock tab.
+      local mock_compose
+      mock_compose="$(mock_compose_file 2>/dev/null || true)"
+      if [[ -n "${mock_compose}" ]] && docker compose -f "${mock_compose}" ps -q 2>/dev/null | grep -q .; then
+        docker compose -f "${mock_compose}" logs --tail 220 2>&1 || true
+      elif [[ -n "${session_dir}" && -f "${session_dir}/mock.log" ]]; then
+        tail -n 220 "${session_dir}/mock.log"
+      else
+        echo "no mock container running and no mock.log snapshot"
+      fi
+      ;;
+    teleop|endpoint|sim|unity|rviz|container|build)
       if [[ -z "${session_dir}" ]]; then
         echo "no startup session logs yet"
         exit 0
