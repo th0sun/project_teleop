@@ -558,52 +558,59 @@ class TeachJobHandler:
         )
 
     def _handle_playback_event(self, event_name: str, payload: Dict[str, Any]):
-        """Publish terminal job status when the recorder finishes playback."""
+        """Publish terminal job status when the recorder finishes
+        playback.
+
+        Maps the recorder's ``playback_complete`` payload flags to one
+        of four terminal stages: ``stopped`` (operator abort),
+        ``failed`` (timeout / no final settle), or ``done``. The
+        outcome table is consulted in priority order — first match
+        wins — so a stopped run that also tripped a timeout still
+        publishes as STAGE_STOPPED.
+        """
         if event_name != "playback_complete" or self._active_execute_request is None:
             return
 
         request = self._active_execute_request
         self._active_execute_request = None
         metadata = dict(payload or {})
-        if metadata.get("stopped"):
-            self._emit(self._build_status(
-                job_id=request.job_id,
-                stage=STAGE_STOPPED,
-                message="Playback stopped",
-                action=request.action,
-                metadata=metadata,
-            ))
-            return
 
-        if metadata.get("timed_out"):
-            self._emit(self._build_status(
-                job_id=request.job_id,
-                stage=STAGE_FAILED,
-                message="Playback timed out before final target was reached",
-                error_code=ERR_PLAYBACK_TIMEOUT,
-                action=request.action,
-                metadata=metadata,
-            ))
-            return
-
-        if not metadata.get("success", False):
-            self._emit(self._build_status(
-                job_id=request.job_id,
-                stage=STAGE_FAILED,
-                message="Playback ended without confirmed final settle",
-                error_code=ERR_PLAYBACK_FAILED,
-                action=request.action,
-                metadata=metadata,
-            ))
-            return
-
+        outcome = self._classify_playback_outcome(metadata)
         self._emit(self._build_status(
             job_id=request.job_id,
-            stage=STAGE_DONE,
-            message="Playback complete",
+            stage=outcome["stage"],
+            message=outcome["message"],
+            error_code=outcome.get("error_code"),
             action=request.action,
             metadata=metadata,
         ))
+
+    @staticmethod
+    def _classify_playback_outcome(metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Pick the terminal stage + message + optional error_code from
+        the recorder's ``playback_complete`` metadata.
+
+        Priority order (first match wins):
+          stopped     -> STAGE_STOPPED
+          timed_out   -> STAGE_FAILED / ERR_PLAYBACK_TIMEOUT
+          !success    -> STAGE_FAILED / ERR_PLAYBACK_FAILED
+          (default)   -> STAGE_DONE
+        """
+        if metadata.get("stopped"):
+            return {"stage": STAGE_STOPPED, "message": "Playback stopped"}
+        if metadata.get("timed_out"):
+            return {
+                "stage": STAGE_FAILED,
+                "message": "Playback timed out before final target was reached",
+                "error_code": ERR_PLAYBACK_TIMEOUT,
+            }
+        if not metadata.get("success", False):
+            return {
+                "stage": STAGE_FAILED,
+                "message": "Playback ended without confirmed final settle",
+                "error_code": ERR_PLAYBACK_FAILED,
+            }
+        return {"stage": STAGE_DONE, "message": "Playback complete"}
 
     # ── Helpers ─────────────────────────────────────────────────────────────
     def _apply_request_tuning(self, request: JobRequest, *, merge: bool = False) -> Dict[str, Any]:
