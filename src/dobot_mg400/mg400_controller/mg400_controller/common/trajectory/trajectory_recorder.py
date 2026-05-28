@@ -6,16 +6,11 @@ Trajectory Recorder & Sequencer — Teach-and-Repeat for MG400
 =============================================================
 Handles the full lifecycle:
 
-1. **Record**  — smart-sample at ~8-10 Hz: only frames with significant
-                 movement (>RECORD_MIN_DELTA degrees) and at least
-                 RECORD_MIN_DT apart.  Produces compact JSON identical
-                 to the Unity money.json format.
-2. **Save**    — persist as ``{"frames": [{timeStamp, j1..j4}, ...]}``.
-3. **Load**    — read a saved JSON trajectory (Unity or native format).
-4. **Execute** — command sequencer that keeps the taught waypoint order/path,
+1. **Load**    — read a saved JSON trajectory (Unity or native format).
+2. **Execute** — command sequencer that keeps the taught waypoint order/path,
                  but uses operator-selected Speed/Acc/CP tuning instead of
                  trying to reproduce the demonstrator's timestamps.
-5. **Stop**    — abort any operation and send the robot Home (0,0,0,0).
+3. **Stop**    — abort any operation and send the robot Home (0,0,0,0).
 
 Topic integration (managed by vr_teleop_node.py):
   /teach/job_request    — String JSON body from Unity / simulator
@@ -59,13 +54,6 @@ HOME_JOINTS_DEG = [0.0, 0.0, 0.0, 0.0]
 
 # ── Trajectory storage directory ─────────────────────────────────────────────
 TRAJ_DIR = os.path.expanduser("~/project_teleop_ws/trajectories")
-
-# ── Smart recording parameters ───────────────────────────────────────────────
-# Inspired by money.json: ~8 Hz, 118 frames for 14.7 s, every frame has >1°
-# movement.  This keeps files compact and eliminates the need for decimation
-# during playback.
-RECORD_MIN_DT    = 0.10   # seconds — max ~10 Hz recording rate
-RECORD_MIN_DELTA = 0.5    # degrees — minimum joint movement to store a frame
 
 # ── Playback / arrival thresholds ────────────────────────────────────────────
 PREVIEW_START_SPEEDJ = 20
@@ -248,7 +236,6 @@ class TrajectoryRecorder:
         self._get_pos = get_position_fn
         self._waypoint_cb = waypoint_callback
         self._target_cb = target_callback
-        self._playback_event_cb = playback_event_callback
         self._playback_event_cbs = []
         if playback_event_callback is not None:
             self._playback_event_cbs.append(playback_event_callback)
@@ -260,7 +247,6 @@ class TrajectoryRecorder:
         self._playback_tuning = self._default_playback_tuning()
 
         # ── State ────────────────────────────────────────────────────────────
-        self.is_recording  = False
         self.is_playing    = False
         self._stop_flag    = threading.Event()
         self._play_thread: Optional[threading.Thread] = None
@@ -270,13 +256,6 @@ class TrajectoryRecorder:
         # stop_all() cancels these so blow-off pulses don't fire after stop.
         self._pending_timers: List[threading.Timer] = []
         self._pending_timers_lock = threading.Lock()
-
-        # ── Recorded data ────────────────────────────────────────────────────
-        self._frames: List[Dict] = []   # [{timeStamp, j1..j4}] degrees
-        self._events: List[Dict] = []   # [{timeStamp, kind, channel, value, port?}]
-        self._rec_t0 = 0.0
-        self._last_rec_t = 0.0          # timestamp of last stored frame
-        self._last_rec_q = np.zeros(4)   # joint values of last stored frame
 
         # ── Loaded trajectory (ready for playback) ───────────────────────────
         self.loaded_frames: List[Dict] = []
@@ -364,45 +343,7 @@ class TrajectoryRecorder:
     #  RECORD  (smart-sampled at ~8-10 Hz)
     # ═════════════════════════════════════════════════════════════════════════
 
-    def record_tick(self, target_q_rad):
-        """Called at ~50 Hz from the control loop.
-        Only stores a frame when:
-          1. At least RECORD_MIN_DT (100 ms) since last stored frame, AND
-          2. At least one joint moved ≥ RECORD_MIN_DELTA (0.5°) since last frame.
-        Always stores the very first frame unconditionally.
-        """
-        if not self.is_recording or target_q_rad is None:
-            return
 
-        q_deg = np.degrees(target_q_rad[:4])
-        now = self._time_fn() - self._rec_t0
-
-        # Always store the first frame
-        if not self._frames:
-            self._append_frame(now, q_deg)
-            return
-
-        # Rate-limit
-        if now - self._last_rec_t < RECORD_MIN_DT:
-            return
-
-        # Movement threshold
-        max_delta = float(np.max(np.abs(q_deg - self._last_rec_q)))
-        if max_delta < RECORD_MIN_DELTA:
-            return
-
-        self._append_frame(now, q_deg)
-
-    def _append_frame(self, t: float, q_deg):
-        self._frames.append({
-            "timeStamp": round(t, 6),
-            "j1": round(float(q_deg[0]), 6),
-            "j2": round(float(q_deg[1]), 6),
-            "j3": round(float(q_deg[2]), 6),
-            "j4": round(float(q_deg[3]), 6),
-        })
-        self._last_rec_t = t
-        self._last_rec_q = q_deg.copy()
 
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -1531,13 +1472,11 @@ class TrajectoryRecorder:
     #  STOP & HOME
     # ═════════════════════════════════════════════════════════════════════════
     def stop_all(self, go_home: bool = False):
-        """Stop any recording/playback.  When go_home=True also move to Home.
-        By default just aborts so live teleop resumes immediately.
+        """Stop active playback.  When go_home=True also send the robot
+        Home; by default just aborts so live teleop resumes immediately.
         """
-        was_recording = self.is_recording
-        was_playing   = self.is_playing
+        was_playing = self.is_playing
 
-        self.is_recording = False
         self._cancel_pending_timers()
         self._stop_flag.set()
 
@@ -1552,8 +1491,6 @@ class TrajectoryRecorder:
                 self._sleep_fn(0.2)
                 self._send_dash(enable_robot().render())
             self._log.info("⏹️  Playback stopped (queue flushed)")
-        if was_recording:
-            self._log.info("⏹️  Recording stopped")
 
         if go_home:
             self._go_home()

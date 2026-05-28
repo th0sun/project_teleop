@@ -1133,13 +1133,6 @@ class TeleopNode(Node):
         if ctx is None:
             return
 
-        # Teach & repeat recording is the one piece that mutates external
-        # state from the loop prologue, so it stays inline rather than
-        # hiding in a helper.
-        tr = self.trajectory_recorder
-        if tr.is_recording and not ctx.is_blocked:
-            tr.record_tick(ctx.target_snapshot)
-
         self.controller.update_robot_state(ctx.q_current, ctx.now)
 
         self._snapshot_adaptive_telemetry(ctx)
