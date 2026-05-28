@@ -30,14 +30,14 @@ from mg400_controller.common.utils.loggers.monitor_logging import (
     SessionLogger,
     ManualMonitorLogger,
 )
-from mg400_controller.common.monitor.control_panel_state import (
+from mg400_controller.common.utils.monitor.control_panel_state import (
     COLOR_OFF,
     LIGHT_SPECS,
     MonitorControlPanelState,
 )
-from mg400_controller.common.monitor.execution_metrics import ExecutionMonitor
-from mg400_controller.common.monitor.joint_graph_buffer import JointGraphBuffer
-from mg400_controller.common.monitor.presentation_state import (
+from mg400_controller.common.utils.monitor.execution_metrics import ExecutionMonitor
+from mg400_controller.common.utils.monitor.joint_graph_buffer import JointGraphBuffer
+from mg400_controller.common.utils.monitor.presentation_state import (
     build_cartesian_display_state,
     build_joint_display_rows,
     build_status_display_state,

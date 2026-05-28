@@ -2,8 +2,8 @@ import unittest
 
 import numpy as np
 
-from mg400_controller.common.monitor.execution_metrics import ExecutionMonitor
-from mg400_controller.common.monitor.joint_graph_buffer import JointGraphBuffer
+from mg400_controller.common.utils.monitor.execution_metrics import ExecutionMonitor
+from mg400_controller.common.utils.monitor.joint_graph_buffer import JointGraphBuffer
 
 
 class FakeTelemetry:

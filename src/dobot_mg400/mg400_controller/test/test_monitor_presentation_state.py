@@ -1,7 +1,7 @@
 import types
 import unittest
 
-from mg400_controller.common.monitor.presentation_state import (
+from mg400_controller.common.utils.monitor.presentation_state import (
     build_cartesian_display_state,
     build_joint_display_rows,
     build_status_display_state,

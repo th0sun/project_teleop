@@ -4,7 +4,7 @@ from mg400_controller.common.config.motion_config import (
     GREEN_LIGHT_DO_PORT,
     VACUUM_DO_PORT,
 )
-from mg400_controller.common.monitor.control_panel_state import (
+from mg400_controller.common.utils.monitor.control_panel_state import (
     MonitorControlPanelState,
 )
 

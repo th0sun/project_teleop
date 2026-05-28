@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 
-from mg400_controller.common.trajectory.teach_job_handler import (  # noqa: E402
+from mg400_controller.common.teleop.teach_job_handler import (  # noqa: E402
     ACTION_COMPILE,
     ACTION_EXECUTE,
     ACTION_EXPORT,

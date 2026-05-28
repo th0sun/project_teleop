@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 
-from mg400_controller.common.trajectory.teach_job_handler import (
+from mg400_controller.common.teleop.teach_job_handler import (
     ACTION_COMPILE,
     ACTION_EXECUTE,
     ERR_EXECUTE_FORBIDDEN,

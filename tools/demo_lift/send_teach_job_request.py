@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional
 
 
 # Action identifiers must stay in lock-step with
-# ``mg400_controller.common.trajectory.teach_job_handler.VALID_ACTIONS``.
+# ``mg400_controller.common.teleop.teach_job_handler.VALID_ACTIONS``.
 VALID_ACTIONS = (
     "compile",
     "execute",

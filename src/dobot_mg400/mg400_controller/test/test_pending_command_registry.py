@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from mg400_controller.common.utils.pending_command_registry import (
+from mg400_controller.common.teleop.pending_command_registry import (
     PendingCommand,
     PendingCommandRegistry,
 )
