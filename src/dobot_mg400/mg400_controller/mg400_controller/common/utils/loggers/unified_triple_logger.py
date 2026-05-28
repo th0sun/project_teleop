@@ -367,32 +367,54 @@ class UnifiedTripleLogger:
 
     def _update_event_snapshots(self, event_type: str, fields: dict, ros_ts: float) -> dict:
         """Update every ``self._last_*`` rolling snapshot from ``fields``
-        and return a dict of identity values resolved for this row
+        and return the identity dict the row builder consumes
         (control_command_seq, ros_command_uid, dobot_command_id,
         robot_feedback_command_id, dobot_command_text + hash,
         feedback_before_send / at_result / changed).
 
-        Pulling this out of _write_event removes a wall of
-        ``if x is not None: self._last_x = ...`` from the row-building
-        code path and gives the caller a single dict to thread into
-        ``_build_csv_row``.
+        Pulled out of _write_event so the snapshot bookkeeping is one
+        flat pipeline of named helpers instead of a wall of
+        ``if x is not None: self._last_x = ...`` lines.
         """
-        # Joint snapshots
-        raw = fields.get("unity_raw_rad")
-        comp = fields.get("unity_compensated_rad")
-        cmd = fields.get("ros_cmd_rad")
-        robot = fields.get("robot_rad")
-        if raw is not None:
-            self._last_unity_raw_rad = self._joint4(raw)
-        if comp is not None:
-            self._last_unity_comp_rad = self._joint4(comp)
-        if cmd is not None:
-            self._last_ros_cmd_rad = self._joint4(cmd)
-        if robot is not None:
-            self._last_robot_rad = self._joint4(robot)
+        self._refresh_joint_snapshots(fields)
+        self._refresh_tool_snapshots(fields)
+        identity = self._resolve_command_identity(event_type, fields, ros_ts)
+        identity.update(self._resolve_feedback_diff(event_type, fields, identity))
+        return identity
 
-        # Command sequence + uid: ros_command events auto-allocate a
-        # sequence if the caller didn't pass one (legacy call sites).
+    def _refresh_joint_snapshots(self, fields: dict) -> None:
+        """Update self._last_*_rad joint snapshots so any later row
+        whose ``fields`` omits a joint vector can still emit one."""
+        for fields_key, attr in (
+            ("unity_raw_rad", "_last_unity_raw_rad"),
+            ("unity_compensated_rad", "_last_unity_comp_rad"),
+            ("ros_cmd_rad", "_last_ros_cmd_rad"),
+            ("robot_rad", "_last_robot_rad"),
+        ):
+            value = fields.get(fields_key)
+            if value is not None:
+                setattr(self, attr, self._joint4(value))
+
+    def _refresh_tool_snapshots(self, fields: dict) -> None:
+        """Update the three self._last_*_tool_* tool-vector snapshots."""
+        for fields_key, attr in (
+            ("ros_cmd_tool_target", "_last_ros_cmd_tool_target"),
+            ("robot_tool_actual", "_last_robot_tool_actual"),
+            ("robot_tool_target", "_last_robot_tool_target"),
+        ):
+            value = fields.get(fields_key)
+            if value is not None:
+                setattr(self, attr, self._tool6(value))
+
+    def _resolve_command_identity(self, event_type: str, fields: dict, ros_ts: float) -> dict:
+        """Resolve the per-row command identity values.
+
+        ``ros_command`` events auto-allocate a control sequence if the
+        caller didn't pass one (legacy call sites) and derive
+        ``ros_command_uid`` from that sequence. The wall-time of the
+        last ros_command is snapshotted so later events can compute
+        ``active_ros_command_age_ms``.
+        """
         control_command_seq = fields.get("control_command_seq")
         if control_command_seq is not None:
             self._last_ros_command_seq = int(control_command_seq)
@@ -412,20 +434,32 @@ class UnifiedTripleLogger:
         if event_type == "ros_command":
             self._last_ros_command_wall = ros_ts
 
-        # Dobot / feedback IDs come from `fields` directly each call; no
-        # rolling fallback is read downstream, so we don't snapshot them.
-        dobot_command_id = fields.get("dobot_command_id")
-        robot_feedback_command_id = fields.get("robot_feedback_command_id")
+        return {
+            "control_command_seq": control_command_seq,
+            "ros_command_uid": ros_command_uid,
+            "dobot_command_id": fields.get("dobot_command_id"),
+            "robot_feedback_command_id": fields.get("robot_feedback_command_id"),
+            "dobot_command_text": fields.get("dobot_command_text"),
+            "dobot_command_hash": (
+                fields.get("dobot_command_hash")
+                or _hash_command(fields.get("dobot_command_text"))
+            ),
+        }
 
-        # Command text + hash + feedback diff
-        dobot_command_text = fields.get("dobot_command_text")
-        dobot_command_hash = (
-            fields.get("dobot_command_hash") or _hash_command(dobot_command_text)
-        )
+    @staticmethod
+    def _resolve_feedback_diff(event_type: str, fields: dict, identity: dict) -> dict:
+        """Compute the feedback-id before/at/changed triple.
+
+        ``latency_arrival`` and ``command_result`` events default
+        ``feedback_at_result`` to the row's
+        ``robot_feedback_command_id`` if the caller didn't pass one,
+        and ``feedback_id_changed`` is inferred whenever both before
+        and at_result are known.
+        """
         feedback_before_send = fields.get("feedback_command_id_before_send")
         feedback_at_result = fields.get("feedback_command_id_at_result")
         if feedback_at_result is None and event_type in ("latency_arrival", "command_result"):
-            feedback_at_result = robot_feedback_command_id
+            feedback_at_result = identity["robot_feedback_command_id"]
         feedback_id_changed = fields.get("feedback_command_id_changed")
         if (
             feedback_id_changed is None
@@ -433,22 +467,7 @@ class UnifiedTripleLogger:
             and feedback_at_result is not None
         ):
             feedback_id_changed = int(feedback_before_send) != int(feedback_at_result)
-
-        # Tool snapshots
-        if (val := fields.get("ros_cmd_tool_target")) is not None:
-            self._last_ros_cmd_tool_target = self._tool6(val)
-        if (val := fields.get("robot_tool_actual")) is not None:
-            self._last_robot_tool_actual = self._tool6(val)
-        if (val := fields.get("robot_tool_target")) is not None:
-            self._last_robot_tool_target = self._tool6(val)
-
         return {
-            "control_command_seq": control_command_seq,
-            "ros_command_uid": ros_command_uid,
-            "dobot_command_id": dobot_command_id,
-            "robot_feedback_command_id": robot_feedback_command_id,
-            "dobot_command_text": dobot_command_text,
-            "dobot_command_hash": dobot_command_hash,
             "feedback_before_send": feedback_before_send,
             "feedback_at_result": feedback_at_result,
             "feedback_id_changed": feedback_id_changed,
