@@ -13,8 +13,7 @@ Uses Dobot's GetError() API to provide detailed error information:
 Based on: Dobot_TCP_IP_Python_V4/dobot_api.py GetError() function
 """
 
-import time
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 
 class ErrorHandler:

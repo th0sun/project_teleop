@@ -10,7 +10,6 @@
     sender.send_motion(command_string, speed_percent, distance)
 """
 
-import time
 import re
 import queue
 import threading

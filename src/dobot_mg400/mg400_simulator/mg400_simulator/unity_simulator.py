@@ -13,7 +13,6 @@ Unity Simulator - จำลองการส่งข้อมูลจาก U
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from mg400_controller.common.config.robot_config import JOINT_LIMITS, ELBOW_ANGLE_LIMIT
 import math
 import random
 import time
@@ -21,6 +20,9 @@ import threading
 import tkinter as tk
 import numpy as np
 
+# Local copy of the joint limits the simulator uses; intentionally NOT
+# imported from mg400_controller.common.config.robot_config so the
+# simulator stays a leaf node with no circular config dependency.
 JOINT_LIMITS = [(-160, 160), (-25, 85), (-25, 105), (-360, 360)]
 ELBOW_ANGLE_LIMIT = (-60, 60)
 
@@ -99,7 +101,7 @@ class UnitySimulator(Node):
         # === State ===
         self.time = 0.0
         
-        self.get_logger().info(f'🎮 Unity Simulator Started!')
+        self.get_logger().info('🎮 Unity Simulator Started!')
         self.get_logger().info(f'   Mode: {self.mode}')
 
     def init_gui(self):

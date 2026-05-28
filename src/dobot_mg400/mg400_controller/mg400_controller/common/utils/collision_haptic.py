@@ -15,7 +15,6 @@ Features:
 
 import json
 import time
-from typing import Dict
 from std_msgs.msg import String
 
 
