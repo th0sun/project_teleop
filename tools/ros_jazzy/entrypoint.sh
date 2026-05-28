@@ -72,7 +72,15 @@ run_function_tests() {
 }
 
 ensure_built() {
-  if [[ -f "${INSTALL_BASE}/setup.bash" ]]; then
+  # Skip the build only when both the install tree exists AND the
+  # currently-expected console scripts are installed. The second
+  # check matters when a setup.py change adds a new entry_point
+  # (e.g. teleop_tcp_endpoint added by the
+  # ROS-TCP-Endpoint-queue-override wrapper commit) — the install
+  # marker can be stale and `ros2 run` will print "No executable
+  # found" until we rebuild.
+  if [[ -f "${INSTALL_BASE}/setup.bash" ]] \
+       && [[ -x "${INSTALL_BASE}/mg400_controller/lib/mg400_controller/teleop_tcp_endpoint" ]]; then
     return
   fi
   colcon --log-base "${LOG_BASE}" build "${common_args[@]}" --symlink-install
