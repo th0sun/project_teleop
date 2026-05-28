@@ -121,9 +121,7 @@ class MonitorGUI:
         title_frame.pack(fill=tk.X, pady=5)
         ttk.Label(title_frame, text="Real-time Monitor & Metrics", font=FONT_HEADER).pack(side=tk.LEFT)
         
-        # Logging Button
-        self.is_logging = False
-        self.log_start_time = 0.0
+        # Logging Button (status tracked on self.manual_logger.is_active).
         self.btn_log = tk.Button(title_frame, text="▶ Start Logging", command=self.toggle_logging, bg="#f0f0f0")
         self.btn_log.pack(side=tk.RIGHT)
 

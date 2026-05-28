@@ -31,10 +31,6 @@ ELBOW_ANGLE_LIMIT = (-60, 60)  # (J3 - J2) must be within this range
 # - "movl"      = Linear Cartesian move
 CONTROL_MODE = "jointmovj"
 
-# 📏 Spatial Threshold (radians)
-# กรองการเคลื่อนที่เล็กๆ ที่ไม่จำเป็น
-SPATIAL_THRESHOLD = 0.0005  # ~0.03 degrees
-
 # ⚙️ Feature Flags
 # Enable GetError() API for detailed error reporting
 # NOTE: Set to False when using MG400_MOCK simulator (not implemented)

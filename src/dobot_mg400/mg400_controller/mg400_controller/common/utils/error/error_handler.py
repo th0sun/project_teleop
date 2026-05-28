@@ -38,9 +38,6 @@ class ErrorHandler:
         """
         self.connection = connection
         self.logger = logger
-        self.language = "en"  # Fixed to English
-        self.error_history = []
-        self.max_history = 100  # Keep last 100 errors
         
     def check_errors(self) -> List[Dict]:
         """
@@ -141,15 +138,6 @@ class ErrorHandler:
                 f"   📅 {formatted['timestamp']}"
             )
             
-            # Add to history
-            self.error_history.append({
-                **formatted,
-                'logged_at': time.time()
-            })
-            
-            # Trim history if too long
-            if len(self.error_history) > self.max_history:
-                self.error_history = self.error_history[-self.max_history:]
     
     
     

@@ -60,7 +60,6 @@ REALTIME_ACCJ_MIN = 25            # % - matches SpeedJ to keep ramp shape consis
 REALTIME_ACCJ_MAX = 100           # %
 REALTIME_CP = 80                  # CP for live teleop commands (matches CP_VALUE)
 REALTIME_COMMAND_ID_RESPONSE_TIMEOUT_SEC = 0.002  # Bounded wait for port-30003 command id
-UNITY_TELEOP_SAMPLE_STALE_TIMEOUT_SEC = 0.5  # Stop direct Unity control if JSON samples stop.
 UNITY_JOINT_CMD_STALE_DROP_SEC = 0.25  # Drop stale live joint targets instead of chasing queue tails.
 
 # Diagnostics only: "passed near" matching for every queued realtime command.
@@ -127,7 +126,6 @@ SCENE_SAFETY_ENABLED_DEFAULT = False
 SCENE_SAFETY_MODEL_PATH = ""
 SCENE_SAFETY_WARN_DISTANCE_MM = 20.0
 SCENE_SAFETY_BLOCK_REALTIME = True
-SCENE_SAFETY_BLOCK_TEACH_REPEAT = True
 
 # 🛠️ Hardware Configuration
 VACUUM_DO_PORT = 16  # หมายเลขพอร์ต Digital Output สำหรับดูด (Vacuum/Suction)

@@ -70,7 +70,6 @@ class TeleopController:
         self._pending_speed_j = REALTIME_SPEEDJ_MAX
         self._pending_acc_j = REALTIME_ACCJ_MAX
         self._pending_cp = REALTIME_CP
-        self._pending_delta_rad = 0.0
 
         # Robot-side velocity tracking (for stuck detection only — no longer
         # gates the send).  Kept here so legacy callers that read
@@ -80,7 +79,6 @@ class TeleopController:
         self.robot_velocity = np.zeros(4)
 
         self.stuck_start_time = 0.0
-        self.is_stuck = False
         self.last_stuck_check_time = 0.0
 
     def reset_reference(self, q_current=None, now=0.0):
@@ -102,12 +100,10 @@ class TeleopController:
         self.last_robot_time = float(now)
         self.robot_velocity = np.zeros(4)
         self.stuck_start_time = 0.0
-        self.is_stuck = False
         self.last_stuck_check_time = 0.0
         self._pending_speed_j = REALTIME_SPEEDJ_MAX
         self._pending_acc_j = REALTIME_ACCJ_MAX
         self._pending_cp = REALTIME_CP
-        self._pending_delta_rad = 0.0
 
     def update_robot_state(self, q_current, now):
         """Track filtered robot joint velocity for stuck detection."""
@@ -198,7 +194,6 @@ class TeleopController:
             self._pending_speed_j = REALTIME_SPEEDJ_MAX
             self._pending_acc_j = REALTIME_ACCJ_MAX
             self._pending_cp = REALTIME_CP
-            self._pending_delta_rad = REALTIME_DELTA_MAX_RAD
             return True, "Init"
 
         # Per-axis max delta to last-sent target.  Multi-axis hand motion can
@@ -220,7 +215,6 @@ class TeleopController:
             self._pending_speed_j = speed_j
             self._pending_acc_j = acc_j
             self._pending_cp = REALTIME_CP
-            self._pending_delta_rad = delta
             reason = (
                 f"Adaptive_d{np.degrees(delta):.2f}deg"
                 f"_v{np.degrees(hand_vel):.0f}dps"
@@ -262,7 +256,6 @@ class TeleopController:
                     self._pending_speed_j = REALTIME_SPEEDJ_MAX
                     self._pending_acc_j = REALTIME_ACCJ_MAX
                     self._pending_cp = REALTIME_CP
-                    self._pending_delta_rad = max(delta, REALTIME_DELTA_MAX_RAD)
                     stuck_reason = (
                         f"Stuck_Vel{velocity_mag:.4f}_Delta{change_in_target:.3f}"
                     )

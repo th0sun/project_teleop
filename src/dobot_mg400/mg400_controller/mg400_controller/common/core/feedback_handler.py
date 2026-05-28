@@ -178,8 +178,10 @@ class FeedbackHandler:
             # 2. Parse Robot Mode (Offset 24)
             self.robot_mode = snapshot.robot_mode
             
-            # 3. Parse Digital I/O (Offset 8/16)
-            self.di_status = snapshot.digital_inputs
+            # 3. Parse Digital Outputs (Offset 16).
+            # Digital inputs are also in the snapshot but nothing reads
+            # them downstream — drop the assignment until a consumer
+            # actually needs the di_status surface.
             self.do_status = snapshot.digital_outputs
             
             # 🌟 3.5 Parse Speed Scaling (SpeedFactor) -> Offset 64 (float64)
