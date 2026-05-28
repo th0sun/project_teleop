@@ -99,7 +99,37 @@ _VALID_INTERFACES = {"position", "velocity", "effort"}
 
 
 def validate_profile(p: RobotCapabilityProfile) -> None:
-    """Run v0.1 capability-profile invariants. Raise on violation."""
+    """Run v0.1 capability-profile invariants. Raise on violation.
+
+    The invariants are grouped by concern so each helper can be
+    invoked independently from a notebook / a custom builder when
+    only one section needs to be re-checked after an edit:
+
+      1. identity / shape — robot_id, dof, joint name + limit shapes
+      2. frames           — base_frame, tcp_frame non-empty
+      3. workspace        — geometry + ANALYTIC_DELTA orientation rule
+      4. control surfaces — ros2_control command + state interfaces
+      5. speed limits     — joint + TCP speed bounds
+      6. orientation      — authority vs orientation_axis_mask
+      7. kinematics       — contract + NONE-only-when-offline rule
+      8. execution        — must enable at least one mode
+    """
+    _validate_identity_and_shape(p)
+    _validate_frames(p)
+    _validate_workspace(p)
+    _validate_control_interfaces(p)
+    _validate_speed_limits(p)
+    _validate_orientation_authority(p)
+    _validate_kinematics(p)
+    if not p.execution.any():
+        raise ProfileValidationError(
+            "ExecutionSupport must enable at least one mode"
+        )
+
+
+def _validate_identity_and_shape(p: RobotCapabilityProfile) -> None:
+    """robot_id non-empty + DoF >= 1 + joint_names / joint_limits_rad
+    lengths match DoF + each (lo, hi) limit is non-degenerate."""
     if not p.robot_id:
         raise ProfileValidationError("robot_id must be non-empty")
     if p.dof < 1:
@@ -117,10 +147,24 @@ def validate_profile(p: RobotCapabilityProfile) -> None:
             raise ProfileValidationError(
                 f"joint_limits_rad[{i}]: low {lo} must be < high {hi}"
             )
+
+
+def _validate_frames(p: RobotCapabilityProfile) -> None:
+    """base_frame + tcp_frame must be non-empty so downstream URDF /
+    TF consumers can resolve poses without guessing.
+    """
     if not p.base_frame:
         raise ProfileValidationError("base_frame must be non-empty")
     if not p.tcp_frame:
         raise ProfileValidationError("tcp_frame must be non-empty")
+
+
+def _validate_workspace(p: RobotCapabilityProfile) -> None:
+    """Delegate to ``validate_workspace_model`` and then enforce the
+    ANALYTIC_DELTA -> TRANSLATION_ONLY_DELTA orientation rule. Any
+    WorkspaceModelValidationError is wrapped as a ProfileValidationError
+    so callers can catch a single exception type.
+    """
     try:
         validate_workspace_model(p.workspace)
     except WorkspaceModelValidationError as exc:
@@ -133,13 +177,27 @@ def validate_profile(p: RobotCapabilityProfile) -> None:
             "orientation_authority=TRANSLATION_ONLY_DELTA"
         )
 
-    for iface in p.ros2_control_command_interfaces:
-        if iface not in _VALID_INTERFACES:
-            raise ProfileValidationError(
-                f"unknown command interface {iface!r}; "
-                f"expected one of {_VALID_INTERFACES}"
-            )
 
+def _validate_control_interfaces(p: RobotCapabilityProfile) -> None:
+    """ros2_control command + state interface names must all be in
+    ``_VALID_INTERFACES``. Same allow-list for both directions.
+    """
+    for label, ifaces in (
+        ("command", p.ros2_control_command_interfaces),
+        ("state", p.ros2_control_state_interfaces),
+    ):
+        for iface in ifaces:
+            if iface not in _VALID_INTERFACES:
+                raise ProfileValidationError(
+                    f"unknown {label} interface {iface!r}; "
+                    f"expected one of {_VALID_INTERFACES}"
+                )
+
+
+def _validate_speed_limits(p: RobotCapabilityProfile) -> None:
+    """max_joint_speed_rad_s length must match DoF and every entry
+    must be > 0. max_tcp_speed_m_s must also be > 0.
+    """
     if len(p.max_joint_speed_rad_s) != p.dof:
         raise ProfileValidationError(
             f"max_joint_speed_rad_s length ({len(p.max_joint_speed_rad_s)}) "
@@ -149,34 +207,35 @@ def validate_profile(p: RobotCapabilityProfile) -> None:
         raise ProfileValidationError("max_joint_speed_rad_s values must be > 0")
     if p.max_tcp_speed_m_s <= 0.0:
         raise ProfileValidationError("max_tcp_speed_m_s must be > 0")
-    for iface in p.ros2_control_state_interfaces:
-        if iface not in _VALID_INTERFACES:
-            raise ProfileValidationError(
-                f"unknown state interface {iface!r}; "
-                f"expected one of {_VALID_INTERFACES}"
-            )
 
-    # Orientation authority + axis mask consistency.
+
+def _validate_orientation_authority(p: RobotCapabilityProfile) -> None:
+    """orientation_axis_mask is a (rx, ry, rz) bool triple that is
+    required if and only if orientation_authority == CUSTOM.
+    """
     if p.orientation_authority == OrientationAuthority.CUSTOM:
         if p.orientation_axis_mask is None or len(p.orientation_axis_mask) != 3:
             raise ProfileValidationError(
                 "orientation_authority=CUSTOM requires "
                 "orientation_axis_mask = (rx, ry, rz) of bools"
             )
-    else:
-        if p.orientation_axis_mask is not None:
-            raise ProfileValidationError(
-                "orientation_axis_mask is only valid with "
-                "orientation_authority=CUSTOM"
-            )
+    elif p.orientation_axis_mask is not None:
+        raise ProfileValidationError(
+            "orientation_axis_mask is only valid with "
+            "orientation_authority=CUSTOM"
+        )
 
-    # Kinematics contract self-consistency.
+
+def _validate_kinematics(p: RobotCapabilityProfile) -> None:
+    """Delegate to ``validate_contract`` for kinematics self-consistency
+    then enforce the NONE-kinematics-implies-offline-only rule.
+    Wrapping KinematicsContractError preserves the single-exception
+    contract callers expect from validate_profile.
+    """
     try:
         validate_contract(p.kinematics)
     except KinematicsContractError as exc:
         raise ProfileValidationError(f"kinematics: {exc}") from exc
-
-    # NONE kinematics is only valid for offline-export-only adapters.
     if p.kinematics.kind == KinematicsKind.NONE:
         e = p.execution
         if not e.offline_program or any(
@@ -186,8 +245,3 @@ def validate_profile(p: RobotCapabilityProfile) -> None:
                 "kinematics.kind=NONE is only valid when execution supports "
                 "exclusively offline_program (no other modes)"
             )
-
-    if not p.execution.any():
-        raise ProfileValidationError(
-            "ExecutionSupport must enable at least one mode"
-        )
