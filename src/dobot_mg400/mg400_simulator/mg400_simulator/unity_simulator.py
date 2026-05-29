@@ -32,10 +32,37 @@ ELBOW_MIN_SAFE = np.nextafter(ELBOW_ANGLE_LIMIT[0], 0.0)
 ELBOW_MAX_SAFE = np.nextafter(ELBOW_ANGLE_LIMIT[1], 0.0)
 
 class UnitySimulator(Node):
+    _MODE_BY_CHOICE = {
+        '1': 'sine',
+        '2': 'circle',
+        '3': 'random',
+        '4': 'manual',
+        '5': 'manual_step',
+        '6': 'mouse_3d',
+    }
+
     def __init__(self):
         super().__init__('unity_simulator')
-        
-        # === Terminal Input เลือกโหมด ===
+        self.mode = self._prompt_mode()
+        self._init_ros_interfaces()
+        self._init_control_state()
+
+        if self.mode in ('manual', 'manual_step'):
+            self.init_gui()
+        elif self.mode == 'mouse_3d':
+            self.init_mouse_3d_gui()
+
+        self.create_timer(1.0 / self.rate, self.publish_callback)
+        self.time = 0.0
+        self.get_logger().info('🎮 Unity Simulator Started!')
+        self.get_logger().info(f'   Mode: {self.mode}')
+
+    def _prompt_mode(self) -> str:
+        """Ask the operator which simulation mode to run at the terminal.
+
+        Falls back to ``manual_step`` on an unrecognised choice so the
+        sim never hard-fails just because of a typo.
+        """
         print("\nSelect Unity Simulator Mode:")
         print("1 = Sine wave")
         print("2 = Circle")
@@ -44,65 +71,49 @@ class UnitySimulator(Node):
         print("5 = Manual Step (Move sliders then press Send)")
         print("6 = Mouse 3D (IK with Workspace Limits) ")
         choice = input("> ")
-
-        if choice == '1':   self.mode = 'sine'
-        elif choice == '2': self.mode = 'circle'
-        elif choice == '3': self.mode = 'random'
-        elif choice == '4': self.mode = 'manual'
-        elif choice == '5': self.mode = 'manual_step'
-        elif choice == '6': self.mode = 'mouse_3d'
-        else:
+        mode = self._MODE_BY_CHOICE.get(choice)
+        if mode is None:
             print("Invalid input, defaulting to 'manual_step'")
-            self.mode = 'manual_step'
+            return 'manual_step'
+        return mode
 
-        # === Parameters ===
+    def _init_ros_interfaces(self):
+        """Declare params (publish_rate, amplitude) + the
+        ``/unity/joint_cmd`` publisher the timer streams to.
+        """
         self.declare_parameter('publish_rate', 50.0)
         self.declare_parameter('amplitude', 0.5)
-        
         self.rate = self.get_parameter('publish_rate').value
         self.amplitude = self.get_parameter('amplitude').value
-        
-        # === Publisher ===
-        self.publisher_ = self.create_publisher(
-            JointState,
-            '/unity/joint_cmd',
-            10
-        )
+        self.publisher_ = self.create_publisher(JointState, '/unity/joint_cmd', 10)
 
-        # === GUI Setup ===
+    def _init_control_state(self):
+        """Initialise GUI handles, mouse-drag state, the direct
+        per-joint angles for mouse_3d mode, and the keyboard-repeat
+        bookkeeping. All modes share this state block; only the GUI
+        builders wire the widgets that read it.
+        """
+        # GUI handles
         self.tk_root = None
         self.sliders = []
         self.trigger_send = False
-        
+
         # Mouse control variables
         self.mouse_active = False
         self.last_mouse_x = 0
         self.last_mouse_y = 0
-        
-        # Direct joint control for mode 6
-        self.j1_angle = 0.0  # Direct control of J1 (from mouse X)
-        self.j2_angle = 0.0  # Direct control of J2 (from mouse Y) (Centered)
-        self.j3_angle = 0.0  # Direct control of J3 (from keyboard)
-        self.j4_angle = 0.0  # Direct control of J4 (from keyboard)
-        
-        self.keyboard_step = 1.0     # 1 degree per step
-        self.key_last_seen = {}      # Timestamp of last press event
-        self.key_active_start = {}   # Timestamp when key sequence started
-        self.last_update_time = 0    # For repeat rate control
-        
-        if self.mode in ['manual', 'manual_step']:
-            self.init_gui()
-        elif self.mode == 'mouse_3d':
-            self.init_mouse_3d_gui()
 
-        # === Timer ===
-        self.create_timer(1.0 / self.rate, self.publish_callback)
-        
-        # === State ===
-        self.time = 0.0
-        
-        self.get_logger().info('🎮 Unity Simulator Started!')
-        self.get_logger().info(f'   Mode: {self.mode}')
+        # Direct joint control for mode 6 (mouse_3d)
+        self.j1_angle = 0.0  # from mouse X
+        self.j2_angle = 0.0  # from mouse Y (centered)
+        self.j3_angle = 0.0  # from keyboard
+        self.j4_angle = 0.0  # from keyboard
+
+        # Keyboard repeat control
+        self.keyboard_step = 1.0     # degrees per step
+        self.key_last_seen = {}      # last press-event timestamp
+        self.key_active_start = {}   # timestamp the key sequence began
+        self.last_update_time = 0    # repeat-rate gate
 
     def init_gui(self):
         """สร้างหน้าต่าง Slider"""
