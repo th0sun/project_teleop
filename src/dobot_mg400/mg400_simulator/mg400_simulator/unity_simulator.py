@@ -170,86 +170,110 @@ class UnitySimulator(Node):
         self.tk_root.after(30, self.gui_update_loop)
     
     def init_mouse_3d_gui(self):
-        """Initialize Direct Joint Control GUI"""
+        """Initialize Direct Joint Control GUI (mode 6).
+
+        Window + bindings, then a left canvas (mouse-driven J1/J2
+        workspace) and a right control panel (joint readout, limits,
+        keyboard help, Reset/Home buttons).
+        """
+        self._build_mouse_3d_window()
+        main_frame = tk.Frame(self.tk_root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self._build_mouse_3d_canvas(main_frame)
+        self._build_mouse_3d_control_panel(main_frame)
+        self.update_joint_display()
+
+    def _build_mouse_3d_window(self):
+        """Create the Tk root, bind keyboard J3/J4 handlers, and force
+        the window on top + focused so mouse/keyboard capture works
+        without an extra click.
+        """
         self.tk_root = tk.Tk()
         self.tk_root.title("🎮 Direct Joint Control - Mouse + Keyboard")
         self.tk_root.geometry("900x650")
-        
-        # Bind keyboard events for J3, J4 control
         self.tk_root.bind('<KeyPress>', self.on_key_press)
         self.tk_root.bind('<KeyRelease>', self.on_key_release)
-        
-        # Make window stay on top and force focus
         self.tk_root.lift()
         self.tk_root.attributes('-topmost', True)
         self.tk_root.after(100, lambda: self.tk_root.attributes('-topmost', False))
         self.tk_root.focus_force()
-        
-        main_frame = tk.Frame(self.tk_root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Canvas for joint visualization
-        canvas_frame = tk.LabelFrame(main_frame, text="Joint Control Workspace", font=("Arial", 11, "bold"))
+
+    def _build_mouse_3d_canvas(self, main_frame):
+        """Left pane: the 550x550 workspace canvas bound to mouse
+        motion/enter/leave for J1 (X) and J2 (Y) control.
+        """
+        canvas_frame = tk.LabelFrame(
+            main_frame, text="Joint Control Workspace", font=("Arial", 11, "bold")
+        )
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
-        
-        self.canvas = tk.Canvas(canvas_frame, width=550, height=550, bg="white", highlightthickness=1)
+        self.canvas = tk.Canvas(
+            canvas_frame, width=550, height=550, bg="white", highlightthickness=1
+        )
         self.canvas.pack(padx=10, pady=10)
-        
-        # Bind mouse events for J1/J2 control
         self.canvas.bind("<Motion>", self.on_mouse_move)
         self.canvas.bind("<Enter>", self.on_mouse_enter)
         self.canvas.bind("<Leave>", self.on_mouse_leave)
-        
         self.draw_joint_workspace()
-        
-        # Control Panel
+
+    def _build_mouse_3d_control_panel(self, main_frame):
+        """Right pane: live joint-angle readout, static joint-limit
+        table, keyboard-state label, Reset/Home buttons, and the
+        controls cheat-sheet.
+        """
         control_frame = tk.Frame(main_frame)
         control_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
-        
-        # Joint Angles Display
-        joint_frame = tk.LabelFrame(control_frame, text="Joint Angles (Degrees)", font=("Arial", 10, "bold"))
+
+        joint_frame = tk.LabelFrame(
+            control_frame, text="Joint Angles (Degrees)", font=("Arial", 10, "bold")
+        )
         joint_frame.pack(fill=tk.X, pady=5)
-        
-        self.joint_label = tk.Label(joint_frame, text="J1: 0.0°\nJ2: 45.0°\nJ3: 0.0°\nJ4: 0.0°",
-                                     font=("Courier", 12, "bold"), justify="left")
+        self.joint_label = tk.Label(
+            joint_frame, text="J1: 0.0°\nJ2: 45.0°\nJ3: 0.0°\nJ4: 0.0°",
+            font=("Courier", 12, "bold"), justify="left",
+        )
         self.joint_label.pack(padx=10, pady=10)
-        
-        # Joint Limits Info
-        limits_frame = tk.LabelFrame(control_frame, text="Joint Limits", font=("Arial", 9, "bold"))
+
+        limits_frame = tk.LabelFrame(
+            control_frame, text="Joint Limits", font=("Arial", 9, "bold")
+        )
         limits_frame.pack(fill=tk.X, pady=5)
-        
-        limits_text = f"J1: {JOINT_LIMITS[0][0]}° to {JOINT_LIMITS[0][1]}°\n"
-        limits_text += f"J2: {JOINT_LIMITS[1][0]}° to {JOINT_LIMITS[1][1]}°\n"
-        limits_text += f"J3: {JOINT_LIMITS[2][0]}° to {JOINT_LIMITS[2][1]}°\n"
-        limits_text += f"J4: {JOINT_LIMITS[3][0]}° to {JOINT_LIMITS[3][1]}°"
-        
-        tk.Label(limits_frame, text=limits_text, font=("Courier", 7), justify="left", fg="gray").pack(padx=5, pady=5)
-        
-        # Keyboard State Display
-        keyboard_frame = tk.LabelFrame(control_frame, text="Keyboard Control", font=("Arial", 10, "bold"))
+        limits_text = "\n".join(
+            f"J{i + 1}: {lo}° to {hi}°" for i, (lo, hi) in enumerate(JOINT_LIMITS)
+        )
+        tk.Label(
+            limits_frame, text=limits_text, font=("Courier", 7),
+            justify="left", fg="gray",
+        ).pack(padx=5, pady=5)
+
+        keyboard_frame = tk.LabelFrame(
+            control_frame, text="Keyboard Control", font=("Arial", 10, "bold")
+        )
         keyboard_frame.pack(fill=tk.X, pady=5)
-        
-        self.keyboard_label = tk.Label(keyboard_frame, text="W/S: J3 | A/D: J4\nNo keys pressed", 
-                                       font=("Courier", 9), justify="left")
+        self.keyboard_label = tk.Label(
+            keyboard_frame, text="W/S: J3 | A/D: J4\nNo keys pressed",
+            font=("Courier", 9), justify="left",
+        )
         self.keyboard_label.pack(padx=10, pady=5)
-        
-        # Buttons
+
         btn_frame = tk.Frame(control_frame)
         btn_frame.pack(fill=tk.X, pady=10)
-        
-        tk.Button(btn_frame, text="Reset", command=self.reset_joints, bg="#f44336", fg="white").pack(fill=tk.X, pady=2)
-        tk.Button(btn_frame, text="Home", command=self.home_joints, bg="#4CAF50", fg="white").pack(fill=tk.X, pady=2)
-       
-         # Instructions
-        inst_text = "\nControls:\n"
-        inst_text += "• Move mouse: J1 (X) & J2 (Y)\n"
-        inst_text += "• W/S keys: J3 ±0.5°\n"
-        inst_text += "• A/D keys: J4 ±0.5°\n"
-        inst_text += "• Hold keys for continuous\n"
-        
-        tk.Label(control_frame, text=inst_text, font=("Arial", 8), justify="left", fg="gray").pack(pady=10)
-        
-        self.update_joint_display()
+        tk.Button(
+            btn_frame, text="Reset", command=self.reset_joints, bg="#f44336", fg="white"
+        ).pack(fill=tk.X, pady=2)
+        tk.Button(
+            btn_frame, text="Home", command=self.home_joints, bg="#4CAF50", fg="white"
+        ).pack(fill=tk.X, pady=2)
+
+        inst_text = (
+            "\nControls:\n"
+            "• Move mouse: J1 (X) & J2 (Y)\n"
+            "• W/S keys: J3 ±0.5°\n"
+            "• A/D keys: J4 ±0.5°\n"
+            "• Hold keys for continuous\n"
+        )
+        tk.Label(
+            control_frame, text=inst_text, font=("Arial", 8), justify="left", fg="gray"
+        ).pack(pady=10)
     
     def draw_joint_workspace(self):
         """Draw simplified workspace for joint visualization"""
