@@ -463,57 +463,60 @@ class UnitySimulator(Node):
     
 
     
+    # MG400 link geometry (mm), expressed in the arm's vertical plane.
+    _FK_BASE_HEIGHT = 109.0
+    _FK_LINK1 = np.array([43.0, 0.0, 115.0])
+    _FK_LINK2 = np.array([0.0, 0.0, 175.0])
+    _FK_LINK3 = np.array([175.0, 0.0, 0.0])
+    _FK_LINK4 = np.array([66.0, 0.0, -57.0])
+
+    @staticmethod
+    def _rotate_xz(link, angle):
+        """Rotate a link vector by ``angle`` about the Y axis (the
+        arm's pitch plane). Y component is untouched.
+        """
+        c, s = np.cos(angle), np.sin(angle)
+        return np.array([
+            link[0] * c + link[2] * s,
+            link[1],
+            -link[0] * s + link[2] * c,
+        ])
+
+    @staticmethod
+    def _rotate_z(pos, angle):
+        """Rotate a 3D point by ``angle`` about the Z axis (base yaw)."""
+        c, s = np.cos(angle), np.sin(angle)
+        return np.array([
+            pos[0] * c - pos[1] * s,
+            pos[0] * s + pos[1] * c,
+            pos[2],
+        ])
+
     def calculate_fk(self, q):
-        """Forward Kinematics for MG400"""
-        BASE_HEIGHT = 109.0
-        LINK1 = np.array([43.0, 0.0, 115.0])
-        LINK2 = np.array([0.0, 0.0, 175.0])
-        LINK3 = np.array([175.0, 0.0, 0.0])
-        LINK4 = np.array([66.0, 0.0, -57.0])
-        
-        j1, j2, j3, j4 = q
-        
-        j1_pos = np.array([0, 0, BASE_HEIGHT])
-        j2_local = LINK1.copy()
-        j2_pos = j1_pos + j2_local
-        
-        link2_rotated = np.array([
-            LINK2[0] * np.cos(j2) + LINK2[2] * np.sin(j2),
-            LINK2[1],
-            -LINK2[0] * np.sin(j2) + LINK2[2] * np.cos(j2)
-        ])
-        j3_pos = j2_pos + link2_rotated
-        
+        """Forward Kinematics for MG400 — returns joint-chain points
+        ``[j1_pos, j2_pos, j3_pos, ee_pos]`` in base frame (mm).
+
+        Builds the chain in the pitch plane (J2 + J2/J3 combined),
+        then yaws the whole chain about Z by J1.
+        """
+        j1, j2, j3, _j4 = q
         combined_angle = j2 + j3
-        link3_rotated = np.array([
-            LINK3[0] * np.cos(combined_angle) + LINK3[2] * np.sin(combined_angle),
-            LINK3[1],
-            -LINK3[0] * np.sin(combined_angle) + LINK3[2] * np.cos(combined_angle)
-        ])
-        
-        link4_rotated = np.array([
-            LINK4[0] * np.cos(combined_angle) + LINK4[2] * np.sin(combined_angle),
-            LINK4[1],
-            -LINK4[0] * np.sin(combined_angle) + LINK4[2] * np.cos(combined_angle)
-        ])
-        
-        ee_pos = j3_pos + link3_rotated + link4_rotated
-        
-        cos_j1 = np.cos(j1)
-        sin_j1 = np.sin(j1)
-        
-        def rotate_z(pos):
-            return np.array([
-                pos[0] * cos_j1 - pos[1] * sin_j1,
-                pos[0] * sin_j1 + pos[1] * cos_j1,
-                pos[2]
-            ])
-        
-        j2_pos = rotate_z(j2_pos)
-        j3_pos = rotate_z(j3_pos)
-        ee_pos = rotate_z(ee_pos)
-        
-        return [j1_pos, j2_pos, j3_pos, ee_pos]
+
+        j1_pos = np.array([0.0, 0.0, self._FK_BASE_HEIGHT])
+        j2_pos = j1_pos + self._FK_LINK1
+        j3_pos = j2_pos + self._rotate_xz(self._FK_LINK2, j2)
+        ee_pos = (
+            j3_pos
+            + self._rotate_xz(self._FK_LINK3, combined_angle)
+            + self._rotate_xz(self._FK_LINK4, combined_angle)
+        )
+
+        return [
+            j1_pos,
+            self._rotate_z(j2_pos, j1),
+            self._rotate_z(j3_pos, j1),
+            self._rotate_z(ee_pos, j1),
+        ]
     
     def update_distance_display(self, q):
         """Update coordinate labels"""
